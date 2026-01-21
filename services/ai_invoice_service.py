@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = os.getenv("OPENAI_CHAT_MODEL", os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini"))
 MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "500"))
-PDF_TEXT_THRESHOLD = int(os.getenv("PDF_TEXT_THRESHOLD", "50"))
+PDF_TEXT_THRESHOLD = int(os.getenv("PDF_TEXT_THRESHOLD", "100"))
 PDF_OCR_ZOOM = float(os.getenv("PDF_OCR_ZOOM", "2.0"))
 _client: Optional[OpenAI] = None
 _ocr_reader = None
@@ -164,6 +164,13 @@ def _has_vat_exemption_indicators(text: str) -> bool:
         "iva incl",
     ]
     return any(keyword in lowered for keyword in keywords)
+
+
+def _is_text_significant(text: str, min_chars: int = 100) -> bool:
+    if not text:
+        return False
+    useful_chars = sum(1 for char in text if char.isalnum())
+    return useful_chars >= min_chars
 
 
 def _extract_pdf_text(file_path: str) -> str:
@@ -316,15 +323,16 @@ def analyze_invoice(
     if is_pdf:
         extracted_text = _extract_pdf_text_from_bytes(file_bytes)
         text_length = len(extracted_text.strip())
-        is_scanned = text_length < PDF_TEXT_THRESHOLD
+        is_significant = _is_text_significant(extracted_text, PDF_TEXT_THRESHOLD)
+        is_scanned = not is_significant
         ocr_text = ""
         if is_scanned:
             ocr_text = _extract_pdf_text_ocr_from_bytes(file_bytes)
-            if ocr_text:
-                extracted_text = ocr_text
+            extracted_text = ocr_text
             used_ocr = True
         logger.info("PDF tratado como escaneado (%s): %s", filename, is_scanned)
         logger.info("Longitud texto extraido (%s): %s", filename, text_length)
+        logger.info("Texto significativo (%s): %s", filename, is_significant)
         logger.info("Longitud texto OCR (%s): %s", filename, len(ocr_text.strip()))
         logger.info("Texto PDF extraido (%s):\n%s", filename, extracted_text)
     elif is_image:
