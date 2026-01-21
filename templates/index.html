@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lector de Facturas</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-title">Lector de Facturas</span>
+        <span class="brand-subtitle">Panel contable-fiscal</span>
+      </div>
+      <nav class="sidebar-nav">
+        <button class="nav-link active" data-section="dashboard" type="button">Dashboard</button>
+        <button class="nav-link" data-section="invoices" type="button">Facturas</button>
+        <button class="nav-link" data-section="expenses" type="button">Gastos (sin factura)</button>
+        <button class="nav-link" data-section="income" type="button">Ingresos</button>
+        <button class="nav-link" data-section="taxes" type="button">Modelos de impuestos</button>
+        <button class="nav-link" data-section="pnl" type="button">Pérdidas y Ganancias</button>
+      </nav>
+    </aside>
+
+    <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="title-block">
+          <button class="hamburger" id="sidebarToggle" type="button" aria-label="Mostrar menú">☰</button>
+          <div>
+            <p class="tag">Panel fiscal</p>
+            <h1>Control contable</h1>
+            <p class="subtitle">Visión global de ingresos, gastos e impuestos con IA.</p>
+          </div>
+        </div>
+        <div class="filters">
+          <div class="field">
+            <label for="monthSelect">Mes</label>
+            <select id="monthSelect"></select>
+          </div>
+          <div class="field">
+            <label for="yearSelect">Año</label>
+            <select id="yearSelect"></select>
+          </div>
+          <div class="field">
+            <label for="periodSelect">Periodo</label>
+            <select id="periodSelect">
+              <option value="monthly">Mensual</option>
+              <option value="quarterly">Trimestral</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="taxpayerSelect">Tipo de contribuyente</label>
+            <select id="taxpayerSelect">
+              <option value="autonomo">Autónomo (IRPF)</option>
+              <option value="sociedad">Sociedad (IS)</option>
+            </select>
+          </div>
+        </div>
+      </header>
+
+      <div class="global-processing" id="globalProcessing" role="status" aria-live="polite">
+        <span class="spinner"></span>
+        <span id="globalProcessingText">Procesando factura… Puede tardar hasta 2 minutos.</span>
+      </div>
+
+      <section class="page-section active" data-section="dashboard">
+        <section class="panel summary-panel">
+          <div class="summary-item highlight">
+            <h3>Total gastado</h3>
+            <p id="totalSpent">0,00 €</p>
+          </div>
+          <div class="summary-item">
+            <h3>IVA 0%</h3>
+            <p id="vat0">0,00 €</p>
+          </div>
+          <div class="summary-item">
+            <h3>IVA 4%</h3>
+            <p id="vat4">0,00 €</p>
+          </div>
+          <div class="summary-item">
+            <h3>IVA 10%</h3>
+            <p id="vat10">0,00 €</p>
+          </div>
+          <div class="summary-item">
+            <h3>IVA 21%</h3>
+            <p id="vat21">0,00 €</p>
+          </div>
+          <div class="summary-item total">
+            <h3>Total IVA deducible</h3>
+            <p id="vatTotal">0,00 €</p>
+          </div>
+        </section>
+
+        <section class="grid dashboard-grid">
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Evolución de gastos</h2>
+              <p>Seguimiento del gasto en el periodo seleccionado.</p>
+            </div>
+            <div class="chart-wrapper">
+              <canvas id="lineChart"></canvas>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Evolución de facturación</h2>
+              <p>Base facturada consolidada por periodo.</p>
+            </div>
+            <div class="chart-wrapper">
+              <canvas id="billingLineChart"></canvas>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Distribución por proveedor</h2>
+              <p>Porcentaje del gasto total por proveedor.</p>
+            </div>
+            <div class="chart-wrapper">
+              <canvas id="pieChart"></canvas>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Resultado neto</h2>
+              <p>Ingresos menos gastos deducibles.</p>
+            </div>
+            <div class="chart-wrapper">
+              <canvas id="netChart"></canvas>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section class="page-section" data-section="invoices">
+        <section class="panel upload-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Subir facturas</h2>
+              <p>Arrastra archivos o selecciona una carpeta completa. Añade los datos antes de guardar.</p>
+            </div>
+            <button id="uploadBtn" class="button primary">Guardar facturas</button>
+          </div>
+          <div class="upload-area" id="dropZone">
+            <div class="upload-copy">
+              <h3>Arrastra y suelta</h3>
+              <p>Formatos permitidos: PDF, JPG, PNG.</p>
+            </div>
+            <div class="upload-actions">
+              <button type="button" id="selectFiles" class="button ghost">Seleccionar archivos</button>
+              <button type="button" id="selectFolder" class="button ghost">Seleccionar carpeta</button>
+              <input type="file" id="fileInput" accept=".pdf,.jpg,.jpeg,.png" multiple />
+              <input type="file" id="folderInput" accept=".pdf,.jpg,.jpeg,.png" webkitdirectory directory multiple />
+            </div>
+          </div>
+
+          <div class="upload-table-wrapper">
+            <table id="uploadTable">
+              <thead>
+                <tr>
+                  <th>Archivo</th>
+                  <th>Fecha</th>
+                  <th>Proveedor</th>
+                  <th>Base imponible</th>
+                  <th>IVA</th>
+                  <th>IVA (€)</th>
+                  <th>Total (€)</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+            <p class="empty" id="emptyMessage">No hay archivos pendientes.</p>
+          </div>
+        </section>
+
+        <section class="panel invoices-panel">
+          <div class="panel-header">
+            <h2>Facturas guardadas</h2>
+          </div>
+          <div class="billing-table">
+            <table id="invoicesTable">
+              <thead>
+                <tr>
+                  <th>Fecha</th>
+                  <th>Proveedor</th>
+                  <th>Base (€)</th>
+                  <th>IVA</th>
+                  <th>IVA (€)</th>
+                  <th>Total (€)</th>
+                  <th>Tipo de gasto</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <p class="empty" id="invoicesEmpty">No hay facturas para este período.</p>
+        </section>
+      </section>
+
+      <section class="page-section" data-section="expenses">
+        <section class="panel no-invoice-panel">
+          <div class="panel-header">
+            <h2>Gastos sin factura</h2>
+            <p>Registra gastos deducibles o no deducibles sin documento fiscal.</p>
+          </div>
+          <div class="billing-form">
+            <div class="field">
+              <label for="noInvoiceDate">Fecha</label>
+              <input type="date" id="noInvoiceDate" />
+            </div>
+            <div class="field">
+              <label for="noInvoiceConcept">Concepto</label>
+              <input type="text" id="noInvoiceConcept" placeholder="Ej. Nómina marzo" />
+            </div>
+            <div class="field">
+              <label for="noInvoiceAmount">Importe (€)</label>
+              <input type="number" id="noInvoiceAmount" min="0" step="0.01" placeholder="0,00" />
+            </div>
+            <div class="field">
+              <label for="noInvoiceType">Tipo</label>
+              <select id="noInvoiceType">
+                <option value="nomina">Nómina</option>
+                <option value="seguridad_social">Seguridad Social</option>
+                <option value="amortizacion">Amortización</option>
+                <option value="kilometraje">Kilometraje</option>
+                <option value="otro">Otro</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="noInvoiceDeductible">Deducible</label>
+              <select id="noInvoiceDeductible">
+                <option value="true">Sí</option>
+                <option value="false">No</option>
+              </select>
+            </div>
+            <button id="noInvoiceSaveBtn" class="button primary">Guardar</button>
+          </div>
+          <div class="billing-entries">
+            <h3>Entradas del periodo</h3>
+            <div class="billing-table">
+              <table id="noInvoiceTable">
+                <thead>
+                  <tr>
+                    <th>Fecha</th>
+                    <th>Concepto</th>
+                    <th>Importe (€)</th>
+                    <th>Tipo</th>
+                    <th>Deducible</th>
+                    <th>Acciones</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <p class="empty" id="noInvoiceEmpty">No hay gastos sin factura en este período.</p>
+          </div>
+        </section>
+      </section>
+
+      <section class="page-section" data-section="income">
+        <section class="panel billing-panel">
+          <div class="panel-header">
+            <h2>Ingresos</h2>
+            <p>Introduce facturación manual por tipo de IVA.</p>
+          </div>
+          <div class="billing-form">
+            <div class="field">
+              <label for="billingMonthSelect">Mes de facturación</label>
+              <select id="billingMonthSelect"></select>
+            </div>
+            <div class="field">
+              <label for="billingYearSelect">Año de facturación</label>
+              <select id="billingYearSelect"></select>
+            </div>
+            <div class="field">
+              <label for="billingBaseInput">Base facturada (€)</label>
+              <input type="number" id="billingBaseInput" min="0" step="0.01" placeholder="0,00" />
+            </div>
+            <div class="field">
+              <label for="billingVatSelect">Tipo de IVA</label>
+              <select id="billingVatSelect">
+                <option value="0">0%</option>
+                <option value="4">4%</option>
+                <option value="10">10%</option>
+                <option value="21">21%</option>
+              </select>
+            </div>
+            <button id="billingSaveBtn" class="button primary">Guardar</button>
+          </div>
+          <div class="billing-entries">
+            <h3>Entradas del periodo</h3>
+            <div class="billing-table">
+              <table id="billingEntriesTable">
+                <thead>
+                  <tr>
+                    <th class="period-month">Mes</th>
+                    <th>Base facturada (€)</th>
+                    <th>Tipo de IVA</th>
+                    <th>IVA repercutido (€)</th>
+                    <th>Acciones</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <p class="empty" id="billingEntriesEmpty">No hay entradas de facturación.</p>
+          </div>
+        </section>
+      </section>
+
+      <section class="page-section" data-section="taxes">
+        <section class="panel billing-summary-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Resumen de IVA</h2>
+              <p>Datos consolidados del periodo seleccionado.</p>
+            </div>
+            <span class="period-badge" id="taxPeriodBadge"></span>
+          </div>
+          <div class="billing-table">
+            <table id="billingTable">
+              <thead>
+                <tr>
+                  <th>IVA</th>
+                  <th>Total facturado (€)</th>
+                  <th>IVA repercutido (€)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>IVA 0%</td>
+                  <td id="billingBase0">0,00 €</td>
+                  <td id="billingVat0">0,00 €</td>
+                </tr>
+                <tr>
+                  <td>IVA 4%</td>
+                  <td id="billingBase4">0,00 €</td>
+                  <td id="billingVat4">0,00 €</td>
+                </tr>
+                <tr>
+                  <td>IVA 10%</td>
+                  <td id="billingBase10">0,00 €</td>
+                  <td id="billingVat10">0,00 €</td>
+                </tr>
+                <tr>
+                  <td>IVA 21%</td>
+                  <td id="billingBase21">0,00 €</td>
+                  <td id="billingVat21">0,00 €</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="vat-result">
+            <div class="vat-card">
+              <h3>Total IVA repercutido</h3>
+              <p id="vatOutputTotal">0,00 €</p>
+            </div>
+            <div class="vat-card">
+              <h3>Total IVA soportado</h3>
+              <p id="vatInputTotal">0,00 €</p>
+            </div>
+            <div class="vat-card result">
+              <h3 id="vatResultLabel">IVA A PAGAR</h3>
+              <p id="vatResultValue">0,00 €</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel tax-panel" data-tax-module="irpf">
+          <div class="panel-header">
+            <h2>Resumen IRPF (anual)</h2>
+            <p>Resultado anual estimado, independiente del mes o trimestre seleccionado.</p>
+          </div>
+          <div class="vat-result">
+            <div class="vat-card">
+              <h3>Ingresos base anuales</h3>
+              <p id="irpfIncome">0,00 €</p>
+            </div>
+            <div class="vat-card">
+              <h3>Gastos deducibles anuales</h3>
+              <p id="irpfExpenses">0,00 €</p>
+            </div>
+            <div class="vat-card result">
+              <h3>Rendimiento neto anual estimado</h3>
+              <p id="irpfNet">0,00 €</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel tax-panel" data-tax-module="is">
+          <div class="panel-header">
+            <h2>Resumen Impuesto de Sociedades (anual)</h2>
+            <p>Resultado anual estimado con tipo general del 25%.</p>
+          </div>
+          <div class="vat-result">
+            <div class="vat-card">
+              <h3>Ingresos base anuales</h3>
+              <p id="isIncome">0,00 €</p>
+            </div>
+            <div class="vat-card">
+              <h3>Gastos deducibles anuales</h3>
+              <p id="isExpenses">0,00 €</p>
+            </div>
+            <div class="vat-card result">
+              <h3>Resultado anual estimado</h3>
+              <p id="isResult">0,00 €</p>
+            </div>
+            <div class="vat-card">
+              <h3>Base imponible anual estimada</h3>
+              <p id="isBase">0,00 €</p>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section class="page-section" data-section="pnl">
+        <section class="panel pnl-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Pérdidas y Ganancias</h2>
+              <p>Cuenta de resultados estimada para el periodo seleccionado.</p>
+            </div>
+            <button id="exportPnlBtn" class="button primary">Exportar PDF</button>
+          </div>
+
+          <div class="pnl-form">
+            <div class="field">
+              <label for="pnlName">Nombre / Razón social</label>
+              <input type="text" id="pnlName" placeholder="Ej. Consultoría Norte SL" />
+            </div>
+            <div class="field">
+              <label for="pnlTaxId">CIF / NIF</label>
+              <input type="text" id="pnlTaxId" placeholder="Ej. B12345678" />
+            </div>
+          </div>
+
+          <div class="billing-table">
+            <table id="pnlTable">
+              <thead>
+                <tr>
+                  <th>Concepto</th>
+                  <th>Importe (€)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Ingresos</td>
+                  <td id="pnlIncome">0,00 €</td>
+                </tr>
+                <tr>
+                  <td>Gastos deducibles</td>
+                  <td id="pnlExpenses">0,00 €</td>
+                </tr>
+                <tr>
+                  <td>Resultado antes de impuestos</td>
+                  <td id="pnlPreTax">0,00 €</td>
+                </tr>
+                <tr>
+                  <td>Impuestos estimados</td>
+                  <td id="pnlTaxes">0,00 €</td>
+                </tr>
+                <tr>
+                  <td><strong>Resultado neto</strong></td>
+                  <td id="pnlNet">0,00 €</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="pnl-note">Los importes son estimativos y no sustituyen el asesoramiento fiscal.</p>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <script src="{{ url_for('static', filename='js/chart.min.js') }}"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
