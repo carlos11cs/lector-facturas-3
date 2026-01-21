@@ -1,7 +1,8 @@
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    EASYOCR_MODEL_STORAGE_DIRECTORY=/opt/easyocr-models
 
 WORKDIR /app
 
@@ -14,7 +15,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+
+RUN pip install --no-cache-dir --upgrade pip \
+  && pip install --no-cache-dir torch==2.2.2+cpu torchvision==0.17.2+cpu \
+     --index-url https://download.pytorch.org/whl/cpu \
+  && pip install --no-cache-dir -r requirements.txt
+
+RUN mkdir -p "$EASYOCR_MODEL_STORAGE_DIRECTORY" \
+  && python - <<'PY'
+import easyocr
+import os
+os.environ["EASYOCR_MODEL_STORAGE_DIRECTORY"] = os.getenv("EASYOCR_MODEL_STORAGE_DIRECTORY", "/opt/easyocr-models")
+# Preload models at build time so runtime doesn't download.
+easyocr.Reader(["es", "en"], gpu=False)
+PY
 
 COPY . .
 
