@@ -29,7 +29,10 @@ DB_PATH = os.path.join(BASE_DIR, "data.db")
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png"}
 ANALYSIS_TIMEOUT_SECONDS = int(os.getenv("ANALYSIS_TIMEOUT_SECONDS", "120"))
 
-DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DB_PATH}")
+_raw_db_url = os.getenv("DATABASE_URL")
+DATABASE_URL = _raw_db_url.strip() if _raw_db_url else ""
+if not DATABASE_URL:
+    DATABASE_URL = f"sqlite:///{DB_PATH}"
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 if DATABASE_URL.startswith("sqlite"):
