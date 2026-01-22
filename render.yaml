@@ -24,3 +24,5 @@ services:
         sync: false
       - key: ANALYSIS_TIMEOUT_SECONDS
         value: "120"
+      - key: EASYOCR_MODEL_STORAGE_DIRECTORY
+        value: "/opt/easyocr-models"
