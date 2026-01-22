@@ -198,7 +198,17 @@ def _get_ocr_reader():
     except ImportError as exc:
         logger.warning("EasyOCR no disponible: %s", exc)
         return None
-    _ocr_reader = easyocr.Reader(["es", "en"], gpu=False)
+    model_dir = os.getenv("EASYOCR_MODEL_STORAGE_DIRECTORY")
+    try:
+        _ocr_reader = easyocr.Reader(
+            ["es", "en"],
+            gpu=False,
+            model_storage_directory=model_dir,
+            download_enabled=False,
+        )
+    except Exception as exc:
+        logger.warning("Error inicializando EasyOCR (model_dir=%s): %s", model_dir, exc)
+        return None
     return _ocr_reader
 
 

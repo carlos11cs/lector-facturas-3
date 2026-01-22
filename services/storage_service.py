@@ -1,5 +1,6 @@
 import logging
 import os
+import tempfile
 from typing import Optional
 
 import boto3
@@ -8,6 +9,17 @@ from botocore.config import Config
 logger = logging.getLogger(__name__)
 
 _client = None
+
+
+def _has_bucket() -> bool:
+    bucket = os.getenv("STORAGE_BUCKET")
+    return bool(bucket and bucket.strip())
+
+
+def _local_storage_dir() -> str:
+    base_dir = os.getenv("UPLOAD_FOLDER") or os.path.join(tempfile.gettempdir(), "uploads")
+    os.makedirs(base_dir, exist_ok=True)
+    return base_dir
 
 
 def _get_client():
@@ -45,17 +57,22 @@ def _build_public_url(bucket: str, key: str) -> str:
 
 
 def get_public_url(key: str) -> str:
+    if not _has_bucket():
+        return os.path.join(_local_storage_dir(), key)
+
     bucket = os.getenv("STORAGE_BUCKET")
-    if not bucket:
-        raise RuntimeError("STORAGE_BUCKET no configurado")
     return _build_public_url(bucket, key)
 
 
 def upload_bytes(data: bytes, key: str, content_type: Optional[str] = None) -> str:
-    bucket = os.getenv("STORAGE_BUCKET")
-    if not bucket:
-        raise RuntimeError("STORAGE_BUCKET no configurado")
+    if not _has_bucket():
+        local_path = os.path.join(_local_storage_dir(), key)
+        with open(local_path, "wb") as handle:
+            handle.write(data)
+        logger.info("Archivo guardado en almacenamiento local: %s", local_path)
+        return local_path
 
+    bucket = os.getenv("STORAGE_BUCKET")
     client = _get_client()
     extra_args = {}
     if content_type:
