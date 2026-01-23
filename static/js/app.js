@@ -13,6 +13,8 @@ let currentBillingSummary = null;
 let currentDeductibleExpenses = 0;
 let annualBillingBaseTotal = 0;
 let annualDeductibleExpenses = 0;
+let currentPayments = null;
+let selectedPaymentDay = null;
 
 const monthNames = [
   "Enero",
@@ -46,6 +48,26 @@ const noInvoiceTypeLabels = {
 function formatCurrency(value) {
   const number = Number(value || 0);
   return `${number.toFixed(2).replace(".", ",")} €`;
+}
+
+function formatMonthYear(month, year) {
+  const name = monthNames[month - 1] || "";
+  return `${name} ${year}`;
+}
+
+function computePaymentDate(invoiceDate, paymentDate) {
+  if (paymentDate) {
+    return paymentDate;
+  }
+  if (!invoiceDate) {
+    return "";
+  }
+  const base = new Date(`${invoiceDate}T00:00:00`);
+  if (Number.isNaN(base.getTime())) {
+    return "";
+  }
+  base.setDate(base.getDate() + 30);
+  return base.toISOString().slice(0, 10);
 }
 
 const allowedExtensions = new Set([".pdf", ".jpg", ".jpeg", ".png"]);
@@ -87,6 +109,11 @@ const pnlName = document.getElementById("pnlName");
 const pnlTaxId = document.getElementById("pnlTaxId");
 const globalProcessing = document.getElementById("globalProcessing");
 const globalProcessingText = document.getElementById("globalProcessingText");
+const paymentCalendar = document.getElementById("paymentCalendar");
+const paymentCalendarTitle = document.getElementById("paymentCalendarTitle");
+const paymentDayTitle = document.getElementById("paymentDayTitle");
+const paymentDayList = document.getElementById("paymentDayList");
+const paymentDayTotal = document.getElementById("paymentDayTotal");
 
 function isAllowedFile(fileName) {
   const lower = fileName.toLowerCase();
@@ -310,6 +337,7 @@ function addFiles(fileList) {
       originalFilename: file.name,
       storedFilename: "",
       date: new Date().toISOString().slice(0, 10),
+      paymentDate: "",
       supplier: "",
       base: "",
       vat: "21",
@@ -554,6 +582,9 @@ function analyzeInvoiceForItem(item) {
       if (!item.touched.date && extracted.invoice_date) {
         item.date = extracted.invoice_date;
       }
+      if (!item.paymentDate) {
+        item.paymentDate = computePaymentDate(item.date, extracted.payment_date);
+      }
       if (!item.touched.base && extracted.base_amount !== null && extracted.base_amount !== undefined) {
         item.base = String(extracted.base_amount);
       }
@@ -613,6 +644,7 @@ function uploadPending() {
       storedFilename: item.storedFilename,
       originalFilename: item.originalFilename,
       date: item.date,
+      paymentDate: computePaymentDate(item.date, item.paymentDate),
       supplier: item.supplier.trim(),
       base: item.base,
       vat: item.vat,
@@ -1130,6 +1162,113 @@ function updateBillingSummary(data) {
   updateTaxSummary();
 }
 
+function renderPaymentCalendar(month, year, data) {
+  if (!paymentCalendar) {
+    return;
+  }
+  paymentCalendar.innerHTML = "";
+  if (paymentCalendarTitle) {
+    paymentCalendarTitle.textContent = formatMonthYear(month, year);
+  }
+
+  const dayNames = ["L", "M", "X", "J", "V", "S", "D"];
+  const headerRow = document.createElement("div");
+  headerRow.className = "calendar-row calendar-header";
+  dayNames.forEach((label) => {
+    const cell = document.createElement("div");
+    cell.className = "calendar-cell header";
+    cell.textContent = label;
+    headerRow.appendChild(cell);
+  });
+  paymentCalendar.appendChild(headerRow);
+
+  const firstDay = new Date(year, month - 1, 1);
+  const offset = (firstDay.getDay() + 6) % 7;
+  const daysInMonth = new Date(year, month, 0).getDate();
+  if (selectedPaymentDay && selectedPaymentDay > daysInMonth) {
+    selectedPaymentDay = null;
+  }
+  const grid = document.createElement("div");
+  grid.className = "calendar-grid-body";
+
+  for (let i = 0; i < offset; i += 1) {
+    const emptyCell = document.createElement("div");
+    emptyCell.className = "calendar-cell empty";
+    grid.appendChild(emptyCell);
+  }
+
+  const itemsByDay = {};
+  (data.items || []).forEach((item) => {
+    if (!item.payment_date) {
+      return;
+    }
+    const day = Number(item.payment_date.slice(8, 10));
+    if (!itemsByDay[day]) {
+      itemsByDay[day] = [];
+    }
+    itemsByDay[day].push(item);
+  });
+  currentPayments = { ...data, itemsByDay };
+
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const cell = document.createElement("button");
+    cell.type = "button";
+    cell.className = "calendar-cell day";
+    const total = Number(data.dayTotals?.[day] || 0);
+    cell.innerHTML = `<span class="day-number">${day}</span><span class="day-total">${formatCurrency(
+      total
+    )}</span>`;
+    if (total > 0) {
+      cell.classList.add("has-payments");
+    }
+    if (selectedPaymentDay === day) {
+      cell.classList.add("selected");
+    }
+    cell.addEventListener("click", () => {
+      selectedPaymentDay = day;
+      renderPaymentCalendar(month, year, data);
+      renderPaymentDayDetails(day);
+    });
+    grid.appendChild(cell);
+  }
+
+  paymentCalendar.appendChild(grid);
+  renderPaymentDayDetails(selectedPaymentDay);
+}
+
+function renderPaymentDayDetails(day) {
+  if (!paymentDayTitle || !paymentDayList || !paymentDayTotal) {
+    return;
+  }
+  paymentDayList.innerHTML = "";
+  if (!day || !currentPayments?.itemsByDay?.[day]) {
+    paymentDayTitle.textContent = "Selecciona un día para ver el detalle";
+    paymentDayTotal.textContent = "";
+    return;
+  }
+  const items = currentPayments.itemsByDay[day];
+  const monthLabel = formatMonthYear(Number(monthSelect.value), Number(yearSelect.value));
+  paymentDayTitle.textContent = `Pagos del ${day} ${monthLabel}`;
+
+  let total = 0;
+  items.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "payment-day-item";
+    const supplier = document.createElement("span");
+    supplier.textContent = item.supplier || "Proveedor";
+    const dateLabel = document.createElement("span");
+    dateLabel.textContent = item.payment_date;
+    const amount = document.createElement("span");
+    amount.textContent = formatCurrency(item.amount);
+    row.appendChild(supplier);
+    row.appendChild(dateLabel);
+    row.appendChild(amount);
+    paymentDayList.appendChild(row);
+    total += Number(item.amount || 0);
+  });
+  paymentDayTotal.textContent = `Total del día: ${formatCurrency(total)}`;
+}
+
 function fetchBillingEntries(month, year) {
   return fetch(`/api/billing/entries?month=${month}&year=${year}`)
     .then((res) => res.json())
@@ -1174,6 +1313,7 @@ function refreshAllData() {
     refreshSummary(),
     refreshBillingData(),
     refreshInvoices(),
+    refreshPayments(),
     refreshNoInvoiceExpenses(),
     refreshAnnualTaxData(),
   ]);
@@ -1252,6 +1392,29 @@ function refreshInvoices() {
       invoices.sort((a, b) => b.invoice_date.localeCompare(a.invoice_date));
       renderInvoices(invoices);
     });
+}
+
+function fetchPayments(month, year) {
+  return fetch(`/api/payments?month=${month}&year=${year}`)
+    .then((res) => res.json())
+    .then((data) => ({
+      items: data.items || [],
+      dayTotals: data.dayTotals || {},
+    }));
+}
+
+function refreshPayments() {
+  if (!paymentCalendar) {
+    return Promise.resolve();
+  }
+  const { month, year } = getSelectedMonthYear();
+  if (!month || !year) {
+    return Promise.resolve();
+  }
+  return fetchPayments(month, year).then((data) => {
+    currentPayments = data;
+    renderPaymentCalendar(month, year, data);
+  });
 }
 
 function renderInvoices(invoices) {

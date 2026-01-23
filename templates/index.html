@@ -18,6 +18,7 @@
         <button class="nav-link" data-section="invoices" type="button">Facturas</button>
         <button class="nav-link" data-section="expenses" type="button">Gastos (sin factura)</button>
         <button class="nav-link" data-section="income" type="button">Ingresos</button>
+        <button class="nav-link" data-section="payments" type="button">Calendario de pagos</button>
         <button class="nav-link" data-section="taxes" type="button">Modelos de impuestos</button>
         <button class="nav-link" data-section="pnl" type="button">Pérdidas y Ganancias</button>
       </nav>
@@ -308,6 +309,26 @@
               </table>
             </div>
             <p class="empty" id="billingEntriesEmpty">No hay entradas de facturación.</p>
+          </div>
+        </section>
+      </section>
+
+      <section class="page-section" data-section="payments">
+        <section class="panel payments-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Calendario de pagos</h2>
+              <p>Consulta los vencimientos y los importes previstos por día.</p>
+            </div>
+          </div>
+          <div class="calendar-header">
+            <h3 id="paymentCalendarTitle"></h3>
+          </div>
+          <div id="paymentCalendar" class="calendar-wrapper"></div>
+          <div class="payment-details">
+            <h3 id="paymentDayTitle">Selecciona un día para ver el detalle</h3>
+            <div id="paymentDayList" class="payment-day-list"></div>
+            <p id="paymentDayTotal" class="payment-day-total"></p>
           </div>
         </section>
       </section>

@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+from datetime import date, timedelta
 from typing import Any, Dict, Optional
 
 import mimetypes
@@ -71,6 +72,40 @@ def _normalize_date(value: Optional[str]) -> Optional[str]:
     if match:
         year, month, day = match.groups()
         return f"{year.zfill(4)}-{month.zfill(2)}-{day.zfill(2)}"
+    return None
+
+
+def _extract_first_date(text: str) -> Optional[str]:
+    if not text:
+        return None
+    normalized = text.replace(".", "/")
+    patterns = [
+        r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+        r"(\d{4}[/-]\d{1,2}[/-]\d{1,2})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            return _normalize_date(match.group(1))
+    return None
+
+
+def _find_payment_date_by_keywords(text: str) -> Optional[str]:
+    if not text:
+        return None
+    keywords = [
+        "fecha de vencimiento",
+        "vencimiento",
+        "vence el",
+        "fecha de pago",
+        "fecha pago",
+    ]
+    for line in text.splitlines():
+        lowered = line.lower()
+        if any(keyword in lowered for keyword in keywords):
+            found = _extract_first_date(line)
+            if found:
+                return found
     return None
 
 
@@ -364,7 +399,7 @@ def analyze_invoice(
     prompt = (
         "Analiza el siguiente texto extraido de una factura. "
         "Devuelve SOLO JSON valido con estas claves: "
-        "supplier, invoice_date, base_amount, vat_rate, vat_amount, total_amount. "
+        "supplier, invoice_date, payment_date, base_amount, vat_rate, vat_amount, total_amount. "
         "Usa null si no puedes inferir un dato con seguridad. "
         "No incluyas texto adicional fuera del JSON.\n\n"
         f"TEXTO_FACTURA:\n{extracted_text}"
@@ -397,6 +432,12 @@ def analyze_invoice(
     invoice_date = _normalize_date(
         data.get("invoice_date") or data.get("fecha_factura") or data.get("fecha")
     )
+    payment_date = _normalize_date(
+        data.get("payment_date")
+        or data.get("fecha_pago")
+        or data.get("fecha_vencimiento")
+        or data.get("vencimiento")
+    )
     base_amount = _normalize_amount(
         data.get("base_amount") or data.get("base_imponible") or data.get("base")
     )
@@ -414,6 +455,14 @@ def analyze_invoice(
     total_amount = _normalize_amount(
         data.get("total_amount") or data.get("total_factura") or data.get("total")
     )
+
+    if payment_date is None:
+        payment_date = _find_payment_date_by_keywords(extracted_text)
+    if payment_date is None and invoice_date:
+        try:
+            payment_date = (date.fromisoformat(invoice_date) + timedelta(days=30)).isoformat()
+        except ValueError:
+            payment_date = None
 
     assumed_vat = False
     if vat_rate is None and not _has_vat_exemption_indicators(extracted_text):
@@ -443,10 +492,11 @@ def analyze_invoice(
         )
 
     logger.info(
-        "Valores detectados (%s): proveedor=%s fecha=%s base=%s iva_rate=%s iva_importe=%s total=%s",
+        "Valores detectados (%s): proveedor=%s fecha=%s pago=%s base=%s iva_rate=%s iva_importe=%s total=%s",
         filename,
         provider_name,
         invoice_date,
+        payment_date,
         base_amount,
         vat_rate,
         vat_amount,
@@ -456,6 +506,7 @@ def analyze_invoice(
     return {
         "provider_name": provider_name,
         "invoice_date": invoice_date,
+        "payment_date": payment_date,
         "base_amount": base_amount,
         "vat_rate": vat_rate,
         "vat_amount": vat_amount,

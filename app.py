@@ -2,7 +2,7 @@ import calendar
 import logging
 import multiprocessing as mp
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from uuid import uuid4
 
 from flask import Flask, jsonify, render_template, request
@@ -17,7 +17,9 @@ from sqlalchemy import (
     Table,
     create_engine,
     func,
+    inspect,
     select,
+    text,
 )
 from werkzeug.utils import secure_filename
 
@@ -53,6 +55,7 @@ invoices_table = Table(
     Column("vat_rate", Integer, nullable=False),
     Column("vat_amount", Float),
     Column("total_amount", Float, nullable=False),
+    Column("payment_date", String),
     Column("ocr_text", Text),
     Column("expense_category", String, nullable=False, server_default="with_invoice"),
     Column("created_at", String, nullable=False),
@@ -87,6 +90,12 @@ logging.basicConfig(level=logging.INFO)
 
 def init_db():
     metadata.create_all(engine)
+    inspector = inspect(engine)
+    if "invoices" in inspector.get_table_names():
+        columns = {col["name"] for col in inspector.get_columns("invoices")}
+        if "payment_date" not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE invoices ADD COLUMN payment_date VARCHAR"))
 
 
 def allowed_file(filename):
@@ -105,10 +114,37 @@ def parse_amount(value):
         return None
 
 
+def normalize_date(value):
+    if not value:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw).isoformat()
+    except ValueError:
+        return None
+
+
+def compute_payment_date(invoice_date_value, payment_date_value=None):
+    payment_date = normalize_date(payment_date_value)
+    if payment_date:
+        return payment_date
+    invoice_date = normalize_date(invoice_date_value)
+    if not invoice_date:
+        return None
+    try:
+        base_date = date.fromisoformat(invoice_date)
+    except ValueError:
+        return None
+    return (base_date + timedelta(days=30)).isoformat()
+
+
 def _empty_extracted():
     return {
         "provider_name": None,
         "invoice_date": None,
+        "payment_date": None,
         "base_amount": None,
         "vat_rate": None,
         "vat_amount": None,
@@ -222,6 +258,10 @@ def upload_invoices():
                 vat_rate_raw = str(entry.get("vat") or "").strip()
                 vat_amount = parse_amount(str(entry.get("vatAmount") or ""))
                 total_amount = parse_amount(str(entry.get("total") or ""))
+                payment_date = compute_payment_date(
+                    invoice_date,
+                    entry.get("paymentDate") or entry.get("payment_date"),
+                )
                 analysis_text = entry.get("analysisText") or entry.get("ocrText")
                 expense_category = entry.get("expenseCategory") or "with_invoice"
 
@@ -269,6 +309,7 @@ def upload_invoices():
                         vat_rate=vat_rate_int,
                         vat_amount=vat_amount,
                         total_amount=total_amount,
+                        payment_date=payment_date,
                         ocr_text=analysis_text,
                         expense_category=expense_category,
                         created_at=created_at,
@@ -285,6 +326,7 @@ def upload_invoices():
     vats = request.form.getlist("vat")
     vat_amounts = request.form.getlist("vatAmount")
     totals = request.form.getlist("total")
+    payment_dates = request.form.getlist("paymentDate")
 
     if not files:
         return jsonify({"ok": False, "errors": ["No se recibieron archivos."]}), 400
@@ -297,6 +339,7 @@ def upload_invoices():
         == len(vats)
         == len(vat_amounts)
         == len(totals)
+        == len(payment_dates)
     ):
         return (
             jsonify({"ok": False, "errors": ["Los datos no coinciden con los archivos."]}),
@@ -317,6 +360,7 @@ def upload_invoices():
                 continue
 
             invoice_date = dates[idx] or date.today().isoformat()
+            payment_date = compute_payment_date(invoice_date, payment_dates[idx] if payment_dates else None)
             supplier = suppliers[idx].strip() if suppliers[idx] else ""
             base_amount = parse_amount(bases[idx])
             vat_rate = vats[idx].strip() if vats[idx] else ""
@@ -364,6 +408,7 @@ def upload_invoices():
                     vat_rate=vat_rate_int,
                     vat_amount=vat_amount,
                     total_amount=total_amount,
+                    payment_date=payment_date,
                     ocr_text=None,
                     expense_category="with_invoice",
                     created_at=created_at,
@@ -384,6 +429,7 @@ def analyze_invoice_api():
     if not allowed_file(original_name):
         return jsonify({"ok": False, "errors": ["Tipo de archivo no permitido."]}), 400
 
+    app.logger.info("Solicitud de análisis recibida: %s (%s)", original_name, file.mimetype)
     file_bytes = file.read()
     safe_name = secure_filename(original_name)
     stored_name = f"{uuid4().hex}_{safe_name}"
@@ -396,10 +442,11 @@ def analyze_invoice_api():
     extracted = _analyze_invoice_with_timeout(file_bytes, original_name, stored_name, file.mimetype)
 
     app.logger.info(
-        "AI extracted for %s: provider=%s date=%s base=%s vat_rate=%s vat_amount=%s total=%s",
+        "AI extracted for %s: provider=%s date=%s payment=%s base=%s vat_rate=%s vat_amount=%s total=%s",
         stored_name,
         extracted.get("provider_name"),
         extracted.get("invoice_date"),
+        extracted.get("payment_date"),
         extracted.get("base_amount"),
         extracted.get("vat_rate"),
         extracted.get("vat_amount"),
@@ -533,6 +580,7 @@ def list_invoices():
                 invoices_table.c.vat_rate,
                 invoices_table.c.vat_amount,
                 invoices_table.c.total_amount,
+                invoices_table.c.payment_date,
                 invoices_table.c.original_filename,
                 invoices_table.c.expense_category,
             )
@@ -544,6 +592,8 @@ def list_invoices():
         {
             "id": row["id"],
             "invoice_date": row["invoice_date"],
+            "payment_date": row["payment_date"]
+            or compute_payment_date(row["invoice_date"], row["payment_date"]),
             "supplier": row["supplier"],
             "base_amount": float(row["base_amount"]),
             "vat_rate": int(row["vat_rate"]),
@@ -558,11 +608,81 @@ def list_invoices():
     return jsonify({"invoices": invoices})
 
 
+@app.route("/api/payments")
+def list_payments():
+    month = request.args.get("month", type=int)
+    year = request.args.get("year", type=int)
+
+    today = date.today()
+    month = month or today.month
+    year = year or today.year
+
+    _, last_day = calendar.monthrange(year, month)
+    start = date(year, month, 1)
+    end = date(year, month, last_day)
+    year_start = date(year, 1, 1)
+    year_end = date(year, 12, 31)
+    buffer_start = (year_start - timedelta(days=31)).isoformat()
+    year_start_iso = year_start.isoformat()
+    year_end_iso = year_end.isoformat()
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(
+                invoices_table.c.id,
+                invoices_table.c.invoice_date,
+                invoices_table.c.payment_date,
+                invoices_table.c.supplier,
+                invoices_table.c.total_amount,
+            )
+            .where(
+                (
+                    invoices_table.c.payment_date.between(year_start_iso, year_end_iso)
+                )
+                | (
+                    invoices_table.c.payment_date.is_(None)
+                    & invoices_table.c.invoice_date.between(buffer_start, year_end_iso)
+                )
+            )
+            .order_by(invoices_table.c.invoice_date.desc(), invoices_table.c.id.desc())
+        ).mappings().all()
+
+    items = []
+    day_totals = {}
+    for row in rows:
+        payment_date = row["payment_date"] or compute_payment_date(row["invoice_date"], None)
+        if not payment_date:
+            continue
+        try:
+            payment_dt = date.fromisoformat(payment_date)
+        except ValueError:
+            continue
+        if payment_dt < start or payment_dt > end:
+            continue
+        day = payment_dt.day
+        amount = float(row["total_amount"] or 0)
+        day_totals[day] = round(day_totals.get(day, 0.0) + amount, 2)
+        items.append(
+            {
+                "id": row["id"],
+                "supplier": row["supplier"],
+                "payment_date": payment_date,
+                "amount": amount,
+            }
+        )
+
+    return jsonify({"items": items, "dayTotals": day_totals})
+
+
 @app.route("/api/invoices/<int:invoice_id>", methods=["PUT"])
 def update_invoice(invoice_id):
     payload = request.get_json(silent=True) or {}
 
     invoice_date = payload.get("invoice_date") or ""
+    payment_date = compute_payment_date(
+        invoice_date,
+        payload.get("payment_date") or payload.get("paymentDate"),
+    )
     supplier = (payload.get("supplier") or "").strip()
     base_amount = parse_amount(str(payload.get("base_amount") or ""))
     vat_rate_raw = str(payload.get("vat_rate") or "").strip()
@@ -605,6 +725,7 @@ def update_invoice(invoice_id):
                 vat_rate=vat_rate,
                 vat_amount=vat_amount,
                 total_amount=total_amount,
+                payment_date=payment_date,
                 expense_category=expense_category,
             )
         )
@@ -618,6 +739,7 @@ def update_invoice(invoice_id):
             "invoice": {
                 "id": invoice_id,
                 "invoice_date": invoice_date,
+                "payment_date": payment_date,
                 "supplier": supplier,
                 "base_amount": base_amount,
                 "vat_rate": vat_rate,

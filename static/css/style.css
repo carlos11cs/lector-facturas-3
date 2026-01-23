@@ -206,6 +206,106 @@ h1 {
   display: flex;
 }
 
+.calendar-header {
+  margin-bottom: 12px;
+  color: var(--muted);
+}
+
+.calendar-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.calendar-row {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.calendar-grid-body {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.calendar-cell {
+  border: 1px solid var(--border);
+  background: #f8fbf8;
+  border-radius: 12px;
+  padding: 10px;
+  min-height: 80px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+.calendar-cell.header {
+  min-height: auto;
+  background: transparent;
+  border: none;
+  font-weight: 600;
+  color: var(--muted);
+  align-items: center;
+  justify-content: center;
+}
+
+.calendar-cell.day {
+  cursor: pointer;
+  text-align: left;
+}
+
+.calendar-cell.day.selected {
+  border-color: var(--accent);
+  background: #e9f4ef;
+}
+
+.calendar-cell.day.has-payments {
+  box-shadow: inset 0 0 0 1px rgba(34, 124, 101, 0.25);
+}
+
+.calendar-cell.empty {
+  background: transparent;
+  border: none;
+}
+
+.day-number {
+  font-weight: 600;
+}
+
+.day-total {
+  font-size: 0.8rem;
+  color: var(--accent-strong);
+}
+
+.payment-details {
+  margin-top: 18px;
+}
+
+.payment-day-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.payment-day-item {
+  display: grid;
+  grid-template-columns: 1.5fr 1fr 0.8fr;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #f7faf7;
+  border: 1px solid var(--border);
+}
+
+.payment-day-total {
+  font-weight: 600;
+  color: var(--accent-strong);
+}
+
 .panel {
   background: var(--panel);
   border-radius: 22px;
