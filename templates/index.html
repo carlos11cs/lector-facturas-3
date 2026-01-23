@@ -15,6 +15,7 @@
       </div>
       <nav class="sidebar-nav">
         <button class="nav-link active" data-section="dashboard" type="button">Dashboard</button>
+        <button class="nav-link" data-section="companies" type="button">Mis empresas</button>
         <button class="nav-link" data-section="invoices" type="button">Facturas</button>
         <button class="nav-link" data-section="expenses" type="button">Gastos (sin factura)</button>
         <button class="nav-link" data-section="income" type="button">Ingresos</button>
@@ -58,6 +59,10 @@
               <option value="autonomo">Autónomo (IRPF)</option>
               <option value="sociedad">Sociedad (IS)</option>
             </select>
+          </div>
+          <div class="field">
+            <label for="companySelect">Empresa</label>
+            <select id="companySelect"></select>
           </div>
         </div>
       </header>
@@ -131,6 +136,57 @@
             <div class="chart-wrapper">
               <canvas id="netChart"></canvas>
             </div>
+          </div>
+        </section>
+      </section>
+
+      <section class="page-section" data-section="companies">
+        <section class="panel companies-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Mis empresas</h2>
+              <p>Gestiona tus empresas y selecciona cuál usar en el panel.</p>
+            </div>
+          </div>
+          <div class="billing-form">
+            <div class="field">
+              <label for="companyDisplayName">Nombre comercial</label>
+              <input type="text" id="companyDisplayName" placeholder="Ej. Estudio Norte" />
+            </div>
+            <div class="field">
+              <label for="companyLegalName">Razón social</label>
+              <input type="text" id="companyLegalName" placeholder="Ej. Estudio Norte SL" />
+            </div>
+            <div class="field">
+              <label for="companyTaxId">CIF / NIF</label>
+              <input type="text" id="companyTaxId" placeholder="Ej. B12345678" />
+            </div>
+            <div class="field">
+              <label for="companyType">Tipo de empresa</label>
+              <select id="companyType">
+                <option value="individual">Autónomo</option>
+                <option value="company">Sociedad</option>
+              </select>
+            </div>
+            <button id="companySaveBtn" class="button primary">Guardar empresa</button>
+          </div>
+          <div class="billing-entries">
+            <h3>Empresas registradas</h3>
+            <div class="billing-table">
+              <table id="companiesTable">
+                <thead>
+                  <tr>
+                    <th>Nombre comercial</th>
+                    <th>Razón social</th>
+                    <th>CIF/NIF</th>
+                    <th>Tipo</th>
+                    <th>Acciones</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <p class="empty" id="companiesEmpty">No hay empresas registradas.</p>
           </div>
         </section>
       </section>
@@ -270,6 +326,14 @@
           </div>
           <div class="billing-form">
             <div class="field">
+              <label for="billingDateInput">Fecha</label>
+              <input type="date" id="billingDateInput" />
+            </div>
+            <div class="field">
+              <label for="billingConceptInput">Concepto</label>
+              <input type="text" id="billingConceptInput" placeholder="Ej. Servicios de abril" />
+            </div>
+            <div class="field">
               <label for="billingMonthSelect">Mes de facturación</label>
               <select id="billingMonthSelect"></select>
             </div>
@@ -309,6 +373,66 @@
               </table>
             </div>
             <p class="empty" id="billingEntriesEmpty">No hay entradas de facturación.</p>
+          </div>
+        </section>
+
+        <section class="panel income-invoices-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Facturas emitidas</h2>
+              <p>Sube facturas emitidas para registrar ingresos con IA.</p>
+            </div>
+            <button id="incomeUploadBtn" class="button primary">Guardar facturas emitidas</button>
+          </div>
+          <div class="upload-area" id="incomeDropZone">
+            <div class="upload-copy">
+              <h3>Arrastra y suelta</h3>
+              <p>Formatos permitidos: PDF, JPG, PNG.</p>
+            </div>
+            <div class="upload-actions">
+              <button type="button" id="incomeSelectFiles" class="button ghost">Seleccionar archivos</button>
+              <input type="file" id="incomeFileInput" accept=".pdf,.jpg,.jpeg,.png" multiple />
+            </div>
+          </div>
+
+          <div class="upload-table-wrapper">
+            <table id="incomeUploadTable">
+              <thead>
+                <tr>
+                  <th>Archivo</th>
+                  <th>Fecha</th>
+                  <th>Cliente</th>
+                  <th>Base imponible</th>
+                  <th>IVA</th>
+                  <th>IVA (€)</th>
+                  <th>Total (€)</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+            <p class="empty" id="incomeEmptyMessage">No hay archivos pendientes.</p>
+          </div>
+
+          <div class="billing-entries">
+            <h3>Facturas emitidas guardadas</h3>
+            <div class="billing-table">
+              <table id="incomeInvoicesTable">
+                <thead>
+                  <tr>
+                    <th>Fecha</th>
+                    <th>Cliente</th>
+                    <th>Base (€)</th>
+                    <th>IVA</th>
+                    <th>IVA (€)</th>
+                    <th>Total (€)</th>
+                    <th>Acciones</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <p class="empty" id="incomeInvoicesEmpty">No hay facturas emitidas para este período.</p>
           </div>
         </section>
       </section>

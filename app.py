@@ -2,6 +2,7 @@ import calendar
 import logging
 import multiprocessing as mp
 import os
+import re
 from datetime import date, datetime, timedelta
 from uuid import uuid4
 
@@ -30,6 +31,7 @@ BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data.db")
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png"}
 ANALYSIS_TIMEOUT_SECONDS = int(os.getenv("ANALYSIS_TIMEOUT_SECONDS", "120"))
+DEFAULT_USER_ID = int(os.getenv("DEFAULT_USER_ID", "1"))
 
 _raw_db_url = os.getenv("DATABASE_URL")
 DATABASE_URL = _raw_db_url.strip() if _raw_db_url else ""
@@ -43,10 +45,24 @@ if DATABASE_URL.startswith("sqlite"):
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
 metadata = MetaData()
 
+companies_table = Table(
+    "companies",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", Integer, nullable=False),
+    Column("display_name", String, nullable=False),
+    Column("legal_name", String, nullable=False),
+    Column("tax_id", String, nullable=False),
+    Column("company_type", String, nullable=False),  # individual | company
+    Column("created_at", String, nullable=False),
+)
+
 invoices_table = Table(
     "invoices",
     metadata,
     Column("id", Integer, primary_key=True),
+    Column("user_id", Integer, nullable=False, server_default=str(DEFAULT_USER_ID)),
+    Column("company_id", Integer, nullable=False),
     Column("original_filename", String, nullable=False),
     Column("stored_filename", String, nullable=False),
     Column("invoice_date", String, nullable=False),
@@ -61,21 +77,47 @@ invoices_table = Table(
     Column("created_at", String, nullable=False),
 )
 
+income_invoices_table = Table(
+    "income_invoices",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", Integer, nullable=False, server_default=str(DEFAULT_USER_ID)),
+    Column("company_id", Integer, nullable=False),
+    Column("original_filename", String, nullable=False),
+    Column("stored_filename", String, nullable=False),
+    Column("invoice_date", String, nullable=False),
+    Column("client", String, nullable=False),
+    Column("base_amount", Float, nullable=False),
+    Column("vat_rate", Integer, nullable=False),
+    Column("vat_amount", Float),
+    Column("total_amount", Float, nullable=False),
+    Column("payment_date", String),
+    Column("ocr_text", Text),
+    Column("created_at", String, nullable=False),
+)
+
 facturacion_table = Table(
     "facturacion",
     metadata,
     Column("id", Integer, primary_key=True),
+    Column("user_id", Integer, nullable=False, server_default=str(DEFAULT_USER_ID)),
+    Column("company_id", Integer, nullable=False),
     Column("mes", Integer, nullable=False),
     Column("anio", Integer, nullable=False),
+    Column("invoice_date", String),
+    Column("concept", String),
     Column("base_facturada", Float, nullable=False),
     Column("tipo_iva", Integer, nullable=False),
     Column("iva_repercutido", Float, nullable=False),
+    Column("total_amount", Float),
 )
 
 no_invoice_table = Table(
     "no_invoice_expenses",
     metadata,
     Column("id", Integer, primary_key=True),
+    Column("user_id", Integer, nullable=False, server_default=str(DEFAULT_USER_ID)),
+    Column("company_id", Integer, nullable=False),
     Column("expense_date", String, nullable=False),
     Column("concept", String, nullable=False),
     Column("amount", Float, nullable=False),
@@ -91,11 +133,63 @@ logging.basicConfig(level=logging.INFO)
 def init_db():
     metadata.create_all(engine)
     inspector = inspect(engine)
-    if "invoices" in inspector.get_table_names():
-        columns = {col["name"] for col in inspector.get_columns("invoices")}
-        if "payment_date" not in columns:
-            with engine.begin() as conn:
-                conn.execute(text("ALTER TABLE invoices ADD COLUMN payment_date VARCHAR"))
+    table_names = set(inspector.get_table_names())
+
+    def add_column_if_missing(table_name, column_name, column_type):
+        if table_name not in table_names:
+            return
+        columns = {col["name"] for col in inspector.get_columns(table_name)}
+        if column_name in columns:
+            return
+        with engine.begin() as conn:
+            conn.execute(
+                text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+            )
+
+    add_column_if_missing("invoices", "user_id", "INTEGER")
+    add_column_if_missing("invoices", "company_id", "INTEGER")
+    add_column_if_missing("invoices", "payment_date", "VARCHAR")
+    if "invoices" in table_names:
+        with engine.begin() as conn:
+            conn.execute(
+                invoices_table.update()
+                .where(invoices_table.c.user_id.is_(None))
+                .values(user_id=DEFAULT_USER_ID)
+            )
+
+    add_column_if_missing("facturacion", "user_id", "INTEGER")
+    add_column_if_missing("facturacion", "company_id", "INTEGER")
+    add_column_if_missing("facturacion", "invoice_date", "VARCHAR")
+    add_column_if_missing("facturacion", "concept", "VARCHAR")
+    add_column_if_missing("facturacion", "total_amount", "FLOAT")
+    if "facturacion" in table_names:
+        with engine.begin() as conn:
+            conn.execute(
+                facturacion_table.update()
+                .where(facturacion_table.c.user_id.is_(None))
+                .values(user_id=DEFAULT_USER_ID)
+            )
+
+    add_column_if_missing("no_invoice_expenses", "user_id", "INTEGER")
+    add_column_if_missing("no_invoice_expenses", "company_id", "INTEGER")
+    if "no_invoice_expenses" in table_names:
+        with engine.begin() as conn:
+            conn.execute(
+                no_invoice_table.update()
+                .where(no_invoice_table.c.user_id.is_(None))
+                .values(user_id=DEFAULT_USER_ID)
+            )
+
+    add_column_if_missing("income_invoices", "user_id", "INTEGER")
+    add_column_if_missing("income_invoices", "company_id", "INTEGER")
+    add_column_if_missing("income_invoices", "payment_date", "VARCHAR")
+    if "income_invoices" in table_names:
+        with engine.begin() as conn:
+            conn.execute(
+                income_invoices_table.update()
+                .where(income_invoices_table.c.user_id.is_(None))
+                .values(user_id=DEFAULT_USER_ID)
+            )
 
 
 def allowed_file(filename):
@@ -112,6 +206,101 @@ def parse_amount(value):
         return float(cleaned)
     except ValueError:
         return None
+
+
+def get_current_user_id():
+    try:
+        header_value = request.headers.get("X-User-Id")
+        if header_value and str(header_value).isdigit():
+            return int(header_value)
+    except Exception:
+        pass
+    return DEFAULT_USER_ID
+
+
+def _resolve_company_id():
+    company_id = None
+    if request.is_json:
+        payload = request.get_json(silent=True) or {}
+        company_id = payload.get("company_id") or payload.get("companyId")
+    if company_id is None:
+        company_id = request.args.get("company_id") or request.form.get("company_id")
+    if company_id is None:
+        return None
+    try:
+        return int(company_id)
+    except (TypeError, ValueError):
+        return None
+
+
+def get_company_id(required=True):
+    user_id = get_current_user_id()
+    company_id = _resolve_company_id()
+    with engine.connect() as conn:
+        if company_id is None:
+            row = conn.execute(
+                select(companies_table.c.id).where(companies_table.c.user_id == user_id)
+            ).first()
+            if row:
+                company_id = int(row[0])
+        else:
+            exists = conn.execute(
+                select(companies_table.c.id)
+                .where(companies_table.c.user_id == user_id)
+                .where(companies_table.c.id == company_id)
+            ).first()
+            if not exists:
+                company_id = None
+
+    if required and company_id is None:
+        return None
+    return company_id
+
+
+def _validate_nif(nif):
+    if not nif:
+        return False
+    nif = nif.strip().upper()
+    match = re.match(r"^(\d{8})([A-Z])$", nif)
+    if not match:
+        return False
+    number, letter = match.groups()
+    letters = "TRWAGMYFPDXBNJZSQVHLCKE"
+    return letters[int(number) % 23] == letter
+
+
+def _validate_cif(cif):
+    if not cif:
+        return False
+    cif = cif.strip().upper()
+    match = re.match(r"^([ABCDEFGHJKLMNPQRSUVW])(\d{7})([0-9A-J])$", cif)
+    if not match:
+        return False
+    letter, digits, control = match.groups()
+    total = 0
+    for idx, char in enumerate(digits, start=1):
+        n = int(char)
+        if idx % 2 == 1:
+            n *= 2
+            total += n // 10 + n % 10
+        else:
+            total += n
+    control_num = (10 - (total % 10)) % 10
+    control_digit = str(control_num)
+    control_letter = "JABCDEFGHI"[control_num]
+    if letter in "PQRSW":
+        return control == control_letter
+    if letter in "ABEH":
+        return control == control_digit
+    return control in {control_digit, control_letter}
+
+
+def validate_tax_id(tax_id, company_type):
+    if company_type == "individual":
+        return _validate_nif(tax_id)
+    if company_type == "company":
+        return _validate_cif(tax_id)
+    return False
 
 
 def normalize_date(value):
@@ -154,24 +343,25 @@ def _empty_extracted():
     }
 
 
-def _analysis_worker(file_bytes, filename, mime_type, queue):
+def _analysis_worker(file_bytes, filename, mime_type, document_type, queue):
     try:
         result = analyze_invoice(
             file_bytes=file_bytes,
             filename=filename,
             mime_type=mime_type,
+            document_type=document_type,
         )
         queue.put(result)
     except Exception as exc:
         queue.put({"__error__": str(exc)})
 
 
-def _analyze_invoice_with_timeout(file_bytes, filename, stored_name, mime_type):
+def _analyze_invoice_with_timeout(file_bytes, filename, stored_name, mime_type, document_type="expense"):
     ctx = mp.get_context("spawn")
     queue = ctx.Queue(1)
     process = ctx.Process(
         target=_analysis_worker,
-        args=(file_bytes, filename, mime_type, queue),
+        args=(file_bytes, filename, mime_type, document_type, queue),
     )
     process.start()
     process.join(ANALYSIS_TIMEOUT_SECONDS)
@@ -218,19 +408,211 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/api/companies")
+def list_companies():
+    user_id = get_current_user_id()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(
+                companies_table.c.id,
+                companies_table.c.display_name,
+                companies_table.c.legal_name,
+                companies_table.c.tax_id,
+                companies_table.c.company_type,
+            ).where(companies_table.c.user_id == user_id)
+        ).mappings().all()
+    companies = [
+        {
+            "id": row["id"],
+            "display_name": row["display_name"],
+            "legal_name": row["legal_name"],
+            "tax_id": row["tax_id"],
+            "company_type": row["company_type"],
+        }
+        for row in rows
+    ]
+    return jsonify({"companies": companies})
+
+
+@app.route("/api/companies", methods=["POST"])
+def create_company():
+    user_id = get_current_user_id()
+    payload = request.get_json(silent=True) or {}
+
+    display_name = (payload.get("display_name") or payload.get("displayName") or "").strip()
+    legal_name = (payload.get("legal_name") or payload.get("legalName") or "").strip()
+    tax_id = (payload.get("tax_id") or payload.get("taxId") or "").strip().upper()
+    company_type = payload.get("company_type") or payload.get("companyType") or ""
+
+    errors = []
+    if not display_name:
+        errors.append("Nombre comercial obligatorio.")
+    if not legal_name:
+        errors.append("Razón social obligatoria.")
+    if company_type not in {"individual", "company"}:
+        errors.append("Tipo de empresa inválido.")
+    if not validate_tax_id(tax_id, company_type):
+        errors.append("CIF/NIF inválido.")
+
+    if errors:
+        return jsonify({"ok": False, "errors": errors}), 400
+
+    with engine.connect() as conn:
+        existing_count = conn.execute(
+            select(func.count()).select_from(companies_table).where(companies_table.c.user_id == user_id)
+        ).scalar_one()
+        exists = conn.execute(
+            select(companies_table.c.id)
+            .where(companies_table.c.user_id == user_id)
+            .where(companies_table.c.tax_id == tax_id)
+        ).first()
+    if exists:
+        return jsonify({"ok": False, "errors": ["Ya existe una empresa con ese CIF/NIF."]}), 400
+
+    created_at = datetime.utcnow().isoformat()
+    with engine.begin() as conn:
+        result = conn.execute(
+            companies_table.insert().values(
+                user_id=user_id,
+                display_name=display_name,
+                legal_name=legal_name,
+                tax_id=tax_id,
+                company_type=company_type,
+                created_at=created_at,
+            )
+        )
+        new_id = result.inserted_primary_key[0]
+        if existing_count == 0:
+            conn.execute(
+                invoices_table.update()
+                .where(invoices_table.c.user_id == user_id)
+                .where(invoices_table.c.company_id.is_(None))
+                .values(company_id=new_id)
+            )
+            conn.execute(
+                no_invoice_table.update()
+                .where(no_invoice_table.c.user_id == user_id)
+                .where(no_invoice_table.c.company_id.is_(None))
+                .values(company_id=new_id)
+            )
+            conn.execute(
+                facturacion_table.update()
+                .where(facturacion_table.c.user_id == user_id)
+                .where(facturacion_table.c.company_id.is_(None))
+                .values(company_id=new_id)
+            )
+            conn.execute(
+                income_invoices_table.update()
+                .where(income_invoices_table.c.user_id == user_id)
+                .where(income_invoices_table.c.company_id.is_(None))
+                .values(company_id=new_id)
+            )
+
+    return jsonify({"ok": True, "id": new_id})
+
+
+@app.route("/api/companies/<int:company_id>", methods=["PUT"])
+def update_company(company_id):
+    user_id = get_current_user_id()
+    payload = request.get_json(silent=True) or {}
+
+    display_name = (payload.get("display_name") or payload.get("displayName") or "").strip()
+    legal_name = (payload.get("legal_name") or payload.get("legalName") or "").strip()
+    tax_id = (payload.get("tax_id") or payload.get("taxId") or "").strip().upper()
+    company_type = payload.get("company_type") or payload.get("companyType") or ""
+
+    errors = []
+    if not display_name:
+        errors.append("Nombre comercial obligatorio.")
+    if not legal_name:
+        errors.append("Razón social obligatoria.")
+    if company_type not in {"individual", "company"}:
+        errors.append("Tipo de empresa inválido.")
+    if not validate_tax_id(tax_id, company_type):
+        errors.append("CIF/NIF inválido.")
+
+    if errors:
+        return jsonify({"ok": False, "errors": errors}), 400
+
+    with engine.connect() as conn:
+        exists = conn.execute(
+            select(companies_table.c.id)
+            .where(companies_table.c.user_id == user_id)
+            .where(companies_table.c.tax_id == tax_id)
+            .where(companies_table.c.id != company_id)
+        ).first()
+    if exists:
+        return jsonify({"ok": False, "errors": ["Ya existe una empresa con ese CIF/NIF."]}), 400
+
+    with engine.begin() as conn:
+        result = conn.execute(
+            companies_table.update()
+            .where(companies_table.c.id == company_id)
+            .where(companies_table.c.user_id == user_id)
+            .values(
+                display_name=display_name,
+                legal_name=legal_name,
+                tax_id=tax_id,
+                company_type=company_type,
+            )
+        )
+
+    if result.rowcount == 0:
+        return jsonify({"ok": False, "errors": ["Empresa no encontrada."]}), 404
+
+    return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>", methods=["DELETE"])
+def delete_company(company_id):
+    user_id = get_current_user_id()
+    with engine.begin() as conn:
+        result = conn.execute(
+            companies_table.delete()
+            .where(companies_table.c.id == company_id)
+            .where(companies_table.c.user_id == user_id)
+        )
+    if result.rowcount == 0:
+        return jsonify({"ok": False, "errors": ["Empresa no encontrada."]}), 404
+    return jsonify({"ok": True})
+
+
 @app.route("/api/years")
 def available_years():
     years = set()
+    user_id = get_current_user_id()
+    company_id = get_company_id(required=False)
+    if company_id is None:
+        return jsonify({"years": [date.today().year]})
     with engine.connect() as conn:
-        invoice_dates = conn.execute(select(invoices_table.c.invoice_date)).scalars().all()
+        invoice_dates = conn.execute(
+            select(invoices_table.c.invoice_date)
+            .where(invoices_table.c.user_id == user_id)
+            .where(invoices_table.c.company_id == company_id)
+        ).scalars().all()
         for value in invoice_dates:
             if value:
                 try:
                     years.add(int(str(value)[:4]))
                 except ValueError:
                     continue
-        billing_years = conn.execute(select(facturacion_table.c.anio)).scalars().all()
+        billing_years = conn.execute(
+            select(facturacion_table.c.anio)
+            .where(facturacion_table.c.user_id == user_id)
+            .where(facturacion_table.c.company_id == company_id)
+        ).scalars().all()
         years.update(int(year) for year in billing_years if year)
+        income_years = conn.execute(
+            select(income_invoices_table.c.invoice_date)
+            .where(income_invoices_table.c.user_id == user_id)
+            .where(income_invoices_table.c.company_id == company_id)
+        ).scalars().all()
+        for value in income_years:
+            if value:
+                try:
+                    years.add(int(str(value)[:4]))
+                except ValueError:
+                    continue
 
     if not years:
         years = {date.today().year}
@@ -240,11 +622,15 @@ def available_years():
 
 @app.route("/api/upload", methods=["POST"])
 def upload_invoices():
+    user_id = get_current_user_id()
     if request.is_json:
         payload = request.get_json(silent=True) or {}
         entries = payload.get("entries", [])
         if not entries:
             return jsonify({"ok": False, "errors": ["No se recibieron entradas."]}), 400
+        company_id = get_company_id(required=True)
+        if company_id is None:
+            return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
 
         errors = []
         inserted = 0
@@ -253,6 +639,22 @@ def upload_invoices():
                 original_name = entry.get("originalFilename") or ""
                 stored_name = entry.get("storedFilename") or ""
                 invoice_date = entry.get("date") or date.today().isoformat()
+                entry_company_id = entry.get("company_id") or entry.get("companyId")
+                if entry_company_id:
+                    try:
+                        company_id = int(entry_company_id)
+                    except (TypeError, ValueError):
+                        errors.append("Empresa inválida.")
+                        continue
+                    with engine.connect() as conn:
+                        exists = conn.execute(
+                            select(companies_table.c.id)
+                            .where(companies_table.c.user_id == user_id)
+                            .where(companies_table.c.id == company_id)
+                        ).first()
+                    if not exists:
+                        errors.append("Empresa inválida.")
+                        continue
                 supplier = (entry.get("supplier") or "").strip()
                 base_amount = parse_amount(str(entry.get("base") or ""))
                 vat_rate_raw = str(entry.get("vat") or "").strip()
@@ -301,6 +703,8 @@ def upload_invoices():
 
                 conn.execute(
                     invoices_table.insert().values(
+                        user_id=user_id,
+                        company_id=company_id,
                         original_filename=original_name,
                         stored_filename=stored_value,
                         invoice_date=invoice_date,
@@ -318,6 +722,10 @@ def upload_invoices():
                 inserted += 1
 
         return jsonify({"ok": True, "inserted": inserted, "errors": errors})
+
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
 
     files = request.files.getlist("files")
     dates = request.form.getlist("date")
@@ -399,10 +807,12 @@ def upload_invoices():
             created_at = datetime.utcnow().isoformat()
 
             conn.execute(
-                invoices_table.insert().values(
-                    original_filename=original_name,
-                    stored_filename=storage_url,
-                    invoice_date=invoice_date,
+                    invoices_table.insert().values(
+                        user_id=user_id,
+                        company_id=company_id,
+                        original_filename=original_name,
+                        stored_filename=storage_url,
+                        invoice_date=invoice_date,
                     supplier=supplier,
                     base_amount=base_amount,
                     vat_rate=vat_rate_int,
@@ -429,6 +839,8 @@ def analyze_invoice_api():
     if not allowed_file(original_name):
         return jsonify({"ok": False, "errors": ["Tipo de archivo no permitido."]}), 400
 
+    document_type = request.form.get("document_type") or request.args.get("document_type") or "expense"
+    company_id = get_company_id(required=False)
     app.logger.info("Solicitud de análisis recibida: %s (%s)", original_name, file.mimetype)
     file_bytes = file.read()
     safe_name = secure_filename(original_name)
@@ -439,7 +851,13 @@ def analyze_invoice_api():
         app.logger.exception("Fallo al subir archivo a storage (%s)", stored_name)
         return jsonify({"ok": False, "errors": ["No se pudo almacenar el archivo."]}), 500
 
-    extracted = _analyze_invoice_with_timeout(file_bytes, original_name, stored_name, file.mimetype)
+    extracted = _analyze_invoice_with_timeout(
+        file_bytes,
+        original_name,
+        stored_name,
+        file.mimetype,
+        document_type=document_type,
+    )
 
     app.logger.info(
         "AI extracted for %s: provider=%s date=%s payment=%s base=%s vat_rate=%s vat_amount=%s total=%s",
@@ -456,27 +874,41 @@ def analyze_invoice_api():
     return jsonify(
         {
             "ok": True,
-            "storedFilename": storage_url,
-            "originalFilename": original_name,
-            "extracted": extracted,
-        }
+        "storedFilename": storage_url,
+        "originalFilename": original_name,
+        "companyId": company_id,
+        "extracted": extracted,
+    }
     )
 
 
 @app.route("/api/billing", methods=["POST"])
 def create_billing():
+    user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
     payload = request.get_json(silent=True) or request.form
 
     month = int(payload.get("month") or 0)
     year = int(payload.get("year") or 0)
     base_amount = parse_amount(str(payload.get("base") or ""))
     vat_rate_raw = str(payload.get("vat") or "").strip()
+    concept = (payload.get("concept") or "").strip()
+    invoice_date = payload.get("invoice_date") or payload.get("date") or ""
 
     errors = []
     if month < 1 or month > 12:
         errors.append("Mes inválido.")
     if year < 2000:
         errors.append("Año inválido.")
+    if invoice_date:
+        normalized_date = normalize_date(invoice_date)
+        if normalized_date is None:
+            errors.append("Fecha inválida.")
+        else:
+            invoice_date = normalized_date
     if base_amount is None or base_amount < 0:
         errors.append("Base facturada inválida.")
     try:
@@ -490,15 +922,27 @@ def create_billing():
         return jsonify({"ok": False, "errors": errors}), 400
 
     iva_repercutido = round(base_amount * (vat_rate / 100), 2)
+    total_amount = round(base_amount + iva_repercutido, 2)
+    if invoice_date:
+        try:
+            month = int(invoice_date[5:7])
+            year = int(invoice_date[:4])
+        except (TypeError, ValueError):
+            pass
 
     with engine.begin() as conn:
         conn.execute(
             facturacion_table.insert().values(
+                user_id=user_id,
+                company_id=company_id,
                 mes=month,
                 anio=year,
+                invoice_date=invoice_date or None,
+                concept=concept or None,
                 base_facturada=base_amount,
                 tipo_iva=vat_rate,
                 iva_repercutido=iva_repercutido,
+                total_amount=total_amount,
             )
         )
 
@@ -509,6 +953,10 @@ def create_billing():
 def billing_summary():
     month = request.args.get("month", type=int)
     year = request.args.get("year", type=int)
+    user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
 
     today = date.today()
     month = month or today.month
@@ -524,6 +972,8 @@ def billing_summary():
             .where(
                 facturacion_table.c.mes == month,
                 facturacion_table.c.anio == year,
+                facturacion_table.c.user_id == user_id,
+                facturacion_table.c.company_id == company_id,
             )
             .group_by(facturacion_table.c.tipo_iva)
         ).mappings().all()
@@ -561,6 +1011,10 @@ def billing_summary():
 def list_invoices():
     month = request.args.get("month", type=int)
     year = request.args.get("year", type=int)
+    user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
 
     today = date.today()
     month = month or today.month
@@ -584,6 +1038,8 @@ def list_invoices():
                 invoices_table.c.original_filename,
                 invoices_table.c.expense_category,
             )
+            .where(invoices_table.c.user_id == user_id)
+            .where(invoices_table.c.company_id == company_id)
             .where(invoices_table.c.invoice_date.between(start, end))
             .order_by(invoices_table.c.invoice_date.desc(), invoices_table.c.id.desc())
         ).mappings().all()
@@ -612,6 +1068,10 @@ def list_invoices():
 def list_payments():
     month = request.args.get("month", type=int)
     year = request.args.get("year", type=int)
+    user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
 
     today = date.today()
     month = month or today.month
@@ -627,13 +1087,14 @@ def list_payments():
     year_end_iso = year_end.isoformat()
 
     with engine.connect() as conn:
-        rows = conn.execute(
+        expense_rows = conn.execute(
             select(
                 invoices_table.c.id,
                 invoices_table.c.invoice_date,
                 invoices_table.c.payment_date,
                 invoices_table.c.supplier,
                 invoices_table.c.total_amount,
+                invoices_table.c.original_filename,
             )
             .where(
                 (
@@ -644,12 +1105,37 @@ def list_payments():
                     & invoices_table.c.invoice_date.between(buffer_start, year_end_iso)
                 )
             )
+            .where(invoices_table.c.user_id == user_id)
+            .where(invoices_table.c.company_id == company_id)
             .order_by(invoices_table.c.invoice_date.desc(), invoices_table.c.id.desc())
+        ).mappings().all()
+
+        income_rows = conn.execute(
+            select(
+                income_invoices_table.c.id,
+                income_invoices_table.c.invoice_date,
+                income_invoices_table.c.payment_date,
+                income_invoices_table.c.client,
+                income_invoices_table.c.total_amount,
+                income_invoices_table.c.original_filename,
+            )
+            .where(
+                (
+                    income_invoices_table.c.payment_date.between(year_start_iso, year_end_iso)
+                )
+                | (
+                    income_invoices_table.c.payment_date.is_(None)
+                    & income_invoices_table.c.invoice_date.between(buffer_start, year_end_iso)
+                )
+            )
+            .where(income_invoices_table.c.user_id == user_id)
+            .where(income_invoices_table.c.company_id == company_id)
+            .order_by(income_invoices_table.c.invoice_date.desc(), income_invoices_table.c.id.desc())
         ).mappings().all()
 
     items = []
     day_totals = {}
-    for row in rows:
+    for row in expense_rows:
         payment_date = row["payment_date"] or compute_payment_date(row["invoice_date"], None)
         if not payment_date:
             continue
@@ -665,9 +1151,35 @@ def list_payments():
         items.append(
             {
                 "id": row["id"],
-                "supplier": row["supplier"],
+                "counterparty": row["supplier"],
+                "concept": row["original_filename"],
                 "payment_date": payment_date,
                 "amount": amount,
+                "type": "expense",
+            }
+        )
+
+    for row in income_rows:
+        payment_date = row["payment_date"] or compute_payment_date(row["invoice_date"], None)
+        if not payment_date:
+            continue
+        try:
+            payment_dt = date.fromisoformat(payment_date)
+        except ValueError:
+            continue
+        if payment_dt < start or payment_dt > end:
+            continue
+        day = payment_dt.day
+        amount = float(row["total_amount"] or 0)
+        day_totals[day] = round(day_totals.get(day, 0.0) + amount, 2)
+        items.append(
+            {
+                "id": row["id"],
+                "counterparty": row["client"],
+                "concept": row["original_filename"],
+                "payment_date": payment_date,
+                "amount": amount,
+                "type": "income",
             }
         )
 
@@ -676,6 +1188,10 @@ def list_payments():
 
 @app.route("/api/invoices/<int:invoice_id>", methods=["PUT"])
 def update_invoice(invoice_id):
+    user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
     payload = request.get_json(silent=True) or {}
 
     invoice_date = payload.get("invoice_date") or ""
@@ -718,6 +1234,8 @@ def update_invoice(invoice_id):
         result = conn.execute(
             invoices_table.update()
             .where(invoices_table.c.id == invoice_id)
+            .where(invoices_table.c.user_id == user_id)
+            .where(invoices_table.c.company_id == company_id)
             .values(
                 invoice_date=invoice_date,
                 supplier=supplier,
@@ -753,9 +1271,16 @@ def update_invoice(invoice_id):
 
 @app.route("/api/invoices/<int:invoice_id>", methods=["DELETE"])
 def delete_invoice(invoice_id):
+    user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
     with engine.begin() as conn:
         result = conn.execute(
-            invoices_table.delete().where(invoices_table.c.id == invoice_id)
+            invoices_table.delete()
+            .where(invoices_table.c.id == invoice_id)
+            .where(invoices_table.c.user_id == user_id)
+            .where(invoices_table.c.company_id == company_id)
         )
 
     if result.rowcount == 0:
@@ -764,10 +1289,234 @@ def delete_invoice(invoice_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/income-invoices")
+def list_income_invoices():
+    month = request.args.get("month", type=int)
+    year = request.args.get("year", type=int)
+    user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    today = date.today()
+    month = month or today.month
+    year = year or today.year
+
+    _, last_day = calendar.monthrange(year, month)
+    start = date(year, month, 1).isoformat()
+    end = date(year, month, last_day).isoformat()
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(
+                income_invoices_table.c.id,
+                income_invoices_table.c.invoice_date,
+                income_invoices_table.c.payment_date,
+                income_invoices_table.c.client,
+                income_invoices_table.c.base_amount,
+                income_invoices_table.c.vat_rate,
+                income_invoices_table.c.vat_amount,
+                income_invoices_table.c.total_amount,
+                income_invoices_table.c.original_filename,
+            )
+            .where(income_invoices_table.c.user_id == user_id)
+            .where(income_invoices_table.c.company_id == company_id)
+            .where(income_invoices_table.c.invoice_date.between(start, end))
+            .order_by(income_invoices_table.c.invoice_date.desc(), income_invoices_table.c.id.desc())
+        ).mappings().all()
+
+    invoices = [
+        {
+            "id": row["id"],
+            "invoice_date": row["invoice_date"],
+            "payment_date": row["payment_date"]
+            or compute_payment_date(row["invoice_date"], row["payment_date"]),
+            "client": row["client"],
+            "base_amount": float(row["base_amount"]),
+            "vat_rate": int(row["vat_rate"]),
+            "vat_amount": float(row["vat_amount"]) if row["vat_amount"] is not None else None,
+            "total_amount": float(row["total_amount"]),
+            "original_filename": row["original_filename"],
+        }
+        for row in rows
+    ]
+
+    return jsonify({"invoices": invoices})
+
+
+@app.route("/api/income-invoices", methods=["POST"])
+def create_income_invoices():
+    user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    payload = request.get_json(silent=True) or {}
+    entries = payload.get("entries", [])
+    if not entries:
+        return jsonify({"ok": False, "errors": ["No se recibieron entradas."]}), 400
+
+    errors = []
+    inserted = 0
+    with engine.begin() as conn:
+        for entry in entries:
+            original_name = entry.get("originalFilename") or ""
+            stored_name = entry.get("storedFilename") or ""
+            invoice_date = entry.get("date") or entry.get("invoice_date") or date.today().isoformat()
+            client = (entry.get("client") or "").strip()
+            base_amount = parse_amount(str(entry.get("base") or ""))
+            vat_rate_raw = str(entry.get("vat") or "").strip()
+            vat_amount = parse_amount(str(entry.get("vatAmount") or ""))
+            total_amount = parse_amount(str(entry.get("total") or ""))
+            payment_date = compute_payment_date(
+                invoice_date,
+                entry.get("paymentDate") or entry.get("payment_date"),
+            )
+            analysis_text = entry.get("analysisText") or entry.get("ocrText")
+
+            if not stored_name:
+                errors.append(f"Archivo faltante para {original_name}.")
+                continue
+            if not client:
+                errors.append(f"Cliente obligatorio para {original_name}.")
+                continue
+            if base_amount is None or base_amount < 0:
+                errors.append(f"Base imponible inválida para {original_name}.")
+                continue
+            try:
+                vat_rate_int = int(vat_rate_raw)
+            except ValueError:
+                errors.append(f"Tipo de IVA inválido para {original_name}.")
+                continue
+            if vat_rate_int not in {0, 4, 10, 21}:
+                errors.append(f"Tipo de IVA inválido para {original_name}.")
+                continue
+
+            if vat_amount is None:
+                vat_amount = round(base_amount * (vat_rate_int / 100), 2)
+            if total_amount is None:
+                total_amount = round(base_amount + vat_amount, 2)
+
+            stored_value = (
+                stored_name
+                if stored_name.startswith("http")
+                else get_public_url(stored_name)
+            )
+            created_at = datetime.utcnow().isoformat()
+
+            conn.execute(
+                income_invoices_table.insert().values(
+                    user_id=user_id,
+                    company_id=company_id,
+                    original_filename=original_name,
+                    stored_filename=stored_value,
+                    invoice_date=invoice_date,
+                    client=client,
+                    base_amount=base_amount,
+                    vat_rate=vat_rate_int,
+                    vat_amount=vat_amount,
+                    total_amount=total_amount,
+                    payment_date=payment_date,
+                    ocr_text=analysis_text,
+                    created_at=created_at,
+                )
+            )
+            inserted += 1
+
+    return jsonify({"ok": True, "inserted": inserted, "errors": errors})
+
+
+@app.route("/api/income-invoices/<int:invoice_id>", methods=["PUT"])
+def update_income_invoice(invoice_id):
+    user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    payload = request.get_json(silent=True) or {}
+    invoice_date = payload.get("invoice_date") or ""
+    payment_date = compute_payment_date(
+        invoice_date,
+        payload.get("payment_date") or payload.get("paymentDate"),
+    )
+    client = (payload.get("client") or "").strip()
+    base_amount = parse_amount(str(payload.get("base_amount") or ""))
+    vat_rate_raw = str(payload.get("vat_rate") or "").strip()
+    vat_amount = parse_amount(str(payload.get("vat_amount") or ""))
+    total_amount = parse_amount(str(payload.get("total_amount") or ""))
+
+    errors = []
+    if not invoice_date:
+        errors.append("Fecha obligatoria.")
+    if not client:
+        errors.append("Cliente obligatorio.")
+    if base_amount is None or base_amount < 0:
+        errors.append("Base imponible inválida.")
+    try:
+        vat_rate = int(vat_rate_raw)
+    except ValueError:
+        vat_rate = None
+    if vat_rate not in {0, 4, 10, 21}:
+        errors.append("Tipo de IVA inválido.")
+
+    if errors:
+        return jsonify({"ok": False, "errors": errors}), 400
+
+    if vat_amount is None:
+        vat_amount = round(base_amount * (vat_rate / 100), 2)
+    if total_amount is None:
+        total_amount = round(base_amount + vat_amount, 2)
+
+    with engine.begin() as conn:
+        result = conn.execute(
+            income_invoices_table.update()
+            .where(income_invoices_table.c.id == invoice_id)
+            .where(income_invoices_table.c.user_id == user_id)
+            .where(income_invoices_table.c.company_id == company_id)
+            .values(
+                invoice_date=invoice_date,
+                payment_date=payment_date,
+                client=client,
+                base_amount=base_amount,
+                vat_rate=vat_rate,
+                vat_amount=vat_amount,
+                total_amount=total_amount,
+            )
+        )
+
+    if result.rowcount == 0:
+        return jsonify({"ok": False, "errors": ["Factura no encontrada."]}), 404
+
+    return jsonify({"ok": True})
+
+
+@app.route("/api/income-invoices/<int:invoice_id>", methods=["DELETE"])
+def delete_income_invoice(invoice_id):
+    user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    with engine.begin() as conn:
+        result = conn.execute(
+            income_invoices_table.delete()
+            .where(income_invoices_table.c.id == invoice_id)
+            .where(income_invoices_table.c.user_id == user_id)
+            .where(income_invoices_table.c.company_id == company_id)
+        )
+    if result.rowcount == 0:
+        return jsonify({"ok": False, "errors": ["Factura no encontrada."]}), 404
+    return jsonify({"ok": True})
+
+
 @app.route("/api/expenses/no-invoice")
 def list_no_invoice_expenses():
     month = request.args.get("month", type=int)
     year = request.args.get("year", type=int)
+    user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
 
     today = date.today()
     month = month or today.month
@@ -787,6 +1536,8 @@ def list_no_invoice_expenses():
                 no_invoice_table.c.expense_type,
                 no_invoice_table.c.deductible,
             )
+            .where(no_invoice_table.c.user_id == user_id)
+            .where(no_invoice_table.c.company_id == company_id)
             .where(no_invoice_table.c.expense_date.between(start, end))
             .order_by(no_invoice_table.c.expense_date.desc(), no_invoice_table.c.id.desc())
         ).mappings().all()
@@ -808,6 +1559,10 @@ def list_no_invoice_expenses():
 
 @app.route("/api/expenses/no-invoice", methods=["POST"])
 def create_no_invoice_expense():
+    user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
     payload = request.get_json(silent=True) or {}
 
     expense_date = payload.get("expense_date") or ""
@@ -840,6 +1595,8 @@ def create_no_invoice_expense():
     with engine.begin() as conn:
         conn.execute(
             no_invoice_table.insert().values(
+                user_id=user_id,
+                company_id=company_id,
                 expense_date=expense_date,
                 concept=concept,
                 amount=amount,
@@ -854,6 +1611,10 @@ def create_no_invoice_expense():
 
 @app.route("/api/expenses/no-invoice/<int:expense_id>", methods=["PUT"])
 def update_no_invoice_expense(expense_id):
+    user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
     payload = request.get_json(silent=True) or {}
 
     expense_date = payload.get("expense_date") or ""
@@ -887,6 +1648,8 @@ def update_no_invoice_expense(expense_id):
         result = conn.execute(
             no_invoice_table.update()
             .where(no_invoice_table.c.id == expense_id)
+            .where(no_invoice_table.c.user_id == user_id)
+            .where(no_invoice_table.c.company_id == company_id)
             .values(
                 expense_date=expense_date,
                 concept=concept,
@@ -916,8 +1679,17 @@ def update_no_invoice_expense(expense_id):
 
 @app.route("/api/expenses/no-invoice/<int:expense_id>", methods=["DELETE"])
 def delete_no_invoice_expense(expense_id):
+    user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
     with engine.begin() as conn:
-        result = conn.execute(no_invoice_table.delete().where(no_invoice_table.c.id == expense_id))
+        result = conn.execute(
+            no_invoice_table.delete()
+            .where(no_invoice_table.c.id == expense_id)
+            .where(no_invoice_table.c.user_id == user_id)
+            .where(no_invoice_table.c.company_id == company_id)
+        )
 
     if result.rowcount == 0:
         return jsonify({"ok": False, "errors": ["Gasto no encontrado."]}), 404
@@ -929,6 +1701,10 @@ def delete_no_invoice_expense(expense_id):
 def billing_entries():
     month = request.args.get("month", type=int)
     year = request.args.get("year", type=int)
+    user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
 
     today = date.today()
     month = month or today.month
@@ -940,11 +1716,19 @@ def billing_entries():
                 facturacion_table.c.id,
                 facturacion_table.c.mes,
                 facturacion_table.c.anio,
+                facturacion_table.c.invoice_date,
+                facturacion_table.c.concept,
                 facturacion_table.c.base_facturada,
                 facturacion_table.c.tipo_iva,
                 facturacion_table.c.iva_repercutido,
+                facturacion_table.c.total_amount,
             )
-            .where(facturacion_table.c.mes == month, facturacion_table.c.anio == year)
+            .where(
+                facturacion_table.c.mes == month,
+                facturacion_table.c.anio == year,
+                facturacion_table.c.user_id == user_id,
+                facturacion_table.c.company_id == company_id,
+            )
             .order_by(facturacion_table.c.id.desc())
         ).mappings().all()
 
@@ -953,9 +1737,12 @@ def billing_entries():
             "id": row["id"],
             "month": row["mes"],
             "year": row["anio"],
+            "invoice_date": row["invoice_date"],
+            "concept": row["concept"],
             "base": float(row["base_facturada"]),
             "vat": int(row["tipo_iva"]),
             "vatAmount": float(row["iva_repercutido"]),
+            "total": float(row["total_amount"] or 0),
         }
         for row in rows
     ]
@@ -965,6 +1752,10 @@ def billing_entries():
 
 @app.route("/api/billing/<int:billing_id>", methods=["PUT"])
 def update_billing(billing_id):
+    user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
     payload = request.get_json(silent=True) or request.form
 
     base_amount = parse_amount(str(payload.get("base") or ""))
@@ -984,15 +1775,19 @@ def update_billing(billing_id):
         return jsonify({"ok": False, "errors": errors}), 400
 
     iva_repercutido = round(base_amount * (vat_rate / 100), 2)
+    total_amount = round(base_amount + iva_repercutido, 2)
 
     with engine.begin() as conn:
         result = conn.execute(
             facturacion_table.update()
             .where(facturacion_table.c.id == billing_id)
+            .where(facturacion_table.c.user_id == user_id)
+            .where(facturacion_table.c.company_id == company_id)
             .values(
                 base_facturada=base_amount,
                 tipo_iva=vat_rate,
                 iva_repercutido=iva_repercutido,
+                total_amount=total_amount,
             )
         )
 
@@ -1007,6 +1802,7 @@ def update_billing(billing_id):
                 "base": base_amount,
                 "vat": vat_rate,
                 "vatAmount": iva_repercutido,
+                "total": total_amount,
             },
         }
     )
@@ -1014,8 +1810,17 @@ def update_billing(billing_id):
 
 @app.route("/api/billing/<int:billing_id>", methods=["DELETE"])
 def delete_billing(billing_id):
+    user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
     with engine.begin() as conn:
-        result = conn.execute(facturacion_table.delete().where(facturacion_table.c.id == billing_id))
+        result = conn.execute(
+            facturacion_table.delete()
+            .where(facturacion_table.c.id == billing_id)
+            .where(facturacion_table.c.user_id == user_id)
+            .where(facturacion_table.c.company_id == company_id)
+        )
 
     if result.rowcount == 0:
         return jsonify({"ok": False, "errors": ["Registro no encontrado."]}), 404
@@ -1027,6 +1832,10 @@ def delete_billing(billing_id):
 def summary():
     month = request.args.get("month", type=int)
     year = request.args.get("year", type=int)
+    user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
 
     today = date.today()
     month = month or today.month
@@ -1045,6 +1854,8 @@ def summary():
                 invoices_table.c.vat_rate,
                 invoices_table.c.base_amount,
             )
+            .where(invoices_table.c.user_id == user_id)
+            .where(invoices_table.c.company_id == company_id)
             .where(invoices_table.c.invoice_date.between(start, end))
             .order_by(invoices_table.c.invoice_date)
         ).mappings().all()

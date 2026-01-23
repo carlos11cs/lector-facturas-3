@@ -15,6 +15,10 @@ let annualBillingBaseTotal = 0;
 let annualDeductibleExpenses = 0;
 let currentPayments = null;
 let selectedPaymentDay = null;
+let companies = [];
+let selectedCompanyId = null;
+let pendingIncomeFiles = [];
+let currentIncomeInvoices = [];
 
 const monthNames = [
   "Enero",
@@ -70,13 +74,24 @@ function computePaymentDate(invoiceDate, paymentDate) {
   return base.toISOString().slice(0, 10);
 }
 
+function withCompanyParam(url) {
+  const companyId = getSelectedCompanyId();
+  if (!companyId) {
+    return url;
+  }
+  return `${url}${url.includes("?") ? "&" : "?"}company_id=${companyId}`;
+}
+
 const allowedExtensions = new Set([".pdf", ".jpg", ".jpeg", ".png"]);
 
 const monthSelect = document.getElementById("monthSelect");
 const yearSelect = document.getElementById("yearSelect");
 const periodSelect = document.getElementById("periodSelect");
+const companySelect = document.getElementById("companySelect");
 const billingMonthSelect = document.getElementById("billingMonthSelect");
 const billingYearSelect = document.getElementById("billingYearSelect");
+const billingDateInput = document.getElementById("billingDateInput");
+const billingConceptInput = document.getElementById("billingConceptInput");
 const billingBaseInput = document.getElementById("billingBaseInput");
 const billingVatSelect = document.getElementById("billingVatSelect");
 const billingSaveBtn = document.getElementById("billingSaveBtn");
@@ -109,6 +124,20 @@ const pnlName = document.getElementById("pnlName");
 const pnlTaxId = document.getElementById("pnlTaxId");
 const globalProcessing = document.getElementById("globalProcessing");
 const globalProcessingText = document.getElementById("globalProcessingText");
+const companyDisplayName = document.getElementById("companyDisplayName");
+const companyLegalName = document.getElementById("companyLegalName");
+const companyTaxId = document.getElementById("companyTaxId");
+const companyType = document.getElementById("companyType");
+const companySaveBtn = document.getElementById("companySaveBtn");
+const companiesTableBody = document.querySelector("#companiesTable tbody");
+const companiesEmpty = document.getElementById("companiesEmpty");
+const incomeUploadBtn = document.getElementById("incomeUploadBtn");
+const incomeDropZone = document.getElementById("incomeDropZone");
+const incomeFileInput = document.getElementById("incomeFileInput");
+const incomeUploadTableBody = document.querySelector("#incomeUploadTable tbody");
+const incomeEmptyMessage = document.getElementById("incomeEmptyMessage");
+const incomeInvoicesTableBody = document.querySelector("#incomeInvoicesTable tbody");
+const incomeInvoicesEmpty = document.getElementById("incomeInvoicesEmpty");
 const paymentCalendar = document.getElementById("paymentCalendar");
 const paymentCalendarTitle = document.getElementById("paymentCalendarTitle");
 const paymentDayTitle = document.getElementById("paymentDayTitle");
@@ -250,7 +279,9 @@ function setYearOptions(select, years) {
 }
 
 function loadYears() {
-  return fetch("/api/years")
+  const companyId = getSelectedCompanyId();
+  const suffix = companyId ? `?company_id=${companyId}` : "";
+  return fetch(`/api/years${suffix}`)
     .then((res) => res.json())
     .then((data) => {
       const currentYear = new Date().getFullYear();
@@ -259,6 +290,242 @@ function loadYears() {
       const years = Array.from(yearSet).sort((a, b) => a - b);
       setYearOptions(yearSelect, years);
       setYearOptions(billingYearSelect, years);
+    });
+}
+
+function setCompanyOptions(list) {
+  if (!companySelect) {
+    return;
+  }
+  companySelect.innerHTML = "";
+  if (!list.length) {
+    companySelect.disabled = true;
+    selectedCompanyId = null;
+    return;
+  }
+  companySelect.disabled = false;
+  list.forEach((company) => {
+    const option = document.createElement("option");
+    option.value = String(company.id);
+    option.textContent = company.display_name;
+    companySelect.appendChild(option);
+  });
+  if (selectedCompanyId && list.some((c) => String(c.id) === String(selectedCompanyId))) {
+    companySelect.value = String(selectedCompanyId);
+  } else if (list.length === 1) {
+    selectedCompanyId = String(list[0].id);
+    companySelect.value = selectedCompanyId;
+    persistFilters();
+  } else if (list.length > 0) {
+    selectedCompanyId = String(list[0].id);
+    companySelect.value = selectedCompanyId;
+    persistFilters();
+  }
+}
+
+function loadCompanies() {
+  return fetch("/api/companies")
+    .then((res) => res.json())
+    .then((data) => {
+      companies = data.companies || [];
+      setCompanyOptions(companies);
+      renderCompaniesTable(companies);
+      return companies;
+    });
+}
+
+function renderCompaniesTable(list) {
+  if (!companiesTableBody || !companiesEmpty) {
+    return;
+  }
+  companiesTableBody.innerHTML = "";
+  if (!list.length) {
+    companiesEmpty.style.display = "block";
+    return;
+  }
+  companiesEmpty.style.display = "none";
+  list.forEach((company) => {
+    const tr = document.createElement("tr");
+    tr.dataset.id = company.id;
+
+    const displayTd = document.createElement("td");
+    displayTd.textContent = company.display_name;
+    const legalTd = document.createElement("td");
+    legalTd.textContent = company.legal_name;
+    const taxTd = document.createElement("td");
+    taxTd.textContent = company.tax_id;
+    const typeTd = document.createElement("td");
+    typeTd.textContent = company.company_type === "individual" ? "Autónomo" : "Sociedad";
+    const actionsTd = document.createElement("td");
+    actionsTd.classList.add("billing-actions");
+
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "button ghost";
+    editBtn.textContent = "Editar";
+    editBtn.addEventListener("click", () => {
+      enterCompanyEditMode(tr, company);
+    });
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "button danger";
+    deleteBtn.textContent = "Eliminar";
+    deleteBtn.addEventListener("click", () => {
+      if (!confirm("¿Seguro que deseas eliminar esta empresa?")) {
+        return;
+      }
+      deleteCompany(company.id);
+    });
+
+    actionsTd.appendChild(editBtn);
+    actionsTd.appendChild(deleteBtn);
+
+    tr.appendChild(displayTd);
+    tr.appendChild(legalTd);
+    tr.appendChild(taxTd);
+    tr.appendChild(typeTd);
+    tr.appendChild(actionsTd);
+    companiesTableBody.appendChild(tr);
+  });
+}
+
+function enterCompanyEditMode(row, company) {
+  const displayTd = row.children[0];
+  const legalTd = row.children[1];
+  const taxTd = row.children[2];
+  const typeTd = row.children[3];
+  const actionsTd = row.children[4];
+
+  const displayInput = document.createElement("input");
+  displayInput.type = "text";
+  displayInput.value = company.display_name;
+  const legalInput = document.createElement("input");
+  legalInput.type = "text";
+  legalInput.value = company.legal_name;
+  const taxInput = document.createElement("input");
+  taxInput.type = "text";
+  taxInput.value = company.tax_id;
+  const typeSelect = document.createElement("select");
+  const optionIndividual = document.createElement("option");
+  optionIndividual.value = "individual";
+  optionIndividual.textContent = "Autónomo";
+  const optionCompany = document.createElement("option");
+  optionCompany.value = "company";
+  optionCompany.textContent = "Sociedad";
+  typeSelect.appendChild(optionIndividual);
+  typeSelect.appendChild(optionCompany);
+  typeSelect.value = company.company_type;
+
+  displayTd.textContent = "";
+  displayTd.appendChild(displayInput);
+  legalTd.textContent = "";
+  legalTd.appendChild(legalInput);
+  taxTd.textContent = "";
+  taxTd.appendChild(taxInput);
+  typeTd.textContent = "";
+  typeTd.appendChild(typeSelect);
+
+  actionsTd.innerHTML = "";
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "button primary";
+  saveBtn.textContent = "Guardar";
+  saveBtn.addEventListener("click", () => {
+    updateCompany(company.id, {
+      display_name: displayInput.value,
+      legal_name: legalInput.value,
+      tax_id: taxInput.value,
+      company_type: typeSelect.value,
+    });
+  });
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "button ghost";
+  cancelBtn.textContent = "Cancelar";
+  cancelBtn.addEventListener("click", () => {
+    renderCompaniesTable(companies);
+  });
+  actionsTd.appendChild(saveBtn);
+  actionsTd.appendChild(cancelBtn);
+}
+
+function saveCompany() {
+  if (!companyDisplayName || !companyLegalName || !companyTaxId || !companyType) {
+    return;
+  }
+  companySaveBtn.disabled = true;
+  fetch("/api/companies", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      display_name: companyDisplayName.value,
+      legal_name: companyLegalName.value,
+      tax_id: companyTaxId.value,
+      company_type: companyType.value,
+    }),
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        alert((data.errors || ["Error al guardar."]).join("\n"));
+        return;
+      }
+      companyDisplayName.value = "";
+      companyLegalName.value = "";
+      companyTaxId.value = "";
+      loadCompanies().then(() => {
+        refreshAllData();
+      });
+    })
+    .catch(() => {
+      alert("No se pudo guardar la empresa.");
+    })
+    .finally(() => {
+      companySaveBtn.disabled = false;
+    });
+}
+
+function updateCompany(companyId, payload) {
+  fetch(`/api/companies/${companyId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        alert((data.errors || ["Error al actualizar."]).join("\n"));
+        return;
+      }
+      loadCompanies().then(() => {
+        refreshAllData();
+      });
+    })
+    .catch(() => {
+      alert("No se pudo actualizar la empresa.");
+    });
+}
+
+function deleteCompany(companyId) {
+  fetch(`/api/companies/${companyId}`, {
+    method: "DELETE",
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        alert((data.errors || ["Error al eliminar."]).join("\n"));
+        return;
+      }
+      if (String(selectedCompanyId) === String(companyId)) {
+        selectedCompanyId = null;
+      }
+      loadCompanies().then(() => {
+        refreshAllData();
+      });
+    })
+    .catch(() => {
+      alert("No se pudo eliminar la empresa.");
     });
 }
 
@@ -271,6 +538,10 @@ function getSelectedMonthYear() {
     month: Number(monthSelect.value),
     year: Number(yearSelect.value),
   };
+}
+
+function getSelectedCompanyId() {
+  return selectedCompanyId ? Number(selectedCompanyId) : null;
 }
 
 function getQuarterMonths(month) {
@@ -297,6 +568,9 @@ function persistFilters() {
   localStorage.setItem("selectedYear", yearSelect.value);
   localStorage.setItem("selectedPeriod", periodSelect.value);
   localStorage.setItem("taxpayerType", taxpayerSelect.value);
+  if (selectedCompanyId) {
+    localStorage.setItem("selectedCompanyId", String(selectedCompanyId));
+  }
 }
 
 function restoreFilters(now) {
@@ -323,6 +597,11 @@ function restoreFilters(now) {
 
   if (storedTaxpayer) {
     taxpayerSelect.value = storedTaxpayer === "empresa" ? "sociedad" : storedTaxpayer;
+  }
+
+  const storedCompany = localStorage.getItem("selectedCompanyId");
+  if (storedCompany) {
+    selectedCompanyId = storedCompany;
   }
 }
 
@@ -359,6 +638,41 @@ function addFiles(fileList) {
     analyzeInvoiceForItem(item);
   });
   renderTable();
+}
+
+function addIncomeFiles(fileList) {
+  Array.from(fileList).forEach((file) => {
+    if (!isAllowedFile(file.name)) {
+      return;
+    }
+    const item = {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      file,
+      originalFilename: file.name,
+      storedFilename: "",
+      date: new Date().toISOString().slice(0, 10),
+      paymentDate: "",
+      client: "",
+      base: "",
+      vat: "21",
+      vatAmount: "",
+      total: "",
+      analysisText: "",
+      analysisPending: true,
+      analysisError: false,
+      touched: {
+        date: false,
+        client: false,
+        base: false,
+        vat: false,
+        vatAmount: false,
+        total: false,
+      },
+    };
+    pendingIncomeFiles.push(item);
+    analyzeIncomeForItem(item);
+  });
+  renderIncomeTable();
 }
 
 function renderTable() {
@@ -534,6 +848,293 @@ function renderTable() {
   });
 }
 
+function renderIncomeTable() {
+  if (!incomeUploadTableBody || !incomeEmptyMessage) {
+    return;
+  }
+  incomeUploadTableBody.innerHTML = "";
+  if (pendingIncomeFiles.length === 0) {
+    incomeEmptyMessage.style.display = "block";
+    if (incomeUploadBtn) {
+      incomeUploadBtn.disabled = false;
+    }
+    return;
+  }
+  incomeEmptyMessage.style.display = "none";
+  if (incomeUploadBtn) {
+    incomeUploadBtn.disabled = pendingIncomeFiles.some((item) => item.analysisPending);
+  }
+
+  pendingIncomeFiles.forEach((item) => {
+    const tr = document.createElement("tr");
+    tr.dataset.id = item.id;
+    if (item.analysisPending) {
+      tr.classList.add("is-processing");
+    }
+
+    const nameTd = document.createElement("td");
+    nameTd.textContent = item.file.name;
+
+    const dateTd = document.createElement("td");
+    const dateInput = document.createElement("input");
+    dateInput.type = "date";
+    dateInput.value = item.date;
+    dateInput.disabled = item.analysisPending;
+    dateInput.addEventListener("change", () => {
+      item.date = dateInput.value;
+      item.touched.date = true;
+    });
+    dateTd.appendChild(dateInput);
+
+    const clientTd = document.createElement("td");
+    const clientInput = document.createElement("input");
+    clientInput.type = "text";
+    clientInput.placeholder = "Cliente";
+    clientInput.value = item.client;
+    clientInput.disabled = item.analysisPending;
+    clientInput.addEventListener("input", () => {
+      item.client = clientInput.value;
+      item.touched.client = true;
+    });
+    clientTd.appendChild(clientInput);
+
+    const baseTd = document.createElement("td");
+    const baseInput = document.createElement("input");
+    baseInput.type = "number";
+    baseInput.step = "0.01";
+    baseInput.min = "0";
+    baseInput.placeholder = "0,00";
+    baseInput.value = item.base;
+    baseInput.disabled = item.analysisPending;
+    baseInput.addEventListener("input", () => {
+      item.base = baseInput.value;
+      item.touched.base = true;
+    });
+    baseTd.appendChild(baseInput);
+
+    const vatTd = document.createElement("td");
+    const vatSelect = document.createElement("select");
+    ["0", "4", "10", "21"].forEach((rate) => {
+      const option = document.createElement("option");
+      option.value = rate;
+      option.textContent = `${rate}%`;
+      vatSelect.appendChild(option);
+    });
+    applyVatSelection(vatSelect, item.vat);
+    vatSelect.disabled = item.analysisPending;
+    vatSelect.addEventListener("change", () => {
+      item.vat = resolveVatRateValue(vatSelect.value);
+      item.touched.vat = true;
+    });
+    vatTd.appendChild(vatSelect);
+
+    const vatAmountTd = document.createElement("td");
+    const vatAmountInput = document.createElement("input");
+    vatAmountInput.type = "number";
+    vatAmountInput.step = "0.01";
+    vatAmountInput.min = "0";
+    vatAmountInput.placeholder = "0,00";
+    vatAmountInput.value = item.vatAmount;
+    vatAmountInput.disabled = item.analysisPending;
+    vatAmountInput.addEventListener("input", () => {
+      item.vatAmount = vatAmountInput.value;
+      item.touched.vatAmount = true;
+    });
+    vatAmountTd.appendChild(vatAmountInput);
+
+    const totalTd = document.createElement("td");
+    const totalInput = document.createElement("input");
+    totalInput.type = "number";
+    totalInput.step = "0.01";
+    totalInput.min = "0";
+    totalInput.placeholder = "0,00";
+    totalInput.value = item.total;
+    totalInput.disabled = item.analysisPending;
+    totalInput.addEventListener("input", () => {
+      item.total = totalInput.value;
+      item.touched.total = true;
+    });
+    totalTd.appendChild(totalInput);
+
+    const actionsTd = document.createElement("td");
+    actionsTd.classList.add("row-actions");
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.textContent = "Quitar";
+    removeBtn.disabled = item.analysisPending;
+    removeBtn.addEventListener("click", () => {
+      const index = pendingIncomeFiles.findIndex((entry) => entry.id === item.id);
+      if (index !== -1) {
+        pendingIncomeFiles.splice(index, 1);
+        renderIncomeTable();
+      }
+    });
+    actionsTd.appendChild(removeBtn);
+
+    tr.appendChild(nameTd);
+    tr.appendChild(dateTd);
+    tr.appendChild(clientTd);
+    tr.appendChild(baseTd);
+    tr.appendChild(vatTd);
+    tr.appendChild(vatAmountTd);
+    tr.appendChild(totalTd);
+    tr.appendChild(actionsTd);
+    incomeUploadTableBody.appendChild(tr);
+  });
+}
+
+function analyzeIncomeForItem(item) {
+  const formData = new FormData();
+  formData.append("file", item.file);
+  formData.append("document_type", "income");
+  const companyId = getSelectedCompanyId();
+  if (companyId) {
+    formData.append("company_id", companyId);
+  }
+
+  fetch("/api/analyze-invoice", {
+    method: "POST",
+    body: formData,
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        item.analysisPending = false;
+        item.analysisError = true;
+        renderIncomeTable();
+        return;
+      }
+      const extracted = data.extracted || {};
+      item.storedFilename = data.storedFilename || "";
+      item.analysisText = extracted.analysis_text || "";
+      const detectedClient = extracted.client_name || extracted.provider_name;
+
+      if (!item.touched.client && detectedClient) {
+        item.client = detectedClient;
+      }
+      if (!item.touched.date && extracted.invoice_date) {
+        item.date = extracted.invoice_date;
+      }
+      if (!item.paymentDate) {
+        item.paymentDate = computePaymentDate(item.date, extracted.payment_date);
+      }
+      if (!item.touched.base && extracted.base_amount !== null && extracted.base_amount !== undefined) {
+        item.base = String(extracted.base_amount);
+      }
+      if (!item.touched.vat) {
+        const detectedVat = normalizeVatRateValue(extracted.vat_rate);
+        if (detectedVat !== null) {
+          item.vat = detectedVat;
+        } else if (!item.vat) {
+          item.vat = "21";
+        }
+      }
+      if (
+        !item.touched.vatAmount &&
+        extracted.vat_amount !== null &&
+        extracted.vat_amount !== undefined
+      ) {
+        item.vatAmount = String(extracted.vat_amount);
+      }
+      if (!item.touched.total && extracted.total_amount !== null && extracted.total_amount !== undefined) {
+        item.total = String(extracted.total_amount);
+      }
+
+      item.analysisPending = false;
+      renderIncomeTable();
+    })
+    .catch(() => {
+      item.analysisPending = false;
+      item.analysisError = true;
+      renderIncomeTable();
+    });
+}
+
+function validateIncomePending() {
+  const errors = [];
+  pendingIncomeFiles.forEach((item) => {
+    if (item.analysisPending) {
+      errors.push(`Análisis en proceso: ${item.file.name}`);
+    }
+    if (!item.storedFilename) {
+      errors.push(`Análisis pendiente: ${item.file.name}`);
+    }
+    if (!item.client.trim()) {
+      errors.push(`Cliente obligatorio: ${item.file.name}`);
+    }
+    if (!item.base || Number(item.base) < 0) {
+      errors.push(`Base imponible inválida: ${item.file.name}`);
+    }
+    if (!item.date) {
+      errors.push(`Fecha obligatoria: ${item.file.name}`);
+    }
+  });
+  return errors;
+}
+
+function uploadIncomePending() {
+  if (pendingIncomeFiles.length === 0) {
+    alert("No hay facturas emitidas para subir.");
+    return;
+  }
+  if (!getSelectedCompanyId()) {
+    alert("Selecciona una empresa antes de subir facturas emitidas.");
+    return;
+  }
+  const errors = validateIncomePending();
+  if (errors.length) {
+    alert(errors.slice(0, 3).join("\n"));
+    return;
+  }
+
+  if (incomeUploadBtn) {
+    incomeUploadBtn.disabled = true;
+  }
+  const payload = {
+    companyId: getSelectedCompanyId(),
+    entries: pendingIncomeFiles.map((item) => ({
+      storedFilename: item.storedFilename,
+      originalFilename: item.originalFilename,
+      date: item.date,
+      paymentDate: computePaymentDate(item.date, item.paymentDate),
+      client: item.client.trim(),
+      base: item.base,
+      vat: item.vat,
+      vatAmount: item.vatAmount,
+      total: item.total,
+      analysisText: item.analysisText,
+      companyId: getSelectedCompanyId(),
+    })),
+  };
+
+  fetch("/api/income-invoices", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        alert((data.errors || ["Error al guardar."]).join("\n"));
+        return;
+      }
+      pendingIncomeFiles = [];
+      renderIncomeTable();
+      refreshIncomeInvoices();
+      refreshPayments();
+    })
+    .catch(() => {
+      alert("No se pudo subir la factura emitida.");
+    })
+    .finally(() => {
+      if (incomeUploadBtn) {
+        incomeUploadBtn.disabled = false;
+      }
+    });
+}
+
 function validatePending() {
   const errors = [];
   pendingFiles.forEach((item) => {
@@ -559,6 +1160,10 @@ function validatePending() {
 function analyzeInvoiceForItem(item) {
   const formData = new FormData();
   formData.append("file", item.file);
+  const companyId = getSelectedCompanyId();
+  if (companyId) {
+    formData.append("company_id", companyId);
+  }
 
   fetch("/api/analyze-invoice", {
     method: "POST",
@@ -631,6 +1236,10 @@ function uploadPending() {
     alert("No hay facturas para subir.");
     return;
   }
+  if (!getSelectedCompanyId()) {
+    alert("Selecciona una empresa antes de subir facturas.");
+    return;
+  }
 
   const errors = validatePending();
   if (errors.length) {
@@ -640,11 +1249,13 @@ function uploadPending() {
 
   uploadBtn.disabled = true;
   const payload = {
+    companyId: getSelectedCompanyId(),
     entries: pendingFiles.map((item) => ({
       storedFilename: item.storedFilename,
       originalFilename: item.originalFilename,
       date: item.date,
       paymentDate: computePaymentDate(item.date, item.paymentDate),
+      companyId: getSelectedCompanyId(),
       supplier: item.supplier.trim(),
       base: item.base,
       vat: item.vat,
@@ -696,7 +1307,9 @@ function getPeriodMonths() {
 }
 
 function fetchSummary(month, year) {
-  return fetch(`/api/summary?month=${month}&year=${year}`).then((res) => res.json());
+  const companyId = getSelectedCompanyId();
+  const suffix = companyId ? `&company_id=${companyId}` : "";
+  return fetch(`/api/summary?month=${month}&year=${year}${suffix}`).then((res) => res.json());
 }
 
 function mergeSummaries(summaries, months) {
@@ -1061,7 +1674,9 @@ function updateNetChart() {
 }
 
 function fetchBillingSummary(month, year) {
-  return fetch(`/api/billing/summary?month=${month}&year=${year}`).then((res) => res.json());
+  const companyId = getSelectedCompanyId();
+  const suffix = companyId ? `&company_id=${companyId}` : "";
+  return fetch(`/api/billing/summary?month=${month}&year=${year}${suffix}`).then((res) => res.json());
 }
 
 function mergeBillingSummaries(summaries, months) {
@@ -1255,12 +1870,16 @@ function renderPaymentDayDetails(day) {
     const row = document.createElement("div");
     row.className = "payment-day-item";
     const supplier = document.createElement("span");
-    supplier.textContent = item.supplier || "Proveedor";
+    const label = item.type === "income" ? "Cliente" : "Proveedor";
+    supplier.textContent = `${label}: ${item.counterparty || "-"}`;
+    const concept = document.createElement("span");
+    concept.textContent = item.concept || "Factura";
     const dateLabel = document.createElement("span");
     dateLabel.textContent = item.payment_date;
     const amount = document.createElement("span");
-    amount.textContent = formatCurrency(item.amount);
+    amount.textContent = `${formatCurrency(item.amount)} (${item.type === "income" ? "Ingreso" : "Gasto"})`;
     row.appendChild(supplier);
+    row.appendChild(concept);
     row.appendChild(dateLabel);
     row.appendChild(amount);
     paymentDayList.appendChild(row);
@@ -1270,7 +1889,9 @@ function renderPaymentDayDetails(day) {
 }
 
 function fetchBillingEntries(month, year) {
-  return fetch(`/api/billing/entries?month=${month}&year=${year}`)
+  const companyId = getSelectedCompanyId();
+  const suffix = companyId ? `&company_id=${companyId}` : "";
+  return fetch(`/api/billing/entries?month=${month}&year=${year}${suffix}`)
     .then((res) => res.json())
     .then((data) =>
       (data.entries || []).map((entry) => ({
@@ -1309,10 +1930,14 @@ function refreshBillingData() {
 }
 
 function refreshAllData() {
+  if (!getSelectedCompanyId()) {
+    return Promise.resolve();
+  }
   return Promise.all([
     refreshSummary(),
     refreshBillingData(),
     refreshInvoices(),
+    refreshIncomeInvoices(),
     refreshPayments(),
     refreshNoInvoiceExpenses(),
     refreshAnnualTaxData(),
@@ -1374,7 +1999,9 @@ function refreshAnnualTaxData() {
 }
 
 function fetchInvoices(month, year) {
-  return fetch(`/api/invoices?month=${month}&year=${year}`)
+  const companyId = getSelectedCompanyId();
+  const suffix = companyId ? `&company_id=${companyId}` : "";
+  return fetch(`/api/invoices?month=${month}&year=${year}${suffix}`)
     .then((res) => res.json())
     .then((data) => data.invoices || []);
 }
@@ -1395,7 +2022,9 @@ function refreshInvoices() {
 }
 
 function fetchPayments(month, year) {
-  return fetch(`/api/payments?month=${month}&year=${year}`)
+  const companyId = getSelectedCompanyId();
+  const suffix = companyId ? `&company_id=${companyId}` : "";
+  return fetch(`/api/payments?month=${month}&year=${year}${suffix}`)
     .then((res) => res.json())
     .then((data) => ({
       items: data.items || [],
@@ -1493,6 +2122,222 @@ function renderInvoices(invoices) {
   updateTaxSummary();
 }
 
+function fetchIncomeInvoices(month, year) {
+  const companyId = getSelectedCompanyId();
+  const suffix = companyId ? `&company_id=${companyId}` : "";
+  return fetch(`/api/income-invoices?month=${month}&year=${year}${suffix}`)
+    .then((res) => res.json())
+    .then((data) => data.invoices || []);
+}
+
+function refreshIncomeInvoices() {
+  if (!incomeInvoicesTableBody) {
+    return Promise.resolve();
+  }
+  const { month, year } = getSelectedMonthYear();
+  if (!month || !year) {
+    return Promise.resolve();
+  }
+  const months = getPeriodMonths();
+  return Promise.all(months.map((targetMonth) => fetchIncomeInvoices(targetMonth, year)))
+    .then((invoicesByMonth) => {
+      const invoices = invoicesByMonth.flat();
+      invoices.sort((a, b) => b.invoice_date.localeCompare(a.invoice_date));
+      renderIncomeInvoices(invoices);
+    });
+}
+
+function renderIncomeInvoices(invoices) {
+  if (!incomeInvoicesTableBody || !incomeInvoicesEmpty) {
+    return;
+  }
+  incomeInvoicesTableBody.innerHTML = "";
+  currentIncomeInvoices = invoices;
+  if (!invoices.length) {
+    incomeInvoicesEmpty.style.display = "block";
+    return;
+  }
+  incomeInvoicesEmpty.style.display = "none";
+
+  invoices.forEach((invoice) => {
+    const tr = document.createElement("tr");
+    tr.dataset.id = invoice.id;
+
+    const dateTd = document.createElement("td");
+    dateTd.textContent = invoice.invoice_date;
+
+    const clientTd = document.createElement("td");
+    clientTd.textContent = invoice.client;
+
+    const baseTd = document.createElement("td");
+    baseTd.textContent = formatCurrency(invoice.base_amount);
+
+    const vatTd = document.createElement("td");
+    vatTd.textContent = `${invoice.vat_rate}%`;
+
+    const vatAmountTd = document.createElement("td");
+    vatAmountTd.textContent = formatCurrency(invoice.vat_amount || 0);
+
+    const totalTd = document.createElement("td");
+    totalTd.textContent = formatCurrency(invoice.total_amount);
+
+    const actionsTd = document.createElement("td");
+    actionsTd.classList.add("billing-actions");
+
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "button ghost";
+    editBtn.textContent = "Editar";
+    editBtn.addEventListener("click", () => {
+      enterIncomeInvoiceEditMode(tr, invoice);
+    });
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "button danger";
+    deleteBtn.textContent = "Eliminar";
+    deleteBtn.addEventListener("click", () => {
+      if (!confirm("¿Seguro que deseas eliminar esta factura emitida?")) {
+        return;
+      }
+      deleteIncomeInvoice(invoice.id);
+    });
+
+    actionsTd.appendChild(editBtn);
+    actionsTd.appendChild(deleteBtn);
+
+    tr.appendChild(dateTd);
+    tr.appendChild(clientTd);
+    tr.appendChild(baseTd);
+    tr.appendChild(vatTd);
+    tr.appendChild(vatAmountTd);
+    tr.appendChild(totalTd);
+    tr.appendChild(actionsTd);
+    incomeInvoicesTableBody.appendChild(tr);
+  });
+}
+
+function enterIncomeInvoiceEditMode(row, invoice) {
+  const dateTd = row.children[0];
+  const clientTd = row.children[1];
+  const baseTd = row.children[2];
+  const vatTd = row.children[3];
+  const vatAmountTd = row.children[4];
+  const totalTd = row.children[5];
+  const actionsTd = row.children[6];
+
+  const dateInput = document.createElement("input");
+  dateInput.type = "date";
+  dateInput.value = invoice.invoice_date;
+
+  const clientInput = document.createElement("input");
+  clientInput.type = "text";
+  clientInput.value = invoice.client;
+
+  const baseInput = document.createElement("input");
+  baseInput.type = "number";
+  baseInput.step = "0.01";
+  baseInput.min = "0";
+  baseInput.value = invoice.base_amount;
+
+  const vatSelect = createVatSelect(invoice.vat_rate);
+
+  const vatAmountInput = document.createElement("input");
+  vatAmountInput.type = "number";
+  vatAmountInput.step = "0.01";
+  vatAmountInput.min = "0";
+  vatAmountInput.value = invoice.vat_amount || 0;
+
+  const totalInput = document.createElement("input");
+  totalInput.type = "number";
+  totalInput.step = "0.01";
+  totalInput.min = "0";
+  totalInput.value = invoice.total_amount;
+
+  dateTd.textContent = "";
+  dateTd.appendChild(dateInput);
+  clientTd.textContent = "";
+  clientTd.appendChild(clientInput);
+  baseTd.textContent = "";
+  baseTd.appendChild(baseInput);
+  vatTd.textContent = "";
+  vatTd.appendChild(vatSelect);
+  vatAmountTd.textContent = "";
+  vatAmountTd.appendChild(vatAmountInput);
+  totalTd.textContent = "";
+  totalTd.appendChild(totalInput);
+
+  actionsTd.innerHTML = "";
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "button primary";
+  saveBtn.textContent = "Guardar";
+  saveBtn.addEventListener("click", () => {
+    updateIncomeInvoice(invoice.id, {
+      invoice_date: dateInput.value,
+      client: clientInput.value,
+      base_amount: baseInput.value,
+      vat_rate: vatSelect.value,
+      vat_amount: vatAmountInput.value,
+      total_amount: totalInput.value,
+    });
+  });
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "button ghost";
+  cancelBtn.textContent = "Cancelar";
+  cancelBtn.addEventListener("click", () => {
+    refreshIncomeInvoices();
+  });
+
+  actionsTd.appendChild(saveBtn);
+  actionsTd.appendChild(cancelBtn);
+}
+
+function updateIncomeInvoice(invoiceId, payload) {
+  const url = withCompanyParam(`/api/income-invoices/${invoiceId}`);
+  fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...payload,
+      company_id: getSelectedCompanyId(),
+    }),
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        alert((data.errors || ["Error al actualizar."]).join("\n"));
+        return;
+      }
+      refreshIncomeInvoices();
+      refreshPayments();
+    })
+    .catch(() => {
+      alert("No se pudo actualizar la factura emitida.");
+    });
+}
+
+function deleteIncomeInvoice(invoiceId) {
+  const url = withCompanyParam(`/api/income-invoices/${invoiceId}`);
+  fetch(url, {
+    method: "DELETE",
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        alert((data.errors || ["Error al eliminar."]).join("\n"));
+        return;
+      }
+      refreshIncomeInvoices();
+      refreshPayments();
+    })
+    .catch(() => {
+      alert("No se pudo eliminar la factura emitida.");
+    });
+}
+
 function enterInvoiceEditMode(row, invoice) {
   const dateTd = row.children[0];
   const supplierTd = row.children[1];
@@ -1578,12 +2423,16 @@ function enterInvoiceEditMode(row, invoice) {
 }
 
 function updateInvoice(invoiceId, payload) {
-  fetch(`/api/invoices/${invoiceId}`, {
+  const url = withCompanyParam(`/api/invoices/${invoiceId}`);
+  fetch(url, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      ...payload,
+      company_id: getSelectedCompanyId(),
+    }),
   })
     .then((res) => res.json())
     .then((data) => {
@@ -1599,7 +2448,8 @@ function updateInvoice(invoiceId, payload) {
 }
 
 function deleteInvoice(invoiceId) {
-  fetch(`/api/invoices/${invoiceId}`, {
+  const url = withCompanyParam(`/api/invoices/${invoiceId}`);
+  fetch(url, {
     method: "DELETE",
   })
     .then((res) => res.json())
@@ -1616,7 +2466,9 @@ function deleteInvoice(invoiceId) {
 }
 
 function fetchNoInvoiceExpenses(month, year) {
-  return fetch(`/api/expenses/no-invoice?month=${month}&year=${year}`)
+  const companyId = getSelectedCompanyId();
+  const suffix = companyId ? `&company_id=${companyId}` : "";
+  return fetch(`/api/expenses/no-invoice?month=${month}&year=${year}${suffix}`)
     .then((res) => res.json())
     .then((data) => data.expenses || []);
 }
@@ -1766,6 +2618,10 @@ function enterNoInvoiceEditMode(row, expense) {
 }
 
 function saveNoInvoiceExpense() {
+  if (!getSelectedCompanyId()) {
+    alert("Selecciona una empresa antes de guardar gastos.");
+    return;
+  }
   const dateValue = noInvoiceDate.value;
   const conceptValue = noInvoiceConcept.value.trim();
   const amountValue = noInvoiceAmount.value;
@@ -1792,6 +2648,7 @@ function saveNoInvoiceExpense() {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
+      company_id: getSelectedCompanyId(),
       expense_date: dateValue,
       concept: conceptValue,
       amount: amountValue,
@@ -1818,12 +2675,16 @@ function saveNoInvoiceExpense() {
 }
 
 function updateNoInvoiceExpense(expenseId, payload) {
-  fetch(`/api/expenses/no-invoice/${expenseId}`, {
+  const url = withCompanyParam(`/api/expenses/no-invoice/${expenseId}`);
+  fetch(url, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      ...payload,
+      company_id: getSelectedCompanyId(),
+    }),
   })
     .then((res) => res.json())
     .then((data) => {
@@ -1839,7 +2700,8 @@ function updateNoInvoiceExpense(expenseId, payload) {
 }
 
 function deleteNoInvoiceExpense(expenseId) {
-  fetch(`/api/expenses/no-invoice/${expenseId}`, {
+  const url = withCompanyParam(`/api/expenses/no-invoice/${expenseId}`);
+  fetch(url, {
     method: "DELETE",
   })
     .then((res) => res.json())
@@ -1964,12 +2826,14 @@ function updateBillingEntry(entryId, baseValue, vatValue) {
     return;
   }
 
-  fetch(`/api/billing/${entryId}`, {
+  const url = withCompanyParam(`/api/billing/${entryId}`);
+  fetch(url, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
+      company_id: getSelectedCompanyId(),
       base: baseValue,
       vat: vatValue,
     }),
@@ -1988,7 +2852,8 @@ function updateBillingEntry(entryId, baseValue, vatValue) {
 }
 
 function deleteBillingEntry(entryId) {
-  fetch(`/api/billing/${entryId}`, {
+  const url = withCompanyParam(`/api/billing/${entryId}`);
+  fetch(url, {
     method: "DELETE",
   })
     .then((res) => res.json())
@@ -2153,7 +3018,13 @@ function saveBillingEntry() {
   const year = Number(billingYearSelect.value || yearSelect.value);
   const baseValue = billingBaseInput.value;
   const vatValue = billingVatSelect.value;
+  const conceptValue = billingConceptInput ? billingConceptInput.value.trim() : "";
+  const dateValue = billingDateInput ? billingDateInput.value : "";
 
+  if (!getSelectedCompanyId()) {
+    alert("Selecciona una empresa antes de guardar ingresos.");
+    return;
+  }
   if (!baseValue || Number(baseValue) < 0) {
     alert("Base facturada inválida.");
     return;
@@ -2170,10 +3041,13 @@ function saveBillingEntry() {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
+      company_id: getSelectedCompanyId(),
       month,
       year,
       base: baseValue,
       vat: vatValue,
+      concept: conceptValue,
+      invoice_date: dateValue,
     }),
   })
     .then((res) => res.json())
@@ -2183,6 +3057,12 @@ function saveBillingEntry() {
         return;
       }
       billingBaseInput.value = "";
+      if (billingConceptInput) {
+        billingConceptInput.value = "";
+      }
+      if (billingDateInput) {
+        billingDateInput.value = "";
+      }
       refreshBillingData();
     })
     .catch(() => {
@@ -2245,6 +3125,11 @@ function bindEvents() {
   document.getElementById("selectFolder").addEventListener("click", () => {
     folderInput.click();
   });
+  if (incomeFileInput) {
+    document.getElementById("incomeSelectFiles").addEventListener("click", () => {
+      incomeFileInput.click();
+    });
+  }
   fileInput.addEventListener("change", (event) => {
     addFiles(event.target.files);
     fileInput.value = "";
@@ -2253,6 +3138,12 @@ function bindEvents() {
     addFiles(event.target.files);
     folderInput.value = "";
   });
+  if (incomeFileInput) {
+    incomeFileInput.addEventListener("change", (event) => {
+      addIncomeFiles(event.target.files);
+      incomeFileInput.value = "";
+    });
+  }
 
   dropZone.addEventListener("dragover", (event) => {
     event.preventDefault();
@@ -2268,8 +3159,30 @@ function bindEvents() {
       addFiles(event.dataTransfer.files);
     }
   });
+  if (incomeDropZone) {
+    incomeDropZone.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      incomeDropZone.classList.add("dragover");
+    });
+    incomeDropZone.addEventListener("dragleave", () => {
+      incomeDropZone.classList.remove("dragover");
+    });
+    incomeDropZone.addEventListener("drop", (event) => {
+      event.preventDefault();
+      incomeDropZone.classList.remove("dragover");
+      if (event.dataTransfer.files) {
+        addIncomeFiles(event.dataTransfer.files);
+      }
+    });
+  }
 
   uploadBtn.addEventListener("click", uploadPending);
+  if (incomeUploadBtn) {
+    incomeUploadBtn.addEventListener("click", uploadIncomePending);
+  }
+  if (companySaveBtn) {
+    companySaveBtn.addEventListener("click", saveCompany);
+  }
   monthSelect.addEventListener("change", () => {
     persistFilters();
     refreshAllData();
@@ -2288,6 +3201,13 @@ function bindEvents() {
     applyTaxpayerSelection(taxpayerSelect.value);
     updatePnlSummary();
   });
+  if (companySelect) {
+    companySelect.addEventListener("change", () => {
+      selectedCompanyId = companySelect.value;
+      persistFilters();
+      loadYears().then(() => refreshAllData());
+    });
+  }
   billingSaveBtn.addEventListener("click", saveBillingEntry);
   noInvoiceSaveBtn.addEventListener("click", saveNoInvoiceExpense);
   if (exportPnlBtn) {
@@ -2300,17 +3220,22 @@ function init() {
   populateMonthSelects();
   bindEvents();
   initNavigation();
-  loadYears().then(() => {
-    restoreFilters(now);
-    initTaxpayerSelector();
-    document.body.classList.toggle("period-quarterly", getSelectedPeriod() === "quarterly");
-    billingMonthSelect.value = monthSelect.value;
-    billingYearSelect.value = yearSelect.value;
-    if (!noInvoiceDate.value) {
-      noInvoiceDate.value = now.toISOString().slice(0, 10);
-    }
-    refreshAllData();
-  });
+  restoreFilters(now);
+  loadCompanies()
+    .then(() => loadYears())
+    .then(() => {
+      initTaxpayerSelector();
+      document.body.classList.toggle("period-quarterly", getSelectedPeriod() === "quarterly");
+      billingMonthSelect.value = monthSelect.value;
+      billingYearSelect.value = yearSelect.value;
+      if (billingDateInput && !billingDateInput.value) {
+        billingDateInput.value = now.toISOString().slice(0, 10);
+      }
+      if (!noInvoiceDate.value) {
+        noInvoiceDate.value = now.toISOString().slice(0, 10);
+      }
+      refreshAllData();
+    });
 }
 
 document.addEventListener("DOMContentLoaded", init);

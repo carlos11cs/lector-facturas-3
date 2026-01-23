@@ -337,6 +337,7 @@ def analyze_invoice(
     file_bytes: Optional[bytes] = None,
     filename: Optional[str] = None,
     mime_type: Optional[str] = None,
+    document_type: str = "expense",
 ) -> Dict[str, Any]:
     client = _get_client()
     if file_bytes is None:
@@ -396,14 +397,25 @@ def analyze_invoice(
         len(extracted_text.strip()),
     )
 
-    prompt = (
-        "Analiza el siguiente texto extraido de una factura. "
-        "Devuelve SOLO JSON valido con estas claves: "
-        "supplier, invoice_date, payment_date, base_amount, vat_rate, vat_amount, total_amount. "
-        "Usa null si no puedes inferir un dato con seguridad. "
-        "No incluyas texto adicional fuera del JSON.\n\n"
-        f"TEXTO_FACTURA:\n{extracted_text}"
-    )
+    is_income = document_type == "income"
+    if is_income:
+        prompt = (
+            "Analiza el siguiente texto extraido de una factura emitida (ingreso). "
+            "Devuelve SOLO JSON valido con estas claves: "
+            "client, invoice_date, payment_date, base_amount, vat_rate, vat_amount, total_amount. "
+            "Usa null si no puedes inferir un dato con seguridad. "
+            "No incluyas texto adicional fuera del JSON.\n\n"
+            f"TEXTO_FACTURA:\n{extracted_text}"
+        )
+    else:
+        prompt = (
+            "Analiza el siguiente texto extraido de una factura recibida (gasto). "
+            "Devuelve SOLO JSON valido con estas claves: "
+            "supplier, invoice_date, payment_date, base_amount, vat_rate, vat_amount, total_amount. "
+            "Usa null si no puedes inferir un dato con seguridad. "
+            "No incluyas texto adicional fuera del JSON.\n\n"
+            f"TEXTO_FACTURA:\n{extracted_text}"
+        )
 
     logger.info("Prompt enviado (%s): %s", filename, prompt)
 
@@ -428,6 +440,12 @@ def analyze_invoice(
         or data.get("proveedor")
         or data.get("provider_name")
         or data.get("provider")
+    )
+    client_name = (
+        data.get("client")
+        or data.get("cliente")
+        or data.get("customer")
+        or data.get("client_name")
     )
     invoice_date = _normalize_date(
         data.get("invoice_date") or data.get("fecha_factura") or data.get("fecha")
@@ -492,9 +510,10 @@ def analyze_invoice(
         )
 
     logger.info(
-        "Valores detectados (%s): proveedor=%s fecha=%s pago=%s base=%s iva_rate=%s iva_importe=%s total=%s",
+        "Valores detectados (%s): proveedor=%s cliente=%s fecha=%s pago=%s base=%s iva_rate=%s iva_importe=%s total=%s",
         filename,
         provider_name,
+        client_name,
         invoice_date,
         payment_date,
         base_amount,
@@ -505,6 +524,7 @@ def analyze_invoice(
 
     return {
         "provider_name": provider_name,
+        "client_name": client_name,
         "invoice_date": invoice_date,
         "payment_date": payment_date,
         "base_amount": base_amount,
