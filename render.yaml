@@ -3,6 +3,7 @@ services:
     name: lector-facturas
     env: docker
     plan: starter
+    region: frankfurt
     dockerfilePath: ./Dockerfile
     autoDeploy: true
     envVars:
