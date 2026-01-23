@@ -99,7 +99,6 @@ const billingEntriesBody = document.querySelector("#billingEntriesTable tbody");
 const billingEntriesEmpty = document.getElementById("billingEntriesEmpty");
 const invoicesTableBody = document.querySelector("#invoicesTable tbody");
 const invoicesEmpty = document.getElementById("invoicesEmpty");
-const taxpayerSelect = document.getElementById("taxpayerSelect");
 const taxPeriodBadge = document.getElementById("taxPeriodBadge");
 const noInvoiceDate = document.getElementById("noInvoiceDate");
 const noInvoiceConcept = document.getElementById("noInvoiceConcept");
@@ -330,6 +329,8 @@ function loadCompanies() {
       companies = data.companies || [];
       setCompanyOptions(companies);
       renderCompaniesTable(companies);
+      applyCompanyTaxModules();
+      updatePnlSummary();
       return companies;
     });
 }
@@ -544,6 +545,35 @@ function getSelectedCompanyId() {
   return selectedCompanyId ? Number(selectedCompanyId) : null;
 }
 
+function getSelectedCompany() {
+  if (!selectedCompanyId) {
+    return null;
+  }
+  return (
+    companies.find((company) => String(company.id) === String(selectedCompanyId)) ||
+    null
+  );
+}
+
+function getSelectedCompanyType() {
+  const company = getSelectedCompany();
+  return company ? company.company_type : null;
+}
+
+// Los módulos fiscales se muestran según el tipo de la empresa seleccionada.
+function applyCompanyTaxModules() {
+  const companyType = getSelectedCompanyType();
+  const target =
+    companyType === "company" ? "is" : companyType === "individual" ? "irpf" : null;
+  document.querySelectorAll("[data-tax-module]").forEach((panel) => {
+    if (!target) {
+      panel.style.display = "none";
+      return;
+    }
+    panel.style.display = panel.dataset.taxModule === target ? "" : "none";
+  });
+}
+
 function getQuarterMonths(month) {
   const quarterIndex = Math.floor((month - 1) / 3);
   const start = quarterIndex * 3 + 1;
@@ -567,7 +597,6 @@ function persistFilters() {
   localStorage.setItem("selectedMonth", monthSelect.value);
   localStorage.setItem("selectedYear", yearSelect.value);
   localStorage.setItem("selectedPeriod", periodSelect.value);
-  localStorage.setItem("taxpayerType", taxpayerSelect.value);
   if (selectedCompanyId) {
     localStorage.setItem("selectedCompanyId", String(selectedCompanyId));
   }
@@ -577,7 +606,6 @@ function restoreFilters(now) {
   const storedMonth = localStorage.getItem("selectedMonth");
   const storedYear = localStorage.getItem("selectedYear");
   const storedPeriod = localStorage.getItem("selectedPeriod");
-  const storedTaxpayer = localStorage.getItem("taxpayerType");
 
   if (storedMonth && [...monthSelect.options].some((opt) => opt.value === storedMonth)) {
     monthSelect.value = storedMonth;
@@ -593,10 +621,6 @@ function restoreFilters(now) {
 
   if (storedPeriod) {
     periodSelect.value = storedPeriod;
-  }
-
-  if (storedTaxpayer) {
-    taxpayerSelect.value = storedTaxpayer === "empresa" ? "sociedad" : storedTaxpayer;
   }
 
   const storedCompany = localStorage.getItem("selectedCompanyId");
@@ -2923,8 +2947,9 @@ function updatePnlSummary() {
   const incomeTotal = billingBaseTotal;
   const expensesTotal = currentDeductibleExpenses;
   const preTax = incomeTotal - expensesTotal;
-  const taxpayerType = taxpayerSelect.value;
-  const taxRate = taxpayerType === "sociedad" ? 0.25 : 0.15;
+  const companyType = getSelectedCompanyType();
+  const taxRate =
+    companyType === "company" ? 0.25 : companyType === "individual" ? 0.15 : 0;
   const taxes = preTax > 0 ? preTax * taxRate : 0;
   const netResult = preTax - taxes;
 
@@ -3073,17 +3098,6 @@ function saveBillingEntry() {
     });
 }
 
-function applyTaxpayerSelection(value) {
-  const target = value === "sociedad" ? "is" : "irpf";
-  document.querySelectorAll("[data-tax-module]").forEach((panel) => {
-    panel.style.display = panel.dataset.taxModule === target ? "" : "none";
-  });
-}
-
-function initTaxpayerSelector() {
-  applyTaxpayerSelection(taxpayerSelect.value);
-}
-
 function setActiveSection(sectionId) {
   sections.forEach((section) => {
     section.classList.toggle("active", section.dataset.section === sectionId);
@@ -3196,15 +3210,12 @@ function bindEvents() {
     persistFilters();
     refreshAllData();
   });
-  taxpayerSelect.addEventListener("change", () => {
-    persistFilters();
-    applyTaxpayerSelection(taxpayerSelect.value);
-    updatePnlSummary();
-  });
   if (companySelect) {
     companySelect.addEventListener("change", () => {
       selectedCompanyId = companySelect.value;
       persistFilters();
+      applyCompanyTaxModules();
+      updatePnlSummary();
       loadYears().then(() => refreshAllData());
     });
   }
@@ -3224,7 +3235,6 @@ function init() {
   loadCompanies()
     .then(() => loadYears())
     .then(() => {
-      initTaxpayerSelector();
       document.body.classList.toggle("period-quarterly", getSelectedPeriod() === "quarterly");
       billingMonthSelect.value = monthSelect.value;
       billingYearSelect.value = yearSelect.value;
