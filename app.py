@@ -367,10 +367,10 @@ def get_company_names(company_id: int, conn) -> list:
         select(companies_table.c.display_name, companies_table.c.legal_name).where(
             companies_table.c.id == company_id
         )
-    ).first()
+    ).mappings().first()
     if not row:
         return []
-    return [row["display_name"], row["legal_name"]]
+    return [row.get("display_name"), row.get("legal_name")]
 
 
 def is_supplier_same_as_company(supplier: str, company_id: int, conn) -> bool:
@@ -1420,6 +1420,9 @@ def upload_invoices():
         inserted = 0
         with engine.begin() as conn:
             for idx, entry in enumerate(entries):
+                is_manual = any(
+                    key in entry for key in ("supplier", "base", "vat", "total", "vatAmount")
+                )
                 original_name = entry.get("originalFilename") or ""
                 stored_name = entry.get("storedFilename") or ""
                 invoice_date = entry.get("date") or date.today().isoformat()
@@ -1448,8 +1451,17 @@ def upload_invoices():
                 if not stored_name:
                     errors.append(f"Archivo faltante en posición {idx + 1}.")
                     continue
-                if not supplier:
-                    app.logger.info("Proveedor vacío para %s. Se permite guardado manual.", original_name)
+                if is_manual:
+                    if not supplier:
+                        errors.append(f"Proveedor obligatorio para {original_name}.")
+                        continue
+                else:
+                    if not supplier:
+                        app.logger.info(
+                            "Proveedor vacío para %s. Se permite guardado manual.",
+                            original_name,
+                        )
+
                 try:
                     vat_rate_int = int(vat_rate_raw)
                 except ValueError:
@@ -1461,26 +1473,22 @@ def upload_invoices():
                 if expense_category not in {"with_invoice", "without_invoice", "non_deductible"}:
                     errors.append(f"Tipo de gasto inválido para {original_name}.")
                     continue
-                if base_amount is None and total_amount is None:
-                    errors.append(
-                        f"Base imponible o total obligatorio para {original_name}."
-                    )
-                    continue
-                if base_amount is not None and base_amount < 0:
+                if base_amount is None or base_amount < 0:
                     errors.append(f"Base imponible inválida para {original_name}.")
                     continue
-                if total_amount is not None and total_amount < 0:
+                if total_amount is None or total_amount < 0:
                     errors.append(f"Total inválido para {original_name}.")
                     continue
-                if is_supplier_same_as_company(supplier, company_id, conn):
+                if not is_manual and is_supplier_same_as_company(supplier, company_id, conn):
                     errors.append(
                         f"El proveedor no puede ser la empresa activa ({original_name})."
                     )
                     continue
 
-                base_amount, vat_amount, total_amount = normalize_vat_amounts(
-                    base_amount, vat_rate_int, vat_amount, total_amount
-                )
+                if not is_manual:
+                    base_amount, vat_amount, total_amount = normalize_vat_amounts(
+                        base_amount, vat_rate_int, vat_amount, total_amount
+                    )
 
                 created_at = datetime.utcnow().isoformat()
 
@@ -1565,7 +1573,8 @@ def upload_invoices():
             total_amount = parse_amount(totals[idx])
 
             if not supplier:
-                app.logger.info("Proveedor vacío para %s. Se permite guardado manual.", original_name)
+                errors.append(f"Proveedor obligatorio para {original_name}.")
+                continue
             try:
                 vat_rate_int = int(vat_rate)
             except ValueError:
@@ -1574,21 +1583,11 @@ def upload_invoices():
             if vat_rate_int not in {0, 4, 10, 21}:
                 errors.append(f"Tipo de IVA inválido para {original_name}.")
                 continue
-            if base_amount is None and total_amount is None:
-                errors.append(
-                    f"Base imponible o total obligatorio para {original_name}."
-                )
-                continue
-            if base_amount is not None and base_amount < 0:
+            if base_amount is None or base_amount < 0:
                 errors.append(f"Base imponible inválida para {original_name}.")
                 continue
-            if total_amount is not None and total_amount < 0:
+            if total_amount is None or total_amount < 0:
                 errors.append(f"Total inválido para {original_name}.")
-                continue
-            if is_supplier_same_as_company(supplier, company_id, conn):
-                errors.append(
-                    f"El proveedor no puede ser la empresa activa ({original_name})."
-                )
                 continue
 
             file_bytes = file.read()
@@ -1601,9 +1600,7 @@ def upload_invoices():
                 errors.append(f"No se pudo almacenar el archivo {original_name}.")
                 continue
 
-            base_amount, vat_amount, total_amount = normalize_vat_amounts(
-                base_amount, vat_rate_int, vat_amount, total_amount
-            )
+            # Guardado manual: no recalcular ni aplicar heurísticas semánticas.
             created_at = datetime.utcnow().isoformat()
 
             conn.execute(
