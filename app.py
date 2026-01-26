@@ -3,10 +3,13 @@ import logging
 import multiprocessing as mp
 import os
 import re
+import secrets
 from datetime import date, datetime, timedelta
+from functools import wraps
 from uuid import uuid4
 
-from flask import Flask, jsonify, render_template, request
+import httpx
+from flask import Flask, jsonify, redirect, render_template, request, session, url_for, g
 from sqlalchemy import (
     Boolean,
     Column,
@@ -22,6 +25,7 @@ from sqlalchemy import (
     select,
     text,
 )
+from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
 from services.ai_invoice_service import analyze_invoice
@@ -32,6 +36,9 @@ DB_PATH = os.path.join(BASE_DIR, "data.db")
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png"}
 ANALYSIS_TIMEOUT_SECONDS = int(os.getenv("ANALYSIS_TIMEOUT_SECONDS", "120"))
 DEFAULT_USER_ID = int(os.getenv("DEFAULT_USER_ID", "1"))
+OWNER_EMAIL = (os.getenv("OWNER_EMAIL") or "").strip().lower()
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+APP_FROM_EMAIL = os.getenv("APP_FROM_EMAIL", "no-reply@tuapp.com")
 
 _raw_db_url = os.getenv("DATABASE_URL")
 DATABASE_URL = _raw_db_url.strip() if _raw_db_url else ""
@@ -50,11 +57,38 @@ companies_table = Table(
     metadata,
     Column("id", Integer, primary_key=True),
     Column("user_id", Integer, nullable=False),
+    Column("agency_id", Integer, nullable=True),
     Column("display_name", String, nullable=False),
     Column("legal_name", String, nullable=False),
     Column("tax_id", String, nullable=False),
     Column("company_type", String, nullable=False),  # individual | company
+    Column("email", String),
+    Column("phone", String),
+    Column("assigned_user_id", Integer),
     Column("created_at", String, nullable=False),
+)
+
+users_table = Table(
+    "users",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("email", String, nullable=False, unique=True),
+    Column("password_hash", String, nullable=False),
+    Column("role", String, nullable=False),  # owner | agency | staff
+    Column("plan", String, nullable=False),  # internal | trial | standard | premium
+    Column("agency_id", Integer),
+    Column("created_at", String, nullable=False),
+    Column("is_active", Boolean, nullable=False, server_default="1"),
+)
+
+password_resets_table = Table(
+    "password_resets",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", Integer, nullable=False),
+    Column("token", String, nullable=False),
+    Column("expires_at", String, nullable=False),
+    Column("used_at", String),
 )
 
 invoices_table = Table(
@@ -128,6 +162,10 @@ no_invoice_table = Table(
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY") or secrets.token_urlsafe(32)
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = os.getenv("ENV", "").lower() == "production"
 
 
 def init_db():
@@ -191,10 +229,109 @@ def init_db():
                 .values(user_id=DEFAULT_USER_ID)
             )
 
+    add_column_if_missing("companies", "agency_id", "INTEGER")
+    add_column_if_missing("companies", "email", "VARCHAR")
+    add_column_if_missing("companies", "phone", "VARCHAR")
+    add_column_if_missing("companies", "assigned_user_id", "INTEGER")
+    if "companies" in table_names:
+        with engine.begin() as conn:
+            conn.execute(
+                companies_table.update()
+                .where(companies_table.c.user_id.is_(None))
+                .values(user_id=DEFAULT_USER_ID)
+            )
+            conn.execute(
+                companies_table.update()
+                .where(companies_table.c.agency_id.is_(None))
+                .values(agency_id=companies_table.c.user_id)
+            )
+
+    add_column_if_missing("users", "agency_id", "INTEGER")
+    if "users" in table_names:
+        with engine.begin() as conn:
+            conn.execute(
+                users_table.update()
+                .where(users_table.c.agency_id.is_(None))
+                .values(agency_id=users_table.c.id)
+            )
+
 
 def allowed_file(filename):
     _, ext = os.path.splitext(filename.lower())
     return ext in ALLOWED_EXTENSIONS
+
+
+def _row_to_user(row):
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "role": row["role"],
+        "plan": row["plan"],
+        "agency_id": row.get("agency_id") if isinstance(row, dict) else None,
+        "is_active": bool(row["is_active"]),
+    }
+
+
+def get_current_user():
+    user_id = session.get("user_id")
+    if not user_id:
+        return None
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(
+                users_table.c.id,
+                users_table.c.email,
+                users_table.c.role,
+                users_table.c.plan,
+                users_table.c.agency_id,
+                users_table.c.is_active,
+            ).where(users_table.c.id == user_id)
+        ).mappings().first()
+    user = _row_to_user(row)
+    if user and not user["is_active"]:
+        return None
+    return user
+
+
+def plan_allows(user, allowed_plans):
+    if not user:
+        return False
+    return user.get("plan") in allowed_plans
+
+
+def require_plan(allowed_plans):
+    def decorator(view):
+        @wraps(view)
+        def wrapped(*args, **kwargs):
+            user = getattr(g, "current_user", None)
+            if not plan_allows(user, allowed_plans):
+                return jsonify({"ok": False, "errors": ["Plan insuficiente."]}), 403
+            return view(*args, **kwargs)
+
+        return wrapped
+
+    return decorator
+
+
+@app.before_request
+def load_user_and_enforce_auth():
+    g.current_user = get_current_user()
+    path = request.path or ""
+    if path.startswith("/static/"):
+        return None
+    if path.startswith("/login") or path.startswith("/register"):
+        return None
+    if path.startswith("/reset") or path.startswith("/reset-password"):
+        return None
+    if path.startswith("/health"):
+        return None
+    if not g.current_user:
+        if path.startswith("/api/"):
+            return jsonify({"ok": False, "error": "auth_required"}), 401
+        return redirect(url_for("login"))
+    return None
 
 
 def parse_amount(value):
@@ -209,6 +346,8 @@ def parse_amount(value):
 
 
 def get_current_user_id():
+    if getattr(g, "current_user", None):
+        return int(g.current_user["id"])
     try:
         header_value = request.headers.get("X-User-Id")
         if header_value and str(header_value).isdigit():
@@ -216,6 +355,15 @@ def get_current_user_id():
     except Exception:
         pass
     return DEFAULT_USER_ID
+
+
+def get_data_owner_id():
+    user = g.current_user
+    if not user:
+        return DEFAULT_USER_ID
+    if user.get("role") == "staff":
+        return int(user.get("agency_id") or user["id"])
+    return int(user["id"])
 
 
 def _resolve_company_id():
@@ -235,26 +383,76 @@ def _resolve_company_id():
 
 def get_company_id(required=True):
     user_id = get_current_user_id()
+    user_role = (g.current_user or {}).get("role")
     company_id = _resolve_company_id()
     with engine.connect() as conn:
         if company_id is None:
-            row = conn.execute(
-                select(companies_table.c.id).where(companies_table.c.user_id == user_id)
-            ).first()
+            if user_role == "staff":
+                row = conn.execute(
+                    select(companies_table.c.id).where(
+                        companies_table.c.assigned_user_id == user_id
+                    )
+                ).first()
+            elif user_role == "owner":
+                row = conn.execute(select(companies_table.c.id)).first()
+            else:
+                row = conn.execute(
+                    select(companies_table.c.id).where(
+                        companies_table.c.agency_id == user_id
+                    )
+                ).first()
             if row:
                 company_id = int(row[0])
         else:
-            exists = conn.execute(
-                select(companies_table.c.id)
-                .where(companies_table.c.user_id == user_id)
-                .where(companies_table.c.id == company_id)
-            ).first()
+            if user_role == "staff":
+                exists = conn.execute(
+                    select(companies_table.c.id)
+                    .where(companies_table.c.assigned_user_id == user_id)
+                    .where(companies_table.c.id == company_id)
+                ).first()
+            elif user_role == "owner":
+                exists = conn.execute(
+                    select(companies_table.c.id).where(
+                        companies_table.c.id == company_id
+                    )
+                ).first()
+            else:
+                exists = conn.execute(
+                    select(companies_table.c.id)
+                    .where(companies_table.c.agency_id == user_id)
+                    .where(companies_table.c.id == company_id)
+                ).first()
             if not exists:
                 company_id = None
 
     if required and company_id is None:
         return None
     return company_id
+
+
+def is_company_accessible(company_id):
+    if company_id is None:
+        return False
+    user_id = get_current_user_id()
+    role = (g.current_user or {}).get("role")
+    with engine.connect() as conn:
+        if role == "staff":
+            exists = conn.execute(
+                select(companies_table.c.id)
+                .where(companies_table.c.assigned_user_id == user_id)
+                .where(companies_table.c.id == company_id)
+            ).first()
+        elif role == "owner":
+            exists = conn.execute(
+                select(companies_table.c.id).where(companies_table.c.id == company_id)
+            ).first()
+        else:
+            exists = conn.execute(
+                select(companies_table.c.id)
+                .where(companies_table.c.agency_id == user_id)
+                .where(companies_table.c.id == company_id)
+            ).first()
+    return bool(exists)
 
 
 def _validate_nif(nif):
@@ -303,6 +501,25 @@ def validate_tax_id(tax_id, company_type):
     return False
 
 
+def resolve_assigned_staff(agency_id, staff_id):
+    if not staff_id:
+        return None
+    try:
+        staff_id = int(staff_id)
+    except (TypeError, ValueError):
+        return None
+    with engine.connect() as conn:
+        staff = conn.execute(
+            select(users_table.c.id)
+            .where(users_table.c.id == staff_id)
+            .where(users_table.c.role == "staff")
+            .where(users_table.c.agency_id == agency_id)
+        ).first()
+    if not staff:
+        return None
+    return staff_id
+
+
 def normalize_date(value):
     if not value:
         return None
@@ -327,6 +544,124 @@ def compute_payment_date(invoice_date_value, payment_date_value=None):
     except ValueError:
         return None
     return (base_date + timedelta(days=30)).isoformat()
+
+
+def _parse_period_params():
+    year = request.args.get("year") or request.args.get("anio") or request.args.get("año")
+    quarter = request.args.get("quarter")
+    start_month = request.args.get("start_month")
+    end_month = request.args.get("end_month")
+    try:
+        year = int(year)
+    except (TypeError, ValueError):
+        year = None
+    try:
+        quarter = int(quarter) if quarter else None
+    except (TypeError, ValueError):
+        quarter = None
+    try:
+        start_month = int(start_month) if start_month else None
+    except (TypeError, ValueError):
+        start_month = None
+    try:
+        end_month = int(end_month) if end_month else None
+    except (TypeError, ValueError):
+        end_month = None
+    return year, quarter, start_month, end_month
+
+
+def _get_months_for_period(year, quarter=None, start_month=None, end_month=None):
+    if not year:
+        return []
+    if quarter in {1, 2, 3, 4}:
+        start = (quarter - 1) * 3 + 1
+        return [start, start + 1, start + 2]
+    if start_month and end_month and 1 <= start_month <= 12 and 1 <= end_month <= 12:
+        if start_month <= end_month:
+            return list(range(start_month, end_month + 1))
+        return list(range(start_month, 13)) + list(range(1, end_month + 1))
+    return list(range(1, 13))
+
+
+def _build_report_totals(user_id, company_id, months, year):
+    income_base = 0.0
+    income_vat = 0.0
+    expense_base = 0.0
+    expense_vat = 0.0
+    with engine.connect() as conn:
+        for month in months:
+            prefix = f"{year}-{month:02d}"
+            invoice_rows = conn.execute(
+                select(
+                    invoices_table.c.base_amount,
+                    invoices_table.c.vat_amount,
+                    invoices_table.c.expense_category,
+                )
+                .where(invoices_table.c.user_id == user_id)
+                .where(invoices_table.c.company_id == company_id)
+                .where(invoices_table.c.invoice_date.like(f"{prefix}%"))
+            ).mappings().all()
+            for row in invoice_rows:
+                if row["expense_category"] == "non_deductible":
+                    continue
+                expense_base += float(row["base_amount"] or 0)
+                expense_vat += float(row["vat_amount"] or 0)
+
+            no_invoice_rows = conn.execute(
+                select(no_invoice_table.c.amount, no_invoice_table.c.deductible)
+                .where(no_invoice_table.c.user_id == user_id)
+                .where(no_invoice_table.c.company_id == company_id)
+                .where(no_invoice_table.c.expense_date.like(f"{prefix}%"))
+            ).mappings().all()
+            for row in no_invoice_rows:
+                if not row["deductible"]:
+                    continue
+                expense_base += float(row["amount"] or 0)
+
+            income_invoice_rows = conn.execute(
+                select(income_invoices_table.c.base_amount, income_invoices_table.c.vat_amount)
+                .where(income_invoices_table.c.user_id == user_id)
+                .where(income_invoices_table.c.company_id == company_id)
+                .where(income_invoices_table.c.invoice_date.like(f"{prefix}%"))
+            ).mappings().all()
+            for row in income_invoice_rows:
+                income_base += float(row["base_amount"] or 0)
+                income_vat += float(row["vat_amount"] or 0)
+
+            billing_rows = conn.execute(
+                select(
+                    facturacion_table.c.base_facturada,
+                    facturacion_table.c.iva_repercutido,
+                )
+                .where(facturacion_table.c.user_id == user_id)
+                .where(facturacion_table.c.company_id == company_id)
+                .where(facturacion_table.c.anio == year)
+                .where(facturacion_table.c.mes == month)
+            ).mappings().all()
+            for row in billing_rows:
+                income_base += float(row["base_facturada"] or 0)
+                income_vat += float(row["iva_repercutido"] or 0)
+
+    return {
+        "income_base": round(income_base, 2),
+        "income_vat": round(income_vat, 2),
+        "expense_base": round(expense_base, 2),
+        "expense_vat": round(expense_vat, 2),
+        "net_result": round(income_base - expense_base, 2),
+        "vat_result": round(income_vat - expense_vat, 2),
+    }
+
+
+def _report_period_label(year, months, quarter=None):
+    if quarter in {1, 2, 3, 4}:
+        return f"T{quarter} {year}"
+    if months:
+        if len(months) == 12:
+            return f"Año {year}"
+        if len(months) == 1:
+            return f"{calendar.month_name[months[0]]} {year}"
+        return f"{calendar.month_name[months[0]]} - {calendar.month_name[months[-1]]} {year}"
+    return str(year)
 
 
 def _empty_extracted():
@@ -403,24 +738,233 @@ def _analyze_invoice_with_timeout(file_bytes, filename, stored_name, mime_type, 
     return result
 
 
+def _normalize_email(value):
+    return (value or "").strip().lower()
+
+
+def send_email(to_email, subject, html_content, reply_to=None):
+    if not RESEND_API_KEY:
+        app.logger.warning("RESEND_API_KEY no configurada. Email no enviado.")
+        return False
+    payload = {
+        "from": APP_FROM_EMAIL,
+        "to": [to_email],
+        "subject": subject,
+        "html": html_content,
+    }
+    if reply_to:
+        payload["reply_to"] = reply_to
+    try:
+        response = httpx.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+            json=payload,
+            timeout=20.0,
+        )
+        response.raise_for_status()
+        return True
+    except Exception:
+        app.logger.exception("Error enviando email a %s", to_email)
+        return False
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "GET":
+        return render_template("login.html")
+    payload = request.form or request.get_json(silent=True) or {}
+    email = _normalize_email(payload.get("email"))
+    password = payload.get("password") or ""
+    if not email or not password:
+        return render_template("login.html", error="Email y contraseña obligatorios.")
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(
+                users_table.c.id,
+                users_table.c.email,
+                users_table.c.password_hash,
+                users_table.c.role,
+                users_table.c.plan,
+                users_table.c.is_active,
+            ).where(users_table.c.email == email)
+        ).mappings().first()
+    if not row or not row["is_active"]:
+        return render_template("login.html", error="Credenciales inválidas.")
+    if not check_password_hash(row["password_hash"], password):
+        return render_template("login.html", error="Credenciales inválidas.")
+    session["user_id"] = row["id"]
+    return redirect(url_for("index"))
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "GET":
+        return render_template("register.html")
+    payload = request.form or request.get_json(silent=True) or {}
+    email = _normalize_email(payload.get("email"))
+    password = payload.get("password") or ""
+    if not email or not password:
+        return render_template("register.html", error="Email y contraseña obligatorios.")
+    if len(password) < 8:
+        return render_template(
+            "register.html", error="La contraseña debe tener al menos 8 caracteres."
+        )
+    role = "agency"
+    plan = "trial"
+    if OWNER_EMAIL and email == OWNER_EMAIL:
+        role = "owner"
+        plan = "premium"
+    with engine.begin() as conn:
+        owner_exists = conn.execute(
+            select(users_table.c.id).where(users_table.c.role == "owner")
+        ).first()
+        if owner_exists and role == "owner":
+            return render_template("register.html", error="El usuario propietario ya existe.")
+        exists = conn.execute(
+            select(users_table.c.id).where(users_table.c.email == email)
+        ).first()
+        if exists:
+            return render_template("register.html", error="El email ya está registrado.")
+        result = conn.execute(
+            users_table.insert().values(
+                email=email,
+                password_hash=generate_password_hash(password),
+                role=role,
+                plan=plan,
+                agency_id=None,
+                created_at=datetime.utcnow().isoformat(),
+                is_active=True,
+            )
+        )
+        new_user_id = result.inserted_primary_key[0]
+        conn.execute(
+            users_table.update()
+            .where(users_table.c.id == new_user_id)
+            .values(agency_id=new_user_id)
+        )
+        session["user_id"] = new_user_id
+    return redirect(url_for("index"))
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+@app.route("/reset", methods=["GET", "POST"])
+@app.route("/reset-password", methods=["GET", "POST"])
+def reset_password_request():
+    if request.method == "GET":
+        return render_template("reset_request.html")
+    payload = request.form or request.get_json(silent=True) or {}
+    email = _normalize_email(payload.get("email"))
+    if not email:
+        return render_template("reset_request.html", error="Email obligatorio.")
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(users_table.c.id, users_table.c.email)
+            .where(users_table.c.email == email)
+            .where(users_table.c.is_active.is_(True))
+        ).mappings().first()
+    if row:
+        token = secrets.token_urlsafe(32)
+        expires_at = (datetime.utcnow() + timedelta(hours=1)).isoformat()
+        with engine.begin() as conn:
+            conn.execute(
+                password_resets_table.insert().values(
+                    user_id=row["id"],
+                    token=token,
+                    expires_at=expires_at,
+                    used_at=None,
+                )
+            )
+        reset_link = url_for("reset_password", token=token, _external=True)
+        html = f"""
+        <p>Has solicitado restablecer tu contraseña.</p>
+        <p>Enlace válido durante 1 hora:</p>
+        <p><a href="{reset_link}">Restablecer contraseña</a></p>
+        """
+        send_email(email, "Restablece tu contraseña", html)
+    return render_template(
+        "reset_request.html",
+        message="Si el email existe, recibirás un enlace de recuperación.",
+    )
+
+
+@app.route("/reset/<token>", methods=["GET", "POST"])
+@app.route("/reset-password/<token>", methods=["GET", "POST"])
+def reset_password(token):
+    if request.method == "GET":
+        return render_template("reset_password.html", token=token)
+    payload = request.form or request.get_json(silent=True) or {}
+    password = payload.get("password") or ""
+    if len(password) < 8:
+        return render_template(
+            "reset_password.html",
+            token=token,
+            error="La contraseña debe tener al menos 8 caracteres.",
+        )
+    now = datetime.utcnow().isoformat()
+    with engine.begin() as conn:
+        reset_row = conn.execute(
+            select(
+                password_resets_table.c.id,
+                password_resets_table.c.user_id,
+                password_resets_table.c.expires_at,
+                password_resets_table.c.used_at,
+            ).where(password_resets_table.c.token == token)
+        ).mappings().first()
+        if (
+            not reset_row
+            or reset_row["used_at"]
+            or reset_row["expires_at"] < now
+        ):
+            return render_template(
+                "reset_password.html",
+                token=token,
+                error="El enlace no es válido o ha caducado.",
+            )
+        conn.execute(
+            users_table.update()
+            .where(users_table.c.id == reset_row["user_id"])
+            .values(password_hash=generate_password_hash(password))
+        )
+        conn.execute(
+            password_resets_table.update()
+            .where(password_resets_table.c.id == reset_row["id"])
+            .values(used_at=now)
+        )
+    return redirect(url_for("login"))
+
+
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", user=g.current_user)
 
 
 @app.route("/api/companies")
 def list_companies():
     user_id = get_current_user_id()
+    user_role = (g.current_user or {}).get("role")
+    base_query = select(
+        companies_table.c.id,
+        companies_table.c.display_name,
+        companies_table.c.legal_name,
+        companies_table.c.tax_id,
+        companies_table.c.company_type,
+        companies_table.c.email,
+        companies_table.c.phone,
+        companies_table.c.assigned_user_id,
+    )
+    if user_role == "staff":
+        base_query = base_query.where(companies_table.c.assigned_user_id == user_id)
+    elif user_role == "owner":
+        base_query = base_query
+    else:
+        base_query = base_query.where(companies_table.c.agency_id == user_id)
     with engine.connect() as conn:
-        rows = conn.execute(
-            select(
-                companies_table.c.id,
-                companies_table.c.display_name,
-                companies_table.c.legal_name,
-                companies_table.c.tax_id,
-                companies_table.c.company_type,
-            ).where(companies_table.c.user_id == user_id)
-        ).mappings().all()
+        rows = conn.execute(base_query).mappings().all()
     companies = [
         {
             "id": row["id"],
@@ -428,6 +972,9 @@ def list_companies():
             "legal_name": row["legal_name"],
             "tax_id": row["tax_id"],
             "company_type": row["company_type"],
+            "email": row["email"],
+            "phone": row["phone"],
+            "assigned_user_id": row["assigned_user_id"],
         }
         for row in rows
     ]
@@ -437,12 +984,17 @@ def list_companies():
 @app.route("/api/companies", methods=["POST"])
 def create_company():
     user_id = get_current_user_id()
+    if (g.current_user or {}).get("role") == "staff":
+        return jsonify({"ok": False, "errors": ["No autorizado."]}), 403
     payload = request.get_json(silent=True) or {}
 
     display_name = (payload.get("display_name") or payload.get("displayName") or "").strip()
     legal_name = (payload.get("legal_name") or payload.get("legalName") or "").strip()
     tax_id = (payload.get("tax_id") or payload.get("taxId") or "").strip().upper()
     company_type = payload.get("company_type") or payload.get("companyType") or ""
+    email = (payload.get("email") or "").strip()
+    phone = (payload.get("phone") or "").strip()
+    assigned_user_id = payload.get("assigned_user_id") or payload.get("assignedUserId")
 
     errors = []
     if not display_name:
@@ -459,25 +1011,33 @@ def create_company():
 
     with engine.connect() as conn:
         existing_count = conn.execute(
-            select(func.count()).select_from(companies_table).where(companies_table.c.user_id == user_id)
+            select(func.count())
+            .select_from(companies_table)
+            .where(companies_table.c.agency_id == user_id)
         ).scalar_one()
         exists = conn.execute(
             select(companies_table.c.id)
-            .where(companies_table.c.user_id == user_id)
+            .where(companies_table.c.agency_id == user_id)
             .where(companies_table.c.tax_id == tax_id)
         ).first()
     if exists:
         return jsonify({"ok": False, "errors": ["Ya existe una empresa con ese CIF/NIF."]}), 400
+
+    assigned_user_id = resolve_assigned_staff(user_id, assigned_user_id)
 
     created_at = datetime.utcnow().isoformat()
     with engine.begin() as conn:
         result = conn.execute(
             companies_table.insert().values(
                 user_id=user_id,
+                agency_id=user_id,
                 display_name=display_name,
                 legal_name=legal_name,
                 tax_id=tax_id,
                 company_type=company_type,
+                email=email,
+                phone=phone,
+                assigned_user_id=assigned_user_id,
                 created_at=created_at,
             )
         )
@@ -514,12 +1074,17 @@ def create_company():
 @app.route("/api/companies/<int:company_id>", methods=["PUT"])
 def update_company(company_id):
     user_id = get_current_user_id()
+    if (g.current_user or {}).get("role") == "staff":
+        return jsonify({"ok": False, "errors": ["No autorizado."]}), 403
     payload = request.get_json(silent=True) or {}
 
     display_name = (payload.get("display_name") or payload.get("displayName") or "").strip()
     legal_name = (payload.get("legal_name") or payload.get("legalName") or "").strip()
     tax_id = (payload.get("tax_id") or payload.get("taxId") or "").strip().upper()
     company_type = payload.get("company_type") or payload.get("companyType") or ""
+    email = (payload.get("email") or "").strip()
+    phone = (payload.get("phone") or "").strip()
+    assigned_user_id = payload.get("assigned_user_id") or payload.get("assignedUserId")
 
     errors = []
     if not display_name:
@@ -537,23 +1102,28 @@ def update_company(company_id):
     with engine.connect() as conn:
         exists = conn.execute(
             select(companies_table.c.id)
-            .where(companies_table.c.user_id == user_id)
+            .where(companies_table.c.agency_id == user_id)
             .where(companies_table.c.tax_id == tax_id)
             .where(companies_table.c.id != company_id)
         ).first()
     if exists:
         return jsonify({"ok": False, "errors": ["Ya existe una empresa con ese CIF/NIF."]}), 400
 
+    assigned_user_id = resolve_assigned_staff(user_id, assigned_user_id)
+
     with engine.begin() as conn:
         result = conn.execute(
             companies_table.update()
             .where(companies_table.c.id == company_id)
-            .where(companies_table.c.user_id == user_id)
+            .where(companies_table.c.agency_id == user_id)
             .values(
                 display_name=display_name,
                 legal_name=legal_name,
                 tax_id=tax_id,
                 company_type=company_type,
+                email=email,
+                phone=phone,
+                assigned_user_id=assigned_user_id,
             )
         )
 
@@ -566,28 +1136,127 @@ def update_company(company_id):
 @app.route("/api/companies/<int:company_id>", methods=["DELETE"])
 def delete_company(company_id):
     user_id = get_current_user_id()
+    if (g.current_user or {}).get("role") == "staff":
+        return jsonify({"ok": False, "errors": ["No autorizado."]}), 403
     with engine.begin() as conn:
         result = conn.execute(
             companies_table.delete()
             .where(companies_table.c.id == company_id)
-            .where(companies_table.c.user_id == user_id)
+            .where(companies_table.c.agency_id == user_id)
         )
     if result.rowcount == 0:
         return jsonify({"ok": False, "errors": ["Empresa no encontrada."]}), 404
     return jsonify({"ok": True})
 
 
+@app.route("/api/staff")
+def list_staff():
+    user_id = get_current_user_id()
+    role = (g.current_user or {}).get("role")
+    if role == "staff":
+        return jsonify({"ok": False, "errors": ["No autorizado."]}), 403
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(
+                users_table.c.id,
+                users_table.c.email,
+                users_table.c.role,
+                users_table.c.is_active,
+            )
+            .where(users_table.c.agency_id == user_id)
+            .where(users_table.c.role == "staff")
+        ).mappings().all()
+    staff = [
+        {
+            "id": row["id"],
+            "email": row["email"],
+            "is_active": bool(row["is_active"]),
+        }
+        for row in rows
+    ]
+    return jsonify({"staff": staff})
+
+
+@app.route("/api/staff", methods=["POST"])
+def create_staff():
+    user_id = get_current_user_id()
+    role = (g.current_user or {}).get("role")
+    if role == "staff":
+        return jsonify({"ok": False, "errors": ["No autorizado."]}), 403
+    payload = request.get_json(silent=True) or {}
+    email = _normalize_email(payload.get("email"))
+    password = payload.get("password") or ""
+    if not email or not password:
+        return jsonify({"ok": False, "errors": ["Email y contraseña obligatorios."]}), 400
+    if len(password) < 8:
+        return jsonify({"ok": False, "errors": ["La contraseña debe tener al menos 8 caracteres."]}), 400
+
+    with engine.begin() as conn:
+        exists = conn.execute(
+            select(users_table.c.id).where(users_table.c.email == email)
+        ).first()
+        if exists:
+            return jsonify({"ok": False, "errors": ["El email ya está registrado."]}), 400
+        agency_plan = conn.execute(
+            select(users_table.c.plan).where(users_table.c.id == user_id)
+        ).scalar_one_or_none()
+        result = conn.execute(
+            users_table.insert().values(
+                email=email,
+                password_hash=generate_password_hash(password),
+                role="staff",
+                plan=agency_plan or "trial",
+                agency_id=user_id,
+                created_at=datetime.utcnow().isoformat(),
+                is_active=True,
+            )
+        )
+        staff_id = result.inserted_primary_key[0]
+    return jsonify({"ok": True, "id": staff_id})
+
+
+@app.route("/api/staff/<int:staff_id>", methods=["PUT"])
+def update_staff(staff_id):
+    user_id = get_current_user_id()
+    role = (g.current_user or {}).get("role")
+    if role == "staff":
+        return jsonify({"ok": False, "errors": ["No autorizado."]}), 403
+    payload = request.get_json(silent=True) or {}
+    password = payload.get("password")
+    is_active = payload.get("is_active")
+    updates = {}
+    if password:
+        if len(password) < 8:
+            return jsonify({"ok": False, "errors": ["La contraseña debe tener al menos 8 caracteres."]}), 400
+        updates["password_hash"] = generate_password_hash(password)
+    if is_active is not None:
+        updates["is_active"] = bool(is_active)
+    if not updates:
+        return jsonify({"ok": False, "errors": ["Nada que actualizar."]}), 400
+    with engine.begin() as conn:
+        result = conn.execute(
+            users_table.update()
+            .where(users_table.c.id == staff_id)
+            .where(users_table.c.agency_id == user_id)
+            .where(users_table.c.role == "staff")
+            .values(**updates)
+        )
+    if result.rowcount == 0:
+        return jsonify({"ok": False, "errors": ["Usuario no encontrado."]}), 404
+    return jsonify({"ok": True})
+
+
 @app.route("/api/years")
 def available_years():
     years = set()
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=False)
     if company_id is None:
         return jsonify({"years": [date.today().year]})
     with engine.connect() as conn:
         invoice_dates = conn.execute(
             select(invoices_table.c.invoice_date)
-            .where(invoices_table.c.user_id == user_id)
+            .where(invoices_table.c.user_id == data_owner_id)
             .where(invoices_table.c.company_id == company_id)
         ).scalars().all()
         for value in invoice_dates:
@@ -598,13 +1267,13 @@ def available_years():
                     continue
         billing_years = conn.execute(
             select(facturacion_table.c.anio)
-            .where(facturacion_table.c.user_id == user_id)
+            .where(facturacion_table.c.user_id == data_owner_id)
             .where(facturacion_table.c.company_id == company_id)
         ).scalars().all()
         years.update(int(year) for year in billing_years if year)
         income_years = conn.execute(
             select(income_invoices_table.c.invoice_date)
-            .where(income_invoices_table.c.user_id == user_id)
+            .where(income_invoices_table.c.user_id == data_owner_id)
             .where(income_invoices_table.c.company_id == company_id)
         ).scalars().all()
         for value in income_years:
@@ -622,7 +1291,7 @@ def available_years():
 
 @app.route("/api/upload", methods=["POST"])
 def upload_invoices():
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     if request.is_json:
         payload = request.get_json(silent=True) or {}
         entries = payload.get("entries", [])
@@ -646,13 +1315,7 @@ def upload_invoices():
                     except (TypeError, ValueError):
                         errors.append("Empresa inválida.")
                         continue
-                    with engine.connect() as conn:
-                        exists = conn.execute(
-                            select(companies_table.c.id)
-                            .where(companies_table.c.user_id == user_id)
-                            .where(companies_table.c.id == company_id)
-                        ).first()
-                    if not exists:
+                    if not is_company_accessible(company_id):
                         errors.append("Empresa inválida.")
                         continue
                 supplier = (entry.get("supplier") or "").strip()
@@ -703,7 +1366,7 @@ def upload_invoices():
 
                 conn.execute(
                     invoices_table.insert().values(
-                        user_id=user_id,
+                        user_id=data_owner_id,
                         company_id=company_id,
                         original_filename=original_name,
                         stored_filename=stored_value,
@@ -807,12 +1470,12 @@ def upload_invoices():
             created_at = datetime.utcnow().isoformat()
 
             conn.execute(
-                    invoices_table.insert().values(
-                        user_id=user_id,
-                        company_id=company_id,
-                        original_filename=original_name,
-                        stored_filename=storage_url,
-                        invoice_date=invoice_date,
+                invoices_table.insert().values(
+                    user_id=data_owner_id,
+                    company_id=company_id,
+                    original_filename=original_name,
+                    stored_filename=storage_url,
+                    invoice_date=invoice_date,
                     supplier=supplier,
                     base_amount=base_amount,
                     vat_rate=vat_rate_int,
@@ -874,17 +1537,17 @@ def analyze_invoice_api():
     return jsonify(
         {
             "ok": True,
-        "storedFilename": storage_url,
-        "originalFilename": original_name,
-        "companyId": company_id,
-        "extracted": extracted,
-    }
+            "storedFilename": storage_url,
+            "originalFilename": original_name,
+            "companyId": company_id,
+            "extracted": extracted,
+        }
     )
 
 
 @app.route("/api/billing", methods=["POST"])
 def create_billing():
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=True)
     if company_id is None:
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
@@ -933,7 +1596,7 @@ def create_billing():
     with engine.begin() as conn:
         conn.execute(
             facturacion_table.insert().values(
-                user_id=user_id,
+                user_id=data_owner_id,
                 company_id=company_id,
                 mes=month,
                 anio=year,
@@ -953,7 +1616,7 @@ def create_billing():
 def billing_summary():
     month = request.args.get("month", type=int)
     year = request.args.get("year", type=int)
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=True)
     if company_id is None:
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
@@ -972,7 +1635,7 @@ def billing_summary():
             .where(
                 facturacion_table.c.mes == month,
                 facturacion_table.c.anio == year,
-                facturacion_table.c.user_id == user_id,
+                facturacion_table.c.user_id == data_owner_id,
                 facturacion_table.c.company_id == company_id,
             )
             .group_by(facturacion_table.c.tipo_iva)
@@ -1011,7 +1674,7 @@ def billing_summary():
 def list_invoices():
     month = request.args.get("month", type=int)
     year = request.args.get("year", type=int)
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=True)
     if company_id is None:
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
@@ -1038,7 +1701,7 @@ def list_invoices():
                 invoices_table.c.original_filename,
                 invoices_table.c.expense_category,
             )
-            .where(invoices_table.c.user_id == user_id)
+            .where(invoices_table.c.user_id == data_owner_id)
             .where(invoices_table.c.company_id == company_id)
             .where(invoices_table.c.invoice_date.between(start, end))
             .order_by(invoices_table.c.invoice_date.desc(), invoices_table.c.id.desc())
@@ -1068,7 +1731,7 @@ def list_invoices():
 def list_payments():
     month = request.args.get("month", type=int)
     year = request.args.get("year", type=int)
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=True)
     if company_id is None:
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
@@ -1105,7 +1768,7 @@ def list_payments():
                     & invoices_table.c.invoice_date.between(buffer_start, year_end_iso)
                 )
             )
-            .where(invoices_table.c.user_id == user_id)
+            .where(invoices_table.c.user_id == data_owner_id)
             .where(invoices_table.c.company_id == company_id)
             .order_by(invoices_table.c.invoice_date.desc(), invoices_table.c.id.desc())
         ).mappings().all()
@@ -1128,7 +1791,7 @@ def list_payments():
                     & income_invoices_table.c.invoice_date.between(buffer_start, year_end_iso)
                 )
             )
-            .where(income_invoices_table.c.user_id == user_id)
+            .where(income_invoices_table.c.user_id == data_owner_id)
             .where(income_invoices_table.c.company_id == company_id)
             .order_by(income_invoices_table.c.invoice_date.desc(), income_invoices_table.c.id.desc())
         ).mappings().all()
@@ -1186,9 +1849,156 @@ def list_payments():
     return jsonify({"items": items, "dayTotals": day_totals})
 
 
+@app.route("/api/reports/quarterly")
+def quarterly_report():
+    data_owner_id = get_data_owner_id()
+    user_role = (g.current_user or {}).get("role")
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+    year, quarter, start_month, end_month = _parse_period_params()
+    months = _get_months_for_period(year, quarter, start_month, end_month)
+    if not months:
+        return jsonify({"ok": False, "errors": ["Periodo inválido."]}), 400
+
+    with engine.connect() as conn:
+        company_query = select(
+            companies_table.c.display_name,
+            companies_table.c.legal_name,
+            companies_table.c.tax_id,
+            companies_table.c.company_type,
+            companies_table.c.email,
+        ).where(companies_table.c.id == company_id)
+        if user_role != "owner":
+            company_query = company_query.where(companies_table.c.agency_id == data_owner_id)
+        company = conn.execute(
+            company_query
+        ).mappings().first()
+    if not company:
+        return jsonify({"ok": False, "errors": ["Empresa no encontrada."]}), 404
+
+    totals = _build_report_totals(data_owner_id, company_id, months, year)
+    period_label = _report_period_label(year, months, quarter)
+    generated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    html = f"""
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <title>Informe trimestral {period_label}</title>
+        <style>
+          body {{ font-family: Arial, sans-serif; margin: 32px; color: #1f2937; }}
+          h1 {{ font-size: 20px; margin-bottom: 4px; }}
+          p {{ margin: 4px 0; }}
+          table {{ border-collapse: collapse; width: 100%; margin-top: 16px; }}
+          th, td {{ border: 1px solid #e5e7eb; padding: 8px; text-align: left; }}
+          th {{ background: #f9fafb; }}
+        </style>
+      </head>
+      <body>
+        <h1>Informe fiscal {period_label}</h1>
+        <p><strong>Empresa:</strong> {company["display_name"]} ({company["legal_name"]})</p>
+        <p><strong>CIF/NIF:</strong> {company["tax_id"]}</p>
+        <p><strong>Generado:</strong> {generated_at}</p>
+        <table>
+          <tr><th>Concepto</th><th>Importe (€)</th></tr>
+          <tr><td>Ingresos base</td><td>{totals["income_base"]:.2f}</td></tr>
+          <tr><td>IVA repercutido</td><td>{totals["income_vat"]:.2f}</td></tr>
+          <tr><td>Gastos deducibles</td><td>{totals["expense_base"]:.2f}</td></tr>
+          <tr><td>IVA soportado</td><td>{totals["expense_vat"]:.2f}</td></tr>
+          <tr><td>Resultado neto</td><td>{totals["net_result"]:.2f}</td></tr>
+          <tr><td>Resultado IVA</td><td>{totals["vat_result"]:.2f}</td></tr>
+        </table>
+      </body>
+    </html>
+    """
+    response = app.response_class(html, mimetype="text/html")
+    filename = f"informe_{period_label.replace(' ', '_')}.html"
+    response.headers["Content-Disposition"] = f"attachment; filename={filename}"
+    return response
+
+
+@app.route("/api/reports/quarterly/email", methods=["POST"])
+def quarterly_report_email():
+    data_owner_id = get_data_owner_id()
+    user_role = (g.current_user or {}).get("role")
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+    payload = request.get_json(silent=True) or {}
+    year = payload.get("year")
+    quarter = payload.get("quarter")
+    start_month = payload.get("start_month")
+    end_month = payload.get("end_month")
+    try:
+        year = int(year)
+    except (TypeError, ValueError):
+        year = None
+    try:
+        quarter = int(quarter) if quarter else None
+    except (TypeError, ValueError):
+        quarter = None
+    try:
+        start_month = int(start_month) if start_month else None
+    except (TypeError, ValueError):
+        start_month = None
+    try:
+        end_month = int(end_month) if end_month else None
+    except (TypeError, ValueError):
+        end_month = None
+
+    months = _get_months_for_period(year, quarter, start_month, end_month)
+    if not months:
+        return jsonify({"ok": False, "errors": ["Periodo inválido."]}), 400
+
+    with engine.connect() as conn:
+        company_query = select(
+            companies_table.c.display_name,
+            companies_table.c.legal_name,
+            companies_table.c.tax_id,
+            companies_table.c.company_type,
+            companies_table.c.email,
+        ).where(companies_table.c.id == company_id)
+        if user_role != "owner":
+            company_query = company_query.where(companies_table.c.agency_id == data_owner_id)
+        company = conn.execute(company_query).mappings().first()
+        user = conn.execute(
+            select(users_table.c.email).where(users_table.c.id == get_current_user_id())
+        ).mappings().first()
+    if not company:
+        return jsonify({"ok": False, "errors": ["Empresa no encontrada."]}), 404
+    if not company.get("email"):
+        return jsonify({"ok": False, "errors": ["La empresa no tiene email."]}), 400
+
+    totals = _build_report_totals(data_owner_id, company_id, months, year)
+    period_label = _report_period_label(year, months, quarter)
+    html = f"""
+    <h2>Informe fiscal {period_label}</h2>
+    <p><strong>Empresa:</strong> {company["display_name"]} ({company["legal_name"]})</p>
+    <p><strong>CIF/NIF:</strong> {company["tax_id"]}</p>
+    <ul>
+      <li>Ingresos base: {totals["income_base"]:.2f} €</li>
+      <li>IVA repercutido: {totals["income_vat"]:.2f} €</li>
+      <li>Gastos deducibles: {totals["expense_base"]:.2f} €</li>
+      <li>IVA soportado: {totals["expense_vat"]:.2f} €</li>
+      <li>Resultado neto: {totals["net_result"]:.2f} €</li>
+      <li>Resultado IVA: {totals["vat_result"]:.2f} €</li>
+    </ul>
+    """
+    reply_to = user["email"] if user else None
+    sent = send_email(
+        company["email"],
+        f"Informe fiscal {period_label}",
+        html,
+        reply_to=reply_to,
+    )
+    if not sent:
+        return jsonify({"ok": False, "errors": ["No se pudo enviar el email."]}), 500
+    return jsonify({"ok": True})
+
+
 @app.route("/api/invoices/<int:invoice_id>", methods=["PUT"])
 def update_invoice(invoice_id):
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=True)
     if company_id is None:
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
@@ -1234,7 +2044,7 @@ def update_invoice(invoice_id):
         result = conn.execute(
             invoices_table.update()
             .where(invoices_table.c.id == invoice_id)
-            .where(invoices_table.c.user_id == user_id)
+            .where(invoices_table.c.user_id == data_owner_id)
             .where(invoices_table.c.company_id == company_id)
             .values(
                 invoice_date=invoice_date,
@@ -1271,7 +2081,7 @@ def update_invoice(invoice_id):
 
 @app.route("/api/invoices/<int:invoice_id>", methods=["DELETE"])
 def delete_invoice(invoice_id):
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=True)
     if company_id is None:
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
@@ -1279,7 +2089,7 @@ def delete_invoice(invoice_id):
         result = conn.execute(
             invoices_table.delete()
             .where(invoices_table.c.id == invoice_id)
-            .where(invoices_table.c.user_id == user_id)
+            .where(invoices_table.c.user_id == data_owner_id)
             .where(invoices_table.c.company_id == company_id)
         )
 
@@ -1293,7 +2103,7 @@ def delete_invoice(invoice_id):
 def list_income_invoices():
     month = request.args.get("month", type=int)
     year = request.args.get("year", type=int)
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=True)
     if company_id is None:
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
@@ -1319,7 +2129,7 @@ def list_income_invoices():
                 income_invoices_table.c.total_amount,
                 income_invoices_table.c.original_filename,
             )
-            .where(income_invoices_table.c.user_id == user_id)
+            .where(income_invoices_table.c.user_id == data_owner_id)
             .where(income_invoices_table.c.company_id == company_id)
             .where(income_invoices_table.c.invoice_date.between(start, end))
             .order_by(income_invoices_table.c.invoice_date.desc(), income_invoices_table.c.id.desc())
@@ -1346,7 +2156,7 @@ def list_income_invoices():
 
 @app.route("/api/income-invoices", methods=["POST"])
 def create_income_invoices():
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=True)
     if company_id is None:
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
@@ -1406,7 +2216,7 @@ def create_income_invoices():
 
             conn.execute(
                 income_invoices_table.insert().values(
-                    user_id=user_id,
+                    user_id=data_owner_id,
                     company_id=company_id,
                     original_filename=original_name,
                     stored_filename=stored_value,
@@ -1428,7 +2238,7 @@ def create_income_invoices():
 
 @app.route("/api/income-invoices/<int:invoice_id>", methods=["PUT"])
 def update_income_invoice(invoice_id):
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=True)
     if company_id is None:
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
@@ -1471,7 +2281,7 @@ def update_income_invoice(invoice_id):
         result = conn.execute(
             income_invoices_table.update()
             .where(income_invoices_table.c.id == invoice_id)
-            .where(income_invoices_table.c.user_id == user_id)
+            .where(income_invoices_table.c.user_id == data_owner_id)
             .where(income_invoices_table.c.company_id == company_id)
             .values(
                 invoice_date=invoice_date,
@@ -1492,7 +2302,7 @@ def update_income_invoice(invoice_id):
 
 @app.route("/api/income-invoices/<int:invoice_id>", methods=["DELETE"])
 def delete_income_invoice(invoice_id):
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=True)
     if company_id is None:
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
@@ -1501,7 +2311,7 @@ def delete_income_invoice(invoice_id):
         result = conn.execute(
             income_invoices_table.delete()
             .where(income_invoices_table.c.id == invoice_id)
-            .where(income_invoices_table.c.user_id == user_id)
+            .where(income_invoices_table.c.user_id == data_owner_id)
             .where(income_invoices_table.c.company_id == company_id)
         )
     if result.rowcount == 0:
@@ -1513,7 +2323,7 @@ def delete_income_invoice(invoice_id):
 def list_no_invoice_expenses():
     month = request.args.get("month", type=int)
     year = request.args.get("year", type=int)
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=True)
     if company_id is None:
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
@@ -1536,7 +2346,7 @@ def list_no_invoice_expenses():
                 no_invoice_table.c.expense_type,
                 no_invoice_table.c.deductible,
             )
-            .where(no_invoice_table.c.user_id == user_id)
+            .where(no_invoice_table.c.user_id == data_owner_id)
             .where(no_invoice_table.c.company_id == company_id)
             .where(no_invoice_table.c.expense_date.between(start, end))
             .order_by(no_invoice_table.c.expense_date.desc(), no_invoice_table.c.id.desc())
@@ -1559,7 +2369,7 @@ def list_no_invoice_expenses():
 
 @app.route("/api/expenses/no-invoice", methods=["POST"])
 def create_no_invoice_expense():
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=True)
     if company_id is None:
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
@@ -1595,7 +2405,7 @@ def create_no_invoice_expense():
     with engine.begin() as conn:
         conn.execute(
             no_invoice_table.insert().values(
-                user_id=user_id,
+                user_id=data_owner_id,
                 company_id=company_id,
                 expense_date=expense_date,
                 concept=concept,
@@ -1611,7 +2421,7 @@ def create_no_invoice_expense():
 
 @app.route("/api/expenses/no-invoice/<int:expense_id>", methods=["PUT"])
 def update_no_invoice_expense(expense_id):
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=True)
     if company_id is None:
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
@@ -1648,7 +2458,7 @@ def update_no_invoice_expense(expense_id):
         result = conn.execute(
             no_invoice_table.update()
             .where(no_invoice_table.c.id == expense_id)
-            .where(no_invoice_table.c.user_id == user_id)
+            .where(no_invoice_table.c.user_id == data_owner_id)
             .where(no_invoice_table.c.company_id == company_id)
             .values(
                 expense_date=expense_date,
@@ -1679,7 +2489,7 @@ def update_no_invoice_expense(expense_id):
 
 @app.route("/api/expenses/no-invoice/<int:expense_id>", methods=["DELETE"])
 def delete_no_invoice_expense(expense_id):
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=True)
     if company_id is None:
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
@@ -1687,7 +2497,7 @@ def delete_no_invoice_expense(expense_id):
         result = conn.execute(
             no_invoice_table.delete()
             .where(no_invoice_table.c.id == expense_id)
-            .where(no_invoice_table.c.user_id == user_id)
+            .where(no_invoice_table.c.user_id == data_owner_id)
             .where(no_invoice_table.c.company_id == company_id)
         )
 
@@ -1701,7 +2511,7 @@ def delete_no_invoice_expense(expense_id):
 def billing_entries():
     month = request.args.get("month", type=int)
     year = request.args.get("year", type=int)
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=True)
     if company_id is None:
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
@@ -1726,7 +2536,7 @@ def billing_entries():
             .where(
                 facturacion_table.c.mes == month,
                 facturacion_table.c.anio == year,
-                facturacion_table.c.user_id == user_id,
+                facturacion_table.c.user_id == data_owner_id,
                 facturacion_table.c.company_id == company_id,
             )
             .order_by(facturacion_table.c.id.desc())
@@ -1752,7 +2562,7 @@ def billing_entries():
 
 @app.route("/api/billing/<int:billing_id>", methods=["PUT"])
 def update_billing(billing_id):
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=True)
     if company_id is None:
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
@@ -1781,7 +2591,7 @@ def update_billing(billing_id):
         result = conn.execute(
             facturacion_table.update()
             .where(facturacion_table.c.id == billing_id)
-            .where(facturacion_table.c.user_id == user_id)
+            .where(facturacion_table.c.user_id == data_owner_id)
             .where(facturacion_table.c.company_id == company_id)
             .values(
                 base_facturada=base_amount,
@@ -1810,7 +2620,7 @@ def update_billing(billing_id):
 
 @app.route("/api/billing/<int:billing_id>", methods=["DELETE"])
 def delete_billing(billing_id):
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=True)
     if company_id is None:
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
@@ -1818,7 +2628,7 @@ def delete_billing(billing_id):
         result = conn.execute(
             facturacion_table.delete()
             .where(facturacion_table.c.id == billing_id)
-            .where(facturacion_table.c.user_id == user_id)
+            .where(facturacion_table.c.user_id == data_owner_id)
             .where(facturacion_table.c.company_id == company_id)
         )
 
@@ -1832,7 +2642,7 @@ def delete_billing(billing_id):
 def summary():
     month = request.args.get("month", type=int)
     year = request.args.get("year", type=int)
-    user_id = get_current_user_id()
+    data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=True)
     if company_id is None:
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
@@ -1854,7 +2664,7 @@ def summary():
                 invoices_table.c.vat_rate,
                 invoices_table.c.base_amount,
             )
-            .where(invoices_table.c.user_id == user_id)
+            .where(invoices_table.c.user_id == data_owner_id)
             .where(invoices_table.c.company_id == company_id)
             .where(invoices_table.c.invoice_date.between(start, end))
             .order_by(invoices_table.c.invoice_date)

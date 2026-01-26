@@ -6,7 +6,7 @@
   <title>Lector de Facturas</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
 </head>
-<body>
+<body data-user-role="{{ user.role }}">
   <div class="app-shell">
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-brand">
@@ -20,6 +20,7 @@
         <button class="nav-link" data-section="expenses" type="button">Gastos (sin factura)</button>
         <button class="nav-link" data-section="income" type="button">Ingresos</button>
         <button class="nav-link" data-section="payments" type="button">Calendario de pagos</button>
+        <button class="nav-link" data-section="reports" type="button">Informes</button>
         <button class="nav-link" data-section="taxes" type="button">Modelos de impuestos</button>
         <button class="nav-link" data-section="pnl" type="button">Pérdidas y Ganancias</button>
       </nav>
@@ -56,6 +57,16 @@
           <div class="field">
             <label for="companySelect">Empresa</label>
             <select id="companySelect"></select>
+          </div>
+        </div>
+        <div class="topbar-meta">
+          <div class="context">
+            <span id="headerCompanyLabel">Empresa: -</span>
+            <span id="headerPeriodLabel">Periodo: -</span>
+          </div>
+          <div class="user-info">
+            <span id="headerUserEmail">{{ user.email }}</span>
+            <a class="button ghost" href="{{ url_for('logout') }}">Cerrar sesión</a>
           </div>
         </div>
       </header>
@@ -155,6 +166,20 @@
               <input type="text" id="companyTaxId" placeholder="Ej. B12345678" />
             </div>
             <div class="field">
+              <label for="companyEmail">Email de la empresa</label>
+              <input type="email" id="companyEmail" placeholder="Ej. facturacion@empresa.com" />
+            </div>
+            <div class="field">
+              <label for="companyPhone">Teléfono</label>
+              <input type="text" id="companyPhone" placeholder="Ej. 900 123 456" />
+            </div>
+            <div class="field">
+              <label for="companyAssignedSelect">Asignar a trabajador</label>
+              <select id="companyAssignedSelect">
+                <option value="">Sin asignar</option>
+              </select>
+            </div>
+            <div class="field">
               <label for="companyType">Tipo de empresa</label>
               <select id="companyType">
                 <option value="individual">Autónomo</option>
@@ -172,6 +197,9 @@
                     <th>Nombre comercial</th>
                     <th>Razón social</th>
                     <th>CIF/NIF</th>
+                    <th>Email</th>
+                    <th>Teléfono</th>
+                    <th>Asignado a</th>
                     <th>Tipo</th>
                     <th>Acciones</th>
                   </tr>
@@ -180,6 +208,42 @@
               </table>
             </div>
             <p class="empty" id="companiesEmpty">No hay empresas registradas.</p>
+          </div>
+        </section>
+
+        <section class="panel staff-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Equipo de la gestoría</h2>
+              <p>Crea usuarios trabajadores y asigna empresas.</p>
+            </div>
+          </div>
+          <div class="billing-form">
+            <div class="field">
+              <label for="staffEmail">Email del trabajador</label>
+              <input type="email" id="staffEmail" placeholder="Ej. asesor@gestoria.com" />
+            </div>
+            <div class="field">
+              <label for="staffPassword">Contraseña temporal</label>
+              <input type="password" id="staffPassword" placeholder="Mínimo 8 caracteres" />
+            </div>
+            <button id="staffSaveBtn" class="button primary">Crear trabajador</button>
+          </div>
+          <div class="billing-entries">
+            <h3>Trabajadores</h3>
+            <div class="billing-table">
+              <table id="staffTable">
+                <thead>
+                  <tr>
+                    <th>Email</th>
+                    <th>Estado</th>
+                    <th>Acciones</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <p class="empty" id="staffEmpty">No hay trabajadores creados.</p>
           </div>
         </section>
       </section>
@@ -447,6 +511,46 @@
             <div id="paymentDayList" class="payment-day-list"></div>
             <p id="paymentDayTotal" class="payment-day-total"></p>
           </div>
+        </section>
+      </section>
+
+      <section class="page-section" data-section="reports">
+        <section class="panel report-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Informes trimestrales</h2>
+              <p>Genera informes fiscales por trimestre o periodo personalizado.</p>
+            </div>
+          </div>
+          <div class="report-form">
+            <div class="field">
+              <label for="reportYearSelect">Año</label>
+              <select id="reportYearSelect"></select>
+            </div>
+            <div class="field">
+              <label for="reportQuarterSelect">Periodo</label>
+              <select id="reportQuarterSelect">
+                <option value="1">T1</option>
+                <option value="2">T2</option>
+                <option value="3">T3</option>
+                <option value="4">T4</option>
+                <option value="custom">Personalizado</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="reportStartMonthSelect">Desde</label>
+              <select id="reportStartMonthSelect"></select>
+            </div>
+            <div class="field">
+              <label for="reportEndMonthSelect">Hasta</label>
+              <select id="reportEndMonthSelect"></select>
+            </div>
+          </div>
+          <div class="report-actions">
+            <button id="reportDownloadBtn" class="button primary">Descargar informe</button>
+            <button id="reportEmailBtn" class="button ghost">Enviar por email</button>
+          </div>
+          <p id="reportStatus" class="form-hint"></p>
         </section>
       </section>
 

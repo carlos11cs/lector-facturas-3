@@ -55,6 +55,7 @@ body {
   justify-content: space-between;
   gap: 32px;
   align-items: flex-start;
+  flex-wrap: wrap;
 }
 
 .title-block {
@@ -105,6 +106,33 @@ h1 {
   border-radius: 18px;
   box-shadow: var(--shadow);
   border: 1px solid var(--border);
+}
+
+.topbar-meta {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.topbar-meta .context {
+  display: flex;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.topbar-meta .user-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.9rem;
+}
+
+.topbar-meta .user-info span {
+  color: var(--muted);
 }
 
 .field {
@@ -304,6 +332,90 @@ h1 {
 .payment-day-total {
   font-weight: 600;
   color: var(--accent-strong);
+}
+
+.report-form {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  margin-top: 12px;
+}
+
+.report-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
+
+.auth-page {
+  min-height: 100vh;
+  background: var(--background);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+}
+
+.auth-card {
+  background: var(--panel);
+  padding: 32px;
+  border-radius: 20px;
+  box-shadow: var(--shadow);
+  border: 1px solid var(--border);
+  width: min(420px, 100%);
+}
+
+.auth-card h1 {
+  font-size: 1.8rem;
+  margin-bottom: 8px;
+}
+
+.auth-subtitle {
+  color: var(--muted);
+  margin-top: 0;
+  margin-bottom: 20px;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.auth-form input {
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+
+.auth-error {
+  background: #fff1f2;
+  border: 1px solid #fecdd3;
+  color: #b91c1c;
+  padding: 10px 12px;
+  border-radius: 12px;
+}
+
+.auth-message {
+  background: #ecfdf3;
+  border: 1px solid #bbf7d0;
+  color: #166534;
+  padding: 10px 12px;
+  border-radius: 12px;
+}
+
+.auth-links {
+  margin-top: 16px;
+  display: flex;
+  gap: 8px;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.auth-links a {
+  color: var(--accent-strong);
+  text-decoration: none;
 }
 
 .panel {
