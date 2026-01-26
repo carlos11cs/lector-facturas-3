@@ -3,7 +3,7 @@ import logging
 import os
 import re
 from datetime import date, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List, Tuple
 
 import mimetypes
 import fitz  # PyMuPDF
@@ -205,24 +205,121 @@ def _looks_like_metadata(line: str) -> bool:
     return False
 
 
-def _extract_supplier_from_text(text: str, company_names=None) -> Optional[str]:
+def _contains_legal_form(line: str) -> bool:
+    if not line:
+        return False
+    return bool(
+        re.search(
+            r"\b(S\.L\.U\.|S\.L\.|S\.A\.U\.|S\.A\.|S\.C\.|S\.Coop\.|S\.L\.P\.|UTE|CB|GmbH|SARL|LTD|INC|BV|NV)\b",
+            line,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _has_tax_id(line: str) -> bool:
+    if not line:
+        return False
+    patterns = [
+        r"\b[A-HJ-NP-SUVW]\d{7}[0-9A-J]\b",  # CIF
+        r"\b\d{8}[A-Z]\b",  # NIF
+        r"\b[A-Z]{2}\s?\d{6,12}\b",  # VAT/IVA intracomunitario
+    ]
+    return any(re.search(pattern, line, re.IGNORECASE) for pattern in patterns)
+
+
+def _extract_supplier_candidates(text: str, company_names=None) -> List[Tuple[str, int]]:
     if not text:
-        return None
+        return []
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
-        return None
+        return []
+
     supplier_keywords = [
         "expedido por",
         "emisor",
         "proveedor",
         "facturado por",
         "vendedor",
+        "issued by",
+        "seller",
     ]
     client_keywords = [
         "cliente",
         "enviado a",
         "destinatario",
         "facturado a",
+        "receptor",
+        "bill to",
+        "ship to",
+    ]
+    operational_keywords = [
+        "transporte",
+        "envío",
+        "expedición",
+        "mensajería",
+        "portes",
+    ]
+
+    header_lines = lines[:8]
+    line_counts = {}
+    for line in lines:
+        key = _normalize_entity_name(line)
+        if key:
+            line_counts[key] = line_counts.get(key, 0) + 1
+
+    candidates: List[Tuple[str, int]] = []
+    for idx, line in enumerate(lines):
+        lowered = line.lower()
+        if any(keyword in lowered for keyword in client_keywords):
+            continue
+        if any(keyword in lowered for keyword in operational_keywords) and not _contains_legal_form(line):
+            continue
+        if _looks_like_metadata(line):
+            continue
+        if _is_same_entity(line, company_names):
+            continue
+
+        score = 0
+        if line in header_lines:
+            score += 15
+        if _contains_legal_form(line):
+            score += 80
+        if _has_tax_id(line):
+            score += 30
+        if line_counts.get(_normalize_entity_name(line), 0) > 1:
+            score += 10
+        if any(keyword in lowered for keyword in supplier_keywords):
+            score += 25
+
+        if score <= 0:
+            continue
+        candidates.append((line, score))
+
+    return candidates
+
+
+def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
+    if not text:
+        return None
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    supplier_keywords = [
+        "expedido por",
+        "emisor",
+        "proveedor",
+        "facturado por",
+        "vendedor",
+        "issued by",
+        "seller",
+    ]
+    client_keywords = [
+        "cliente",
+        "enviado a",
+        "destinatario",
+        "facturado a",
+        "receptor",
+        "bill to",
+        "ship to",
     ]
 
     for idx, line in enumerate(lines):
@@ -249,18 +346,18 @@ def _extract_supplier_from_text(text: str, company_names=None) -> Optional[str]:
                         continue
                     return candidate
 
-    header_lines = lines[:6]
-    for line in header_lines:
-        lowered = line.lower()
-        if any(word in lowered for word in client_keywords):
-            continue
-        if _looks_like_metadata(line):
-            continue
-        if _is_same_entity(line, company_names):
-            continue
-        return line
-
+    candidates = _extract_supplier_candidates(text, company_names)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[1], reverse=True)
+    best, score = candidates[0]
+    if _contains_legal_form(best) or score >= 60:
+        return best
     return None
+
+
+def _extract_supplier_from_text(text: str, company_names=None) -> Optional[str]:
+    return _select_best_supplier(text, company_names)
 
 
 def _validate_math(
@@ -480,17 +577,23 @@ def analyze_invoice(
     )
 
     extracted_text = ""
+    embedded_text = ""
     used_ocr = False
+    pdf_kind = None
     if is_pdf:
-        extracted_text = _extract_pdf_text_from_bytes(file_bytes)
-        text_length = len(extracted_text.strip())
-        is_significant = _is_text_significant(extracted_text, PDF_TEXT_THRESHOLD)
+        embedded_text = _extract_pdf_text_from_bytes(file_bytes)
+        text_length = len(embedded_text.strip())
+        is_significant = _is_text_significant(embedded_text, PDF_TEXT_THRESHOLD)
         is_scanned = not is_significant
         ocr_text = ""
         if is_scanned:
             ocr_text = _extract_pdf_text_ocr_from_bytes(file_bytes)
             extracted_text = ocr_text
             used_ocr = True
+            pdf_kind = "scanned"
+        else:
+            extracted_text = embedded_text
+            pdf_kind = "original"
         logger.info("PDF tratado como escaneado (%s): %s", filename, is_scanned)
         logger.info("Longitud texto extraido (%s): %s", filename, text_length)
         logger.info("Texto significativo (%s): %s", filename, is_significant)
@@ -499,6 +602,7 @@ def analyze_invoice(
     elif is_image:
         extracted_text = _extract_image_text_ocr_from_bytes(file_bytes)
         used_ocr = True
+        pdf_kind = "image"
         logger.info("OCR aplicado a imagen (%s).", filename)
     else:
         logger.warning("Tipo de archivo no soportado (%s). Texto vacio enviado.", filename)
@@ -525,6 +629,8 @@ def analyze_invoice(
             "Analiza el siguiente texto extraido de una factura recibida (gasto). "
             "Devuelve SOLO JSON valido con estas claves: "
             "supplier, invoice_date, payment_date, base_amount, vat_rate, vat_amount, total_amount. "
+            "El supplier debe ser la razon social del emisor (forma juridica si aparece) "
+            "y no debe ser el cliente/receptor. "
             "Usa null si no puedes inferir un dato con seguridad. "
             "No incluyas texto adicional fuera del JSON.\n\n"
             f"TEXTO_FACTURA:\n{extracted_text}"
@@ -591,7 +697,8 @@ def analyze_invoice(
         company_names = []
 
     if document_type != "income":
-        heuristic_supplier = _extract_supplier_from_text(extracted_text, company_names)
+        supplier_source_text = embedded_text if pdf_kind == "original" else extracted_text
+        heuristic_supplier = _extract_supplier_from_text(supplier_source_text, company_names)
         if _is_same_entity(provider_name, company_names):
             provider_name = None
         if _is_same_entity(heuristic_supplier, company_names):
