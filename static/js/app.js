@@ -10,6 +10,7 @@ let currentNoInvoiceExpenses = [];
 let billingBaseTotal = 0;
 let currentSummary = null;
 let currentBillingSummary = null;
+let currentBillingEntries = [];
 let currentDeductibleExpenses = 0;
 let annualBillingBaseTotal = 0;
 let annualDeductibleExpenses = 0;
@@ -1693,8 +1694,18 @@ function updateCharts(data, period) {
   updatePieChart(data.suppliers, data.supplierTotals);
 }
 
+function toggleChartEmpty(id, isEmpty) {
+  const node = document.getElementById(id);
+  if (!node) {
+    return;
+  }
+  node.classList.toggle("is-visible", isEmpty);
+}
+
 function updateLineChart(labels, values, datasetLabel) {
   const ctx = document.getElementById("lineChart");
+  const hasData = Array.isArray(values) && values.some((value) => Number(value) > 0);
+  toggleChartEmpty("lineChartEmpty", !hasData);
   if (!lineChart) {
     lineChart = new Chart(ctx, {
       type: "line",
@@ -1755,7 +1766,10 @@ function updatePieChart(labels, values) {
     "#5c6f90",
   ];
 
-  if (!labels || labels.length === 0) {
+  const hasData = Array.isArray(values) && values.some((value) => Number(value) > 0);
+  toggleChartEmpty("pieChartEmpty", !hasData);
+
+  if (!labels || labels.length === 0 || !hasData) {
     chartLabels = ["Sin datos"];
     chartValues = [1];
     colors = ["#dce5df"];
@@ -1793,21 +1807,62 @@ function updatePieChart(labels, values) {
 }
 
 function updateBillingChart() {
-  const data = currentBillingSummary;
-  if (!data) {
+  const { month, year } = getSelectedMonthYear();
+  if (!month || !year) {
+    return;
+  }
+  const months = getPeriodMonths();
+  if (!months.length) {
     return;
   }
   const period = getSelectedPeriod();
-  let labels = [];
-  let values = [];
-  if (period === "quarterly") {
-    labels = data.monthlyTotals.map((item) => monthNames[item.month - 1]);
-    values = data.monthlyTotals.map((item) => item.total);
-  } else {
-    const { month } = getSelectedMonthYear();
-    labels = month ? [monthNames[month - 1]] : [];
-    values = [billingBaseTotal];
+  const start = new Date(year, months[0] - 1, 1);
+  const end = new Date(year, months[months.length - 1], 0);
+  const dayTotals = {};
+
+  const addRecord = (dateValue, amount) => {
+    if (!dateValue) {
+      return;
+    }
+    const dateObj = new Date(`${dateValue}T00:00:00`);
+    if (Number.isNaN(dateObj.getTime())) {
+      return;
+    }
+    if (dateObj < start || dateObj > end) {
+      return;
+    }
+    const key = dateObj.toISOString().slice(0, 10);
+    dayTotals[key] = (dayTotals[key] || 0) + (Number(amount) || 0);
+  };
+
+  currentBillingEntries.forEach((entry) => {
+    const dateValue =
+      entry.invoice_date ||
+      `${entry.year}-${String(entry.month).padStart(2, "0")}-01`;
+    addRecord(dateValue, entry.base);
+  });
+
+  currentIncomeInvoices.forEach((invoice) => {
+    addRecord(invoice.invoice_date, invoice.base_amount);
+  });
+
+  const labels = [];
+  const values = [];
+  let cursor = new Date(start);
+  while (cursor <= end) {
+    const key = cursor.toISOString().slice(0, 10);
+    const value = Number((dayTotals[key] || 0).toFixed(2));
+    values.push(value);
+    if (period === "quarterly") {
+      labels.push(`${cursor.getDate()} ${monthNames[cursor.getMonth()].slice(0, 3)}`);
+    } else {
+      labels.push(String(cursor.getDate()));
+    }
+    cursor.setDate(cursor.getDate() + 1);
   }
+
+  const hasData = values.some((value) => value > 0);
+  toggleChartEmpty("billingChartEmpty", !hasData);
 
   const ctx = document.getElementById("billingLineChart");
   if (!billingLineChart) {
@@ -1817,7 +1872,7 @@ function updateBillingChart() {
         labels,
         datasets: [
           {
-            label: "Base facturada",
+            label: "Ingresos diarios",
             data: values,
             borderColor: "#1b5d4b",
             backgroundColor: "rgba(27, 93, 75, 0.12)",
@@ -1852,6 +1907,7 @@ function updateBillingChart() {
   } else {
     billingLineChart.data.labels = labels;
     billingLineChart.data.datasets[0].data = values;
+    billingLineChart.data.datasets[0].label = "Ingresos diarios";
     billingLineChart.update();
   }
 }
@@ -1904,6 +1960,9 @@ function updateNetChart() {
     labels = month ? [monthNames[month - 1]] : [];
     values = [netValue];
   }
+
+  const hasData = values.some((value) => Number(value) !== 0);
+  toggleChartEmpty("netChartEmpty", !hasData);
 
   const ctx = document.getElementById("netChart");
   if (!netChart) {
@@ -2432,6 +2491,7 @@ function renderIncomeInvoices(invoices) {
   currentIncomeInvoices = invoices;
   if (!invoices.length) {
     incomeInvoicesEmpty.style.display = "block";
+    updateBillingChart();
     return;
   }
   incomeInvoicesEmpty.style.display = "none";
@@ -2492,6 +2552,7 @@ function renderIncomeInvoices(invoices) {
     tr.appendChild(actionsTd);
     incomeInvoicesTableBody.appendChild(tr);
   });
+  updateBillingChart();
 }
 
 function enterIncomeInvoiceEditMode(row, invoice) {
@@ -2996,8 +3057,10 @@ function deleteNoInvoiceExpense(expenseId) {
 
 function renderBillingEntries(entries) {
   billingEntriesBody.innerHTML = "";
+  currentBillingEntries = entries;
   if (!entries.length) {
     billingEntriesEmpty.style.display = "block";
+    updateBillingChart();
     return;
   }
   billingEntriesEmpty.style.display = "none";
@@ -3051,6 +3114,7 @@ function renderBillingEntries(entries) {
     tr.appendChild(actionsTd);
     billingEntriesBody.appendChild(tr);
   });
+  updateBillingChart();
 }
 
 function enterEditMode(row, entry) {

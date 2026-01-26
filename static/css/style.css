@@ -489,6 +489,59 @@ h1 {
   color: var(--muted);
 }
 
+.product-preview {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 32px;
+  padding: 10px 48px 40px;
+  align-items: center;
+}
+
+.preview-list {
+  margin-top: 12px;
+  padding-left: 18px;
+  color: var(--muted);
+}
+
+.mockup {
+  background: #f5f7fb;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.mockup-header {
+  display: flex;
+  gap: 6px;
+  padding: 12px;
+  background: #e7edf4;
+}
+
+.mockup-header .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #c7d3df;
+}
+
+.mockup-body {
+  padding: 18px;
+  display: grid;
+  gap: 12px;
+}
+
+.mockup-row {
+  height: 14px;
+  background: #d8e1ec;
+  border-radius: 8px;
+}
+
+.mockup-row.wide {
+  height: 26px;
+  background: #c9d6e5;
+}
+
 .legal-footer {
   padding: 24px 48px;
   border-top: 1px solid var(--border);
@@ -533,6 +586,14 @@ h1 {
 
 .legal-content h2 {
   margin-top: 24px;
+}
+
+.back-link {
+  display: inline-flex;
+  margin-bottom: 16px;
+  color: var(--accent-strong);
+  text-decoration: none;
+  font-weight: 600;
 }
 .auth-card {
   background: var(--panel);
@@ -774,11 +835,29 @@ h1 {
 }
 
 .dashboard-grid {
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .chart-wrapper {
-  height: 280px;
+  position: relative;
+  height: 320px;
+}
+
+.chart-empty {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.95rem;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.chart-empty.is-visible {
+  display: flex;
 }
 
 .summary-panel {
@@ -1023,6 +1102,10 @@ body.period-quarterly #billingEntriesTable td.period-month {
 
   .filters {
     width: 100%;
+  }
+
+  .dashboard-grid {
+    grid-template-columns: 1fr;
   }
 
   .panel-header {

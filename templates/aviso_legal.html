@@ -8,6 +8,7 @@
 </head>
 <body class="legal-page">
   <main class="legal-content">
+    <a href="{{ url_for('landing') }}" class="back-link">← Volver al inicio</a>
     <h1>Aviso legal</h1>
     <p>En cumplimiento con la normativa vigente, se informa que el titular del sitio web <strong>ledged.app</strong> es <strong>Ledged</strong> (en adelante, “Ledged”), con email de contacto <strong>soporte@ledged.app</strong>.</p>
 
@@ -28,7 +29,7 @@
   </main>
 
   <footer class="legal-footer">
-    <span>© 2026 Ledged</span>
+    <span>© 2026 Ledged · Contacto: soporte@ledged.app</span>
     <div class="legal-links">
       <a href="{{ url_for('legal_notice') }}">Aviso legal</a>
       <a href="{{ url_for('privacy') }}">Política de privacidad</a>

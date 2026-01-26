@@ -8,6 +8,7 @@
 </head>
 <body class="legal-page">
   <main class="legal-content">
+    <a href="{{ url_for('landing') }}" class="back-link">← Volver al inicio</a>
     <h1>Política de privacidad</h1>
     <p>Ledged trata los datos personales conforme al Reglamento (UE) 2016/679 (RGPD) y la normativa española vigente.</p>
 
@@ -34,7 +35,7 @@
   </main>
 
   <footer class="legal-footer">
-    <span>© 2026 Ledged</span>
+    <span>© 2026 Ledged · Contacto: soporte@ledged.app</span>
     <div class="legal-links">
       <a href="{{ url_for('legal_notice') }}">Aviso legal</a>
       <a href="{{ url_for('privacy') }}">Política de privacidad</a>

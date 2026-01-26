@@ -755,6 +755,9 @@ def send_email(to_email, subject, html_content, reply_to=None):
     if not RESEND_API_KEY:
         app.logger.warning("RESEND_API_KEY no configurada. Email no enviado.")
         return False
+    if APP_FROM_EMAIL.strip().lower() == "soporte@ledged.app":
+        app.logger.warning("APP_FROM_EMAIL inválido para envíos automáticos.")
+        return False
     payload = {
         "from": APP_FROM_EMAIL,
         "to": [to_email],
@@ -775,6 +778,18 @@ def send_email(to_email, subject, html_content, reply_to=None):
     except Exception:
         app.logger.exception("Error enviando email a %s", to_email)
         return False
+
+
+def get_agency_email_for_user(user_id):
+    with engine.connect() as conn:
+        agency_id = conn.execute(
+            select(users_table.c.agency_id).where(users_table.c.id == user_id)
+        ).scalar_one_or_none()
+        target_id = agency_id or user_id
+        email = conn.execute(
+            select(users_table.c.email).where(users_table.c.id == target_id)
+        ).scalar_one_or_none()
+    return email
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -894,7 +909,8 @@ def reset_password_request():
         <p>Enlace válido durante 1 hora:</p>
         <p><a href="{reset_link}">Restablecer contraseña</a></p>
         """
-        send_email(email, "Restablece tu contraseña", html)
+        reply_to = get_agency_email_for_user(row["id"])
+        send_email(email, "Restablece tu contraseña", html, reply_to=reply_to)
     return render_template(
         "reset_request.html",
         message="Si el email existe, recibirás un enlace de recuperación.",
