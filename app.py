@@ -327,6 +327,15 @@ def load_user_and_enforce_auth():
         return None
     if path.startswith("/health"):
         return None
+    if path in {
+        "/",
+        "/landing",
+        "/aviso-legal",
+        "/privacidad",
+        "/cookies",
+        "/terminos",
+    }:
+        return None
     if not g.current_user:
         if path.startswith("/api/"):
             return jsonify({"ok": False, "error": "auth_required"}), 401
@@ -793,7 +802,7 @@ def login():
     if not check_password_hash(row["password_hash"], password):
         return render_template("login.html", error="Credenciales inválidas.")
     session["user_id"] = row["id"]
-    return redirect(url_for("index"))
+    return redirect(url_for("app_home"))
 
 
 @app.route("/register", methods=["GET", "POST"])
@@ -843,7 +852,7 @@ def register():
             .values(agency_id=new_user_id)
         )
         session["user_id"] = new_user_id
-    return redirect(url_for("index"))
+    return redirect(url_for("app_home"))
 
 
 @app.route("/logout")
@@ -939,8 +948,42 @@ def reset_password(token):
 
 
 @app.route("/")
-def index():
+def landing():
+    if g.current_user:
+        return redirect(url_for("app_home"))
+    return render_template("landing.html")
+
+
+@app.route("/landing")
+def landing_alias():
+    if g.current_user:
+        return redirect(url_for("app_home"))
+    return render_template("landing.html")
+
+
+@app.route("/app")
+def app_home():
     return render_template("index.html", user=g.current_user)
+
+
+@app.route("/aviso-legal")
+def legal_notice():
+    return render_template("aviso_legal.html")
+
+
+@app.route("/privacidad")
+def privacy():
+    return render_template("privacidad.html")
+
+
+@app.route("/cookies")
+def cookies():
+    return render_template("cookies.html")
+
+
+@app.route("/terminos")
+def terms():
+    return render_template("terminos.html")
 
 
 @app.route("/api/companies")

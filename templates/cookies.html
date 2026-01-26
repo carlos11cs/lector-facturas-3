@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Política de cookies · Ledged</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body class="legal-page">
+  <main class="legal-content">
+    <h1>Política de cookies</h1>
+    <p>Ledged utiliza únicamente cookies técnicas necesarias para el funcionamiento de la plataforma.</p>
+
+    <h2>Cookies técnicas</h2>
+    <p>Se emplean para mantener la sesión del usuario, garantizar la seguridad y habilitar funcionalidades básicas.</p>
+
+    <h2>No se usan cookies de analítica o publicidad</h2>
+    <p>Ledged no utiliza cookies de seguimiento, analítica ni publicidad. No se requiere banner de consentimiento.</p>
+
+    <h2>Cómo desactivarlas</h2>
+    <p>El usuario puede configurar su navegador para bloquear o eliminar cookies. Esto puede afectar al funcionamiento de la plataforma.</p>
+  </main>
+
+  <footer class="legal-footer">
+    <span>© 2026 Ledged</span>
+    <div class="legal-links">
+      <a href="{{ url_for('legal_notice') }}">Aviso legal</a>
+      <a href="{{ url_for('privacy') }}">Política de privacidad</a>
+      <a href="{{ url_for('cookies') }}">Política de cookies</a>
+      <a href="{{ url_for('terms') }}">Términos del servicio</a>
+    </div>
+  </footer>
+</body>
+</html>

@@ -9,7 +9,7 @@
 <body class="auth-page">
   <div class="auth-card">
     <h1>Crear cuenta</h1>
-    <p class="auth-subtitle">Empieza a gestionar tu cartera de empresas.</p>
+    <p class="auth-subtitle">Registro exclusivo para gestorías.</p>
     {% if error %}
       <p class="auth-error">{{ error }}</p>
     {% endif %}
@@ -24,5 +24,14 @@
       <a href="{{ url_for('login') }}">Ya tengo cuenta</a>
     </div>
   </div>
+  <footer class="legal-footer">
+    <span>© 2026 Ledged</span>
+    <div class="legal-links">
+      <a href="{{ url_for('legal_notice') }}">Aviso legal</a>
+      <a href="{{ url_for('privacy') }}">Política de privacidad</a>
+      <a href="{{ url_for('cookies') }}">Política de cookies</a>
+      <a href="{{ url_for('terms') }}">Términos del servicio</a>
+    </div>
+  </footer>
 </body>
 </html>

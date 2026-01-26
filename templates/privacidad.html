@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Política de privacidad · Ledged</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body class="legal-page">
+  <main class="legal-content">
+    <h1>Política de privacidad</h1>
+    <p>Ledged trata los datos personales conforme al Reglamento (UE) 2016/679 (RGPD) y la normativa española vigente.</p>
+
+    <h2>Responsable</h2>
+    <p>Responsable del tratamiento: <strong>Ledged</strong>. Contacto: <strong>soporte@ledged.app</strong>.</p>
+
+    <h2>Finalidad</h2>
+    <p>Gestionar el acceso a la plataforma, la administración de empresas y la generación de informes fiscales para gestorías.</p>
+
+    <h2>Base legal</h2>
+    <p>La base legal es la ejecución del contrato de servicio y el interés legítimo para soporte y seguridad.</p>
+
+    <h2>Conservación</h2>
+    <p>Los datos se conservan mientras exista relación contractual y durante los plazos legales aplicables.</p>
+
+    <h2>Destinatarios</h2>
+    <p>No se ceden datos a terceros, salvo obligación legal. Los proveedores tecnológicos están ubicados en la UE o cuentan con garantías adecuadas.</p>
+
+    <h2>Derechos</h2>
+    <p>Puede ejercer sus derechos de acceso, rectificación, supresión, limitación, oposición y portabilidad en soporte@ledged.app.</p>
+
+    <h2>Alojamiento en la UE</h2>
+    <p>Los datos se alojan en infraestructuras ubicadas en la Unión Europea.</p>
+  </main>
+
+  <footer class="legal-footer">
+    <span>© 2026 Ledged</span>
+    <div class="legal-links">
+      <a href="{{ url_for('legal_notice') }}">Aviso legal</a>
+      <a href="{{ url_for('privacy') }}">Política de privacidad</a>
+      <a href="{{ url_for('cookies') }}">Política de cookies</a>
+      <a href="{{ url_for('terms') }}">Términos del servicio</a>
+    </div>
+  </footer>
+</body>
+</html>

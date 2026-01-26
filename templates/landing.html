@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ledged · SaaS para gestorías</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body class="landing-page">
+  <header class="landing-header">
+    <div class="brand">
+      <span class="brand-title">Ledged</span>
+      <span class="brand-subtitle">Plataforma fiscal para gestorías</span>
+    </div>
+    <nav class="landing-nav">
+      <a href="#beneficios">Beneficios</a>
+      <a href="#pricing">Pricing</a>
+      <a href="{{ url_for('login') }}" class="button ghost">Acceder</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="hero-content">
+        <h1>La forma más simple de gestionar facturas, impuestos y clientes desde una gestoría</h1>
+        <p class="hero-subtitle">Ledged automatiza la lectura de facturas, el control fiscal y la comunicación con tus empresas.</p>
+        <div class="hero-actions">
+          <a href="{{ url_for('register') }}" class="button primary">Empieza hoy mismo</a>
+          <a href="{{ url_for('login') }}" class="button ghost">Solicita acceso</a>
+        </div>
+        <p class="hero-note">Registro abierto exclusivamente para gestorías.</p>
+      </div>
+      <div class="hero-card">
+        <h3>¿Qué puedes automatizar?</h3>
+        <ul>
+          <li>Lectura de facturas recibidas y emitidas con OCR + IA</li>
+          <li>Calendario de pagos y cobros</li>
+          <li>Informes trimestrales listos para enviar</li>
+          <li>Multiempresa y usuarios por trabajador</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="beneficios" class="benefits">
+      <h2>Beneficios clave para gestorías</h2>
+      <div class="benefit-grid">
+        <div class="benefit-card">
+          <h3>OCR + IA listo para producción</h3>
+          <p>Automatiza facturas recibidas y emitidas sin depender del cliente.</p>
+        </div>
+        <div class="benefit-card">
+          <h3>Multiempresa real</h3>
+          <p>Gestiona varias empresas por gestoría con permisos por trabajador.</p>
+        </div>
+        <div class="benefit-card">
+          <h3>Calendario fiscal</h3>
+          <p>Controla pagos, cobros y vencimientos en un mismo panel.</p>
+        </div>
+        <div class="benefit-card">
+          <h3>Informes trimestrales</h3>
+          <p>Genera y envía informes por email con un clic.</p>
+        </div>
+        <div class="benefit-card">
+          <h3>Comunicación gestoría ↔ empresa</h3>
+          <p>Emails de informes con respuesta directa al gestor.</p>
+        </div>
+        <div class="benefit-card">
+          <h3>Seguridad europea</h3>
+          <p>Datos alojados en la UE con cumplimiento GDPR.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="pricing" class="pricing">
+      <h2>Planes para gestorías</h2>
+      <p class="pricing-subtitle">Escala tu cartera de clientes con planes claros por número de empresas.</p>
+      <div class="pricing-grid">
+        <div class="price-card">
+          <h3>Starter</h3>
+          <p class="price">Hasta 10 empresas</p>
+          <ul>
+            <li>1 usuario gestoría</li>
+            <li>OCR + informes</li>
+            <li>Calendario de pagos y cobros</li>
+          </ul>
+          <a href="{{ url_for('register') }}" class="button ghost">Empieza hoy mismo</a>
+        </div>
+        <div class="price-card highlight">
+          <h3>Pro</h3>
+          <p class="price">Hasta 50 empresas</p>
+          <ul>
+            <li>Hasta 5 usuarios</li>
+            <li>Informes trimestrales por email</li>
+            <li>Soporte prioritario</li>
+          </ul>
+          <a href="{{ url_for('register') }}" class="button primary">Empieza hoy mismo</a>
+        </div>
+        <div class="price-card">
+          <h3>Advanced</h3>
+          <p class="price">Empresas ilimitadas</p>
+          <ul>
+            <li>Usuarios ilimitados</li>
+            <li>Informes personalizados</li>
+            <li>Prioridad máxima</li>
+          </ul>
+          <a href="{{ url_for('register') }}" class="button ghost">Solicita acceso</a>
+        </div>
+      </div>
+      <p class="pricing-note">El acceso del propietario (OWNER) está cubierto internamente.</p>
+    </section>
+  </main>
+
+  <footer class="legal-footer">
+    <span>© 2026 Ledged</span>
+    <div class="legal-links">
+      <a href="{{ url_for('legal_notice') }}">Aviso legal</a>
+      <a href="{{ url_for('privacy') }}">Política de privacidad</a>
+      <a href="{{ url_for('cookies') }}">Política de cookies</a>
+      <a href="{{ url_for('terms') }}">Términos del servicio</a>
+    </div>
+  </footer>
+</body>
+</html>

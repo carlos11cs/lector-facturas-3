@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Términos del servicio · Ledged</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body class="legal-page">
+  <main class="legal-content">
+    <h1>Términos del servicio</h1>
+    <p>Estos términos regulan el uso del servicio SaaS de Ledged destinado a gestorías.</p>
+
+    <h2>Servicio</h2>
+    <p>Ledged ofrece herramientas de lectura de facturas, gestión fiscal e informes. No sustituye asesoramiento profesional.</p>
+
+    <h2>Suscripción</h2>
+    <p>El servicio funciona mediante suscripción. Es cancelable en cualquier momento conforme al plan contratado.</p>
+
+    <h2>Disponibilidad</h2>
+    <p>Ledged trabaja para garantizar la continuidad del servicio, sin perjuicio de interrupciones por mantenimiento o fuerza mayor.</p>
+
+    <h2>Responsabilidad</h2>
+    <p>El usuario es responsable del uso de la plataforma y de la veracidad de los datos introducidos.</p>
+
+    <h2>Protección de datos</h2>
+    <p>El tratamiento de datos personales se rige por la Política de privacidad.</p>
+  </main>
+
+  <footer class="legal-footer">
+    <span>© 2026 Ledged</span>
+    <div class="legal-links">
+      <a href="{{ url_for('legal_notice') }}">Aviso legal</a>
+      <a href="{{ url_for('privacy') }}">Política de privacidad</a>
+      <a href="{{ url_for('cookies') }}">Política de cookies</a>
+      <a href="{{ url_for('terms') }}">Términos del servicio</a>
+    </div>
+  </footer>
+</body>
+</html>

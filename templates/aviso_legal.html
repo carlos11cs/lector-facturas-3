@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aviso legal · Ledged</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body class="legal-page">
+  <main class="legal-content">
+    <h1>Aviso legal</h1>
+    <p>En cumplimiento con la normativa vigente, se informa que el titular del sitio web <strong>ledged.app</strong> es <strong>Ledged</strong> (en adelante, “Ledged”), con email de contacto <strong>soporte@ledged.app</strong>.</p>
+
+    <h2>Objeto</h2>
+    <p>El presente aviso legal regula el acceso y uso del sitio web y de la plataforma SaaS destinada a gestorías para la gestión de facturas e información fiscal.</p>
+
+    <h2>Condiciones de uso</h2>
+    <p>El acceso y uso de este sitio implica la aceptación plena de estas condiciones. Ledged se reserva el derecho a modificar la información en cualquier momento.</p>
+
+    <h2>Propiedad intelectual</h2>
+    <p>Los contenidos, marcas y elementos del sitio son titularidad de Ledged o cuentan con licencia de uso. Queda prohibida su reproducción sin autorización.</p>
+
+    <h2>Responsabilidad</h2>
+    <p>Ledged no se hace responsable de errores en la información ni de interrupciones del servicio, salvo obligación legal. La plataforma no sustituye el asesoramiento fiscal profesional.</p>
+
+    <h2>Datos alojados en la UE</h2>
+    <p>Los datos se alojan en centros de datos situados en la Unión Europea, conforme al RGPD.</p>
+  </main>
+
+  <footer class="legal-footer">
+    <span>© 2026 Ledged</span>
+    <div class="legal-links">
+      <a href="{{ url_for('legal_notice') }}">Aviso legal</a>
+      <a href="{{ url_for('privacy') }}">Política de privacidad</a>
+      <a href="{{ url_for('cookies') }}">Política de cookies</a>
+      <a href="{{ url_for('terms') }}">Términos del servicio</a>
+    </div>
+  </footer>
+</body>
+</html>
