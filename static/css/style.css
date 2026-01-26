@@ -911,6 +911,12 @@ h1 {
   font-size: 0.95rem;
 }
 
+.dashboard-empty {
+  margin-top: 18px;
+  text-align: center;
+  width: 100%;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));

@@ -495,15 +495,13 @@ function setCompanyOptions(list) {
   });
   if (selectedCompanyId && list.some((c) => String(c.id) === String(selectedCompanyId))) {
     companySelect.value = String(selectedCompanyId);
-  } else if (list.length === 1) {
-    selectedCompanyId = String(list[0].id);
-    companySelect.value = selectedCompanyId;
-    persistFilters();
-  } else if (list.length > 0) {
+  } else {
     selectedCompanyId = String(list[0].id);
     companySelect.value = selectedCompanyId;
     persistFilters();
   }
+  applyCompanyTaxModules();
+  updateHeaderContext();
 }
 
 function loadStaff() {
@@ -1033,8 +1031,10 @@ function restoreFilters(now) {
     yearSelect.value = String(now.getFullYear());
   }
 
-  if (storedPeriod) {
+  if (storedPeriod && [...periodSelect.options].some((opt) => opt.value === storedPeriod)) {
     periodSelect.value = storedPeriod;
+  } else {
+    periodSelect.value = "monthly";
   }
 
   const storedCompany = localStorage.getItem("selectedCompanyId");
@@ -2042,6 +2042,12 @@ function updateLineChart(labels, values, datasetLabel) {
           legend: {
             display: false,
           },
+          tooltip: {
+            callbacks: {
+              label: (context) =>
+                `${context.label} · ${formatCurrency(context.parsed.y)}`,
+            },
+          },
         },
         scales: {
           x: {
@@ -2597,7 +2603,24 @@ function refreshAllData() {
     refreshPayments(),
     refreshNoInvoiceExpenses(),
     refreshAnnualTaxData(),
-  ]);
+  ]).then(() => {
+    updateDashboardEmptyState();
+  });
+}
+
+function updateDashboardEmptyState() {
+  const emptyNode = document.getElementById("dashboardEmptyMessage");
+  if (!emptyNode) {
+    return;
+  }
+  const hasExpenses = Array.isArray(currentInvoices) && currentInvoices.length > 0;
+  const hasBilling =
+    (Array.isArray(currentBillingEntries) && currentBillingEntries.length > 0) ||
+    (Array.isArray(currentIncomeInvoices) && currentIncomeInvoices.length > 0);
+  const hasNoInvoice =
+    Array.isArray(currentNoInvoiceExpenses) && currentNoInvoiceExpenses.length > 0;
+  const hasData = hasExpenses || hasBilling || hasNoInvoice;
+  emptyNode.style.display = hasData ? "none" : "block";
 }
 
 function updatePeriodBadge() {
@@ -2930,22 +2953,6 @@ function enterIncomeInvoiceEditMode(row, invoice) {
     applyVatCalculation(invoice, calcInputs, "total");
   });
 
-  const calcInputs = {
-    base: baseInput,
-    vat: vatSelect,
-    vatAmount: vatAmountInput,
-    total: totalInput,
-  };
-  baseInput.addEventListener("input", () => {
-    applyVatCalculation(invoice, calcInputs, "base");
-  });
-  vatSelect.addEventListener("change", () => {
-    applyVatCalculation(invoice, calcInputs, "vat");
-  });
-  totalInput.addEventListener("input", () => {
-    applyVatCalculation(invoice, calcInputs, "total");
-  });
-
   dateTd.textContent = "";
   dateTd.appendChild(dateInput);
   clientTd.textContent = "";
@@ -3107,6 +3114,22 @@ function enterInvoiceEditMode(row, invoice) {
   totalInput.step = "0.01";
   totalInput.min = "0";
   totalInput.value = invoice.total_amount;
+
+  const calcInputs = {
+    base: baseInput,
+    vat: vatSelect,
+    vatAmount: vatAmountInput,
+    total: totalInput,
+  };
+  baseInput.addEventListener("input", () => {
+    applyVatCalculation(invoice, calcInputs, "base");
+  });
+  vatSelect.addEventListener("change", () => {
+    applyVatCalculation(invoice, calcInputs, "vat");
+  });
+  totalInput.addEventListener("input", () => {
+    applyVatCalculation(invoice, calcInputs, "total");
+  });
 
   const categorySelect = createExpenseCategorySelect(invoice.expense_category);
 
