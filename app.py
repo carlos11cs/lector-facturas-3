@@ -735,25 +735,33 @@ def _empty_extracted():
     }
 
 
-def _analysis_worker(file_bytes, filename, mime_type, document_type, queue):
+def _analysis_worker(file_bytes, filename, mime_type, document_type, company_names, queue):
     try:
         result = analyze_invoice(
             file_bytes=file_bytes,
             filename=filename,
             mime_type=mime_type,
             document_type=document_type,
+            company_names=company_names,
         )
         queue.put(result)
     except Exception as exc:
         queue.put({"__error__": str(exc)})
 
 
-def _analyze_invoice_with_timeout(file_bytes, filename, stored_name, mime_type, document_type="expense"):
+def _analyze_invoice_with_timeout(
+    file_bytes,
+    filename,
+    stored_name,
+    mime_type,
+    document_type="expense",
+    company_names=None,
+):
     ctx = mp.get_context("spawn")
     queue = ctx.Queue(1)
     process = ctx.Process(
         target=_analysis_worker,
-        args=(file_bytes, filename, mime_type, document_type, queue),
+        args=(file_bytes, filename, mime_type, document_type, company_names or [], queue),
     )
     process.start()
     process.join(ANALYSIS_TIMEOUT_SECONDS)
@@ -1441,8 +1449,7 @@ def upload_invoices():
                     errors.append(f"Archivo faltante en posición {idx + 1}.")
                     continue
                 if not supplier:
-                    errors.append(f"Proveedor obligatorio para {original_name}.")
-                    continue
+                    app.logger.info("Proveedor vacío para %s. Se permite guardado manual.", original_name)
                 try:
                     vat_rate_int = int(vat_rate_raw)
                 except ValueError:
@@ -1558,8 +1565,7 @@ def upload_invoices():
             total_amount = parse_amount(totals[idx])
 
             if not supplier:
-                errors.append(f"Proveedor obligatorio para {original_name}.")
-                continue
+                app.logger.info("Proveedor vacío para %s. Se permite guardado manual.", original_name)
             try:
                 vat_rate_int = int(vat_rate)
             except ValueError:
@@ -1635,6 +1641,16 @@ def analyze_invoice_api():
 
     document_type = request.form.get("document_type") or request.args.get("document_type") or "expense"
     company_id = get_company_id(required=False)
+    company_names = []
+    if company_id and is_company_accessible(company_id):
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(companies_table.c.display_name, companies_table.c.legal_name).where(
+                    companies_table.c.id == company_id
+                )
+            ).mappings().first()
+            if row:
+                company_names = [row.get("display_name"), row.get("legal_name")]
     app.logger.info("Solicitud de análisis recibida: %s (%s)", original_name, file.mimetype)
     file_bytes = file.read()
     safe_name = secure_filename(original_name)
@@ -1651,6 +1667,7 @@ def analyze_invoice_api():
         stored_name,
         file.mimetype,
         document_type=document_type,
+        company_names=company_names,
     )
 
     app.logger.info(
@@ -2151,7 +2168,7 @@ def update_invoice(invoice_id):
     if not invoice_date:
         errors.append("Fecha obligatoria.")
     if not supplier:
-        errors.append("Proveedor obligatorio.")
+        app.logger.info("Proveedor vacío en actualización de factura %s.", invoice_id)
     if supplier and company_id:
         with engine.connect() as conn:
             if is_supplier_same_as_company(supplier, company_id, conn):

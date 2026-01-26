@@ -162,6 +162,107 @@ def _normalize_amount(value: Any) -> Optional[float]:
         return None
 
 
+def _normalize_entity_name(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def _is_same_entity(candidate: Optional[str], company_names) -> bool:
+    if not candidate:
+        return False
+    normalized = _normalize_entity_name(candidate)
+    if not normalized:
+        return False
+    for name in company_names or []:
+        if normalized == _normalize_entity_name(name):
+            return True
+    return False
+
+
+def _looks_like_metadata(line: str) -> bool:
+    lowered = line.lower()
+    blocked = [
+        "factura",
+        "fecha",
+        "nif",
+        "cif",
+        "dni",
+        "iva",
+        "total",
+        "base",
+        "importe",
+        "pedido",
+    ]
+    if any(word in lowered for word in blocked):
+        return True
+    letters = sum(char.isalpha() for char in line)
+    digits = sum(char.isdigit() for char in line)
+    if letters < 3:
+        return True
+    if digits > letters * 2:
+        return True
+    return False
+
+
+def _extract_supplier_from_text(text: str, company_names=None) -> Optional[str]:
+    if not text:
+        return None
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return None
+    supplier_keywords = [
+        "expedido por",
+        "emisor",
+        "proveedor",
+        "facturado por",
+        "vendedor",
+    ]
+    client_keywords = [
+        "cliente",
+        "enviado a",
+        "destinatario",
+        "facturado a",
+    ]
+
+    for idx, line in enumerate(lines):
+        lowered = line.lower()
+        if any(keyword in lowered for keyword in supplier_keywords):
+            for keyword in supplier_keywords:
+                if keyword in lowered:
+                    parts = re.split(keyword, line, flags=re.IGNORECASE)
+                    if len(parts) > 1:
+                        candidate = parts[1].strip(" :-")
+                        if candidate and not _is_same_entity(candidate, company_names):
+                            if not any(word in candidate.lower() for word in client_keywords):
+                                return candidate
+            for offset in (1, 2):
+                if idx + offset < len(lines):
+                    candidate = lines[idx + offset].strip()
+                    if not candidate:
+                        continue
+                    if any(word in candidate.lower() for word in client_keywords):
+                        continue
+                    if _looks_like_metadata(candidate):
+                        continue
+                    if _is_same_entity(candidate, company_names):
+                        continue
+                    return candidate
+
+    header_lines = lines[:6]
+    for line in header_lines:
+        lowered = line.lower()
+        if any(word in lowered for word in client_keywords):
+            continue
+        if _looks_like_metadata(line):
+            continue
+        if _is_same_entity(line, company_names):
+            continue
+        return line
+
+    return None
+
+
 def _validate_math(
     base_amount: Optional[float],
     vat_amount: Optional[float],
@@ -349,6 +450,7 @@ def analyze_invoice(
     filename: Optional[str] = None,
     mime_type: Optional[str] = None,
     document_type: str = "expense",
+    company_names: Optional[list] = None,
 ) -> Dict[str, Any]:
     client = _get_client()
     if file_bytes is None:
@@ -484,6 +586,17 @@ def analyze_invoice(
     total_amount = _normalize_amount(
         data.get("total_amount") or data.get("total_factura") or data.get("total")
     )
+
+    if company_names is None:
+        company_names = []
+
+    if document_type != "income":
+        heuristic_supplier = _extract_supplier_from_text(extracted_text, company_names)
+        if _is_same_entity(provider_name, company_names):
+            provider_name = None
+        if _is_same_entity(heuristic_supplier, company_names):
+            heuristic_supplier = None
+        provider_name = heuristic_supplier or provider_name
 
     if payment_date is None:
         payment_date = _find_payment_date_by_keywords(extracted_text)
