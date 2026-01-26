@@ -321,6 +321,14 @@ def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
         "bill to",
         "ship to",
     ]
+    excluded_terms = [
+        "transporte",
+        "envío",
+        "envio",
+        "logística",
+        "logistica",
+        "shipping",
+    ]
 
     for idx, line in enumerate(lines):
         lowered = line.lower()
@@ -338,6 +346,8 @@ def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
                     candidate = lines[idx + offset].strip()
                     if not candidate:
                         continue
+                    if any(term in candidate.lower() for term in excluded_terms):
+                        return None
                     if any(word in candidate.lower() for word in client_keywords):
                         continue
                     if _looks_like_metadata(candidate):
@@ -351,6 +361,8 @@ def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
         return None
     candidates.sort(key=lambda item: item[1], reverse=True)
     best, score = candidates[0]
+    if any(term in best.lower() for term in excluded_terms):
+        return None
     if _contains_legal_form(best) or score >= 60:
         return best
     return None
@@ -698,12 +710,16 @@ def analyze_invoice(
 
     if document_type != "income":
         supplier_source_text = embedded_text if pdf_kind == "original" else extracted_text
-        heuristic_supplier = _extract_supplier_from_text(supplier_source_text, company_names)
         if _is_same_entity(provider_name, company_names):
             provider_name = None
-        if _is_same_entity(heuristic_supplier, company_names):
-            heuristic_supplier = None
-        provider_name = heuristic_supplier or provider_name
+        if provider_name is None:
+            heuristic_supplier = _extract_supplier_from_text(
+                supplier_source_text,
+                company_names,
+            )
+            if _is_same_entity(heuristic_supplier, company_names):
+                heuristic_supplier = None
+            provider_name = heuristic_supplier
 
     if payment_date is None:
         payment_date = _find_payment_date_by_keywords(extracted_text)
