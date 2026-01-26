@@ -880,6 +880,18 @@ h1 {
   font-size: 0.9rem;
 }
 
+.input-warning {
+  border-color: var(--warning);
+  background: #fff7ec;
+}
+
+.field-warning {
+  margin-top: 4px;
+  font-size: 0.75rem;
+  color: var(--warning);
+  display: none;
+}
+
 .row-actions {
   display: flex;
   justify-content: flex-end;

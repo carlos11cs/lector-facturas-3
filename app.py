@@ -354,6 +354,54 @@ def parse_amount(value):
         return None
 
 
+def normalize_entity_name(value: str) -> str:
+    if not value:
+        return ""
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def get_company_names(company_id: int, conn) -> list:
+    if not company_id:
+        return []
+    row = conn.execute(
+        select(companies_table.c.display_name, companies_table.c.legal_name).where(
+            companies_table.c.id == company_id
+        )
+    ).first()
+    if not row:
+        return []
+    return [row["display_name"], row["legal_name"]]
+
+
+def is_supplier_same_as_company(supplier: str, company_id: int, conn) -> bool:
+    if not supplier or not company_id:
+        return False
+    normalized_supplier = normalize_entity_name(supplier)
+    if not normalized_supplier:
+        return False
+    for name in get_company_names(company_id, conn):
+        if normalize_entity_name(name) == normalized_supplier:
+            return True
+    return False
+
+
+def normalize_vat_amounts(base_amount, vat_rate, vat_amount, total_amount):
+    if vat_rate is None:
+        return base_amount, vat_amount, total_amount
+    if base_amount is None and total_amount is None:
+        return base_amount, vat_amount, total_amount
+    rate = vat_rate / 100
+    if base_amount is None and total_amount is not None:
+        base_amount = round(total_amount / (1 + rate), 2)
+        vat_amount = round(total_amount - base_amount, 2)
+        total_amount = round(total_amount, 2)
+        return base_amount, vat_amount, total_amount
+    if base_amount is not None:
+        vat_amount = round(base_amount * rate, 2)
+        total_amount = round(base_amount + vat_amount, 2)
+    return base_amount, vat_amount, total_amount
+
+
 def get_current_user_id():
     if getattr(g, "current_user", None):
         return int(g.current_user["id"])
@@ -1395,9 +1443,6 @@ def upload_invoices():
                 if not supplier:
                     errors.append(f"Proveedor obligatorio para {original_name}.")
                     continue
-                if base_amount is None or base_amount < 0:
-                    errors.append(f"Base imponible inválida para {original_name}.")
-                    continue
                 try:
                     vat_rate_int = int(vat_rate_raw)
                 except ValueError:
@@ -1409,11 +1454,26 @@ def upload_invoices():
                 if expense_category not in {"with_invoice", "without_invoice", "non_deductible"}:
                     errors.append(f"Tipo de gasto inválido para {original_name}.")
                     continue
+                if base_amount is None and total_amount is None:
+                    errors.append(
+                        f"Base imponible o total obligatorio para {original_name}."
+                    )
+                    continue
+                if base_amount is not None and base_amount < 0:
+                    errors.append(f"Base imponible inválida para {original_name}.")
+                    continue
+                if total_amount is not None and total_amount < 0:
+                    errors.append(f"Total inválido para {original_name}.")
+                    continue
+                if is_supplier_same_as_company(supplier, company_id, conn):
+                    errors.append(
+                        f"El proveedor no puede ser la empresa activa ({original_name})."
+                    )
+                    continue
 
-                if vat_amount is None:
-                    vat_amount = round(base_amount * (vat_rate_int / 100), 2)
-                if total_amount is None:
-                    total_amount = round(base_amount + vat_amount, 2)
+                base_amount, vat_amount, total_amount = normalize_vat_amounts(
+                    base_amount, vat_rate_int, vat_amount, total_amount
+                )
 
                 created_at = datetime.utcnow().isoformat()
 
@@ -1500,9 +1560,6 @@ def upload_invoices():
             if not supplier:
                 errors.append(f"Proveedor obligatorio para {original_name}.")
                 continue
-            if base_amount is None or base_amount < 0:
-                errors.append(f"Base imponible inválida para {original_name}.")
-                continue
             try:
                 vat_rate_int = int(vat_rate)
             except ValueError:
@@ -1510,6 +1567,22 @@ def upload_invoices():
                 continue
             if vat_rate_int not in {0, 4, 10, 21}:
                 errors.append(f"Tipo de IVA inválido para {original_name}.")
+                continue
+            if base_amount is None and total_amount is None:
+                errors.append(
+                    f"Base imponible o total obligatorio para {original_name}."
+                )
+                continue
+            if base_amount is not None and base_amount < 0:
+                errors.append(f"Base imponible inválida para {original_name}.")
+                continue
+            if total_amount is not None and total_amount < 0:
+                errors.append(f"Total inválido para {original_name}.")
+                continue
+            if is_supplier_same_as_company(supplier, company_id, conn):
+                errors.append(
+                    f"El proveedor no puede ser la empresa activa ({original_name})."
+                )
                 continue
 
             file_bytes = file.read()
@@ -1522,10 +1595,9 @@ def upload_invoices():
                 errors.append(f"No se pudo almacenar el archivo {original_name}.")
                 continue
 
-            if vat_amount is None:
-                vat_amount = round(base_amount * (vat_rate_int / 100), 2)
-            if total_amount is None:
-                total_amount = round(base_amount + vat_amount, 2)
+            base_amount, vat_amount, total_amount = normalize_vat_amounts(
+                base_amount, vat_rate_int, vat_amount, total_amount
+            )
             created_at = datetime.utcnow().isoformat()
 
             conn.execute(
@@ -2080,8 +2152,16 @@ def update_invoice(invoice_id):
         errors.append("Fecha obligatoria.")
     if not supplier:
         errors.append("Proveedor obligatorio.")
-    if base_amount is None or base_amount < 0:
+    if supplier and company_id:
+        with engine.connect() as conn:
+            if is_supplier_same_as_company(supplier, company_id, conn):
+                errors.append("El proveedor no puede ser la empresa activa.")
+    if base_amount is None and total_amount is None:
+        errors.append("Base imponible o total obligatorio.")
+    if base_amount is not None and base_amount < 0:
         errors.append("Base imponible inválida.")
+    if total_amount is not None and total_amount < 0:
+        errors.append("Total inválido.")
     try:
         vat_rate = int(vat_rate_raw)
     except ValueError:
@@ -2094,10 +2174,9 @@ def update_invoice(invoice_id):
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
 
-    if vat_amount is None:
-        vat_amount = round(base_amount * (vat_rate / 100), 2)
-    if total_amount is None:
-        total_amount = round(base_amount + vat_amount, 2)
+    base_amount, vat_amount, total_amount = normalize_vat_amounts(
+        base_amount, vat_rate, vat_amount, total_amount
+    )
 
     with engine.begin() as conn:
         result = conn.execute(
@@ -2249,9 +2328,6 @@ def create_income_invoices():
             if not client:
                 errors.append(f"Cliente obligatorio para {original_name}.")
                 continue
-            if base_amount is None or base_amount < 0:
-                errors.append(f"Base imponible inválida para {original_name}.")
-                continue
             try:
                 vat_rate_int = int(vat_rate_raw)
             except ValueError:
@@ -2260,11 +2336,21 @@ def create_income_invoices():
             if vat_rate_int not in {0, 4, 10, 21}:
                 errors.append(f"Tipo de IVA inválido para {original_name}.")
                 continue
+            if base_amount is None and total_amount is None:
+                errors.append(
+                    f"Base imponible o total obligatorio para {original_name}."
+                )
+                continue
+            if base_amount is not None and base_amount < 0:
+                errors.append(f"Base imponible inválida para {original_name}.")
+                continue
+            if total_amount is not None and total_amount < 0:
+                errors.append(f"Total inválido para {original_name}.")
+                continue
 
-            if vat_amount is None:
-                vat_amount = round(base_amount * (vat_rate_int / 100), 2)
-            if total_amount is None:
-                total_amount = round(base_amount + vat_amount, 2)
+            base_amount, vat_amount, total_amount = normalize_vat_amounts(
+                base_amount, vat_rate_int, vat_amount, total_amount
+            )
 
             stored_value = (
                 stored_name
@@ -2319,8 +2405,12 @@ def update_income_invoice(invoice_id):
         errors.append("Fecha obligatoria.")
     if not client:
         errors.append("Cliente obligatorio.")
-    if base_amount is None or base_amount < 0:
+    if base_amount is None and total_amount is None:
+        errors.append("Base imponible o total obligatorio.")
+    if base_amount is not None and base_amount < 0:
         errors.append("Base imponible inválida.")
+    if total_amount is not None and total_amount < 0:
+        errors.append("Total inválido.")
     try:
         vat_rate = int(vat_rate_raw)
     except ValueError:
@@ -2331,10 +2421,9 @@ def update_income_invoice(invoice_id):
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
 
-    if vat_amount is None:
-        vat_amount = round(base_amount * (vat_rate / 100), 2)
-    if total_amount is None:
-        total_amount = round(base_amount + vat_amount, 2)
+    base_amount, vat_amount, total_amount = normalize_vat_amounts(
+        base_amount, vat_rate, vat_amount, total_amount
+    )
 
     with engine.begin() as conn:
         result = conn.execute(

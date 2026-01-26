@@ -56,6 +56,144 @@ function formatCurrency(value) {
   return `${number.toFixed(2).replace(".", ",")} €`;
 }
 
+function parseNumberInput(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const cleaned = String(value).replace(",", ".").trim();
+  const numeric = Number(cleaned);
+  return Number.isNaN(numeric) ? null : numeric;
+}
+
+function roundAmount(value) {
+  return Math.round(Number(value) * 100) / 100;
+}
+
+function formatAmountInput(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return "";
+  }
+  return Number(value).toFixed(2);
+}
+
+function normalizeEntityName(value) {
+  if (!value) {
+    return "";
+  }
+  return String(value).toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function getActiveCompanyNames() {
+  const company = getSelectedCompany();
+  if (!company) {
+    return [];
+  }
+  return [company.display_name, company.legal_name].filter(Boolean);
+}
+
+function isSupplierSameAsCompany(supplier) {
+  const normalizedSupplier = normalizeEntityName(supplier);
+  if (!normalizedSupplier) {
+    return false;
+  }
+  return getActiveCompanyNames().some(
+    (name) => normalizeEntityName(name) === normalizedSupplier
+  );
+}
+
+function calculateVatFields({ baseValue, totalValue, vatRateValue, source }) {
+  const vatRate = parseNumberInput(vatRateValue);
+  if (vatRate === null) {
+    return {
+      base: baseValue,
+      vatAmount: null,
+      total: totalValue,
+    };
+  }
+  const factor = 1 + vatRate / 100;
+
+  if (source === "total" && totalValue !== null) {
+    const base = roundAmount(totalValue / factor);
+    return {
+      base,
+      vatAmount: roundAmount(totalValue - base),
+      total: roundAmount(totalValue),
+    };
+  }
+
+  if (baseValue !== null) {
+    const vatAmount = roundAmount(baseValue * (vatRate / 100));
+    return {
+      base: baseValue,
+      vatAmount,
+      total: roundAmount(baseValue + vatAmount),
+    };
+  }
+
+  if (totalValue !== null) {
+    const base = roundAmount(totalValue / factor);
+    return {
+      base,
+      vatAmount: roundAmount(totalValue - base),
+      total: roundAmount(totalValue),
+    };
+  }
+
+  return { base: null, vatAmount: null, total: null };
+}
+
+function applyVatCalculation(item, inputs, source) {
+  const baseValue = parseNumberInput(inputs.base.value);
+  const totalValue = parseNumberInput(inputs.total.value);
+  const vatRateValue = resolveVatRateValue(inputs.vat.value);
+  const result = calculateVatFields({
+    baseValue,
+    totalValue,
+    vatRateValue,
+    source,
+  });
+
+  if (source === "total" && result.base !== null) {
+    inputs.base.value = formatAmountInput(result.base);
+  } else if (source === "total" && result.base === null) {
+    inputs.base.value = "";
+  }
+  if (result.vatAmount !== null) {
+    inputs.vatAmount.value = formatAmountInput(result.vatAmount);
+  } else {
+    inputs.vatAmount.value = "";
+  }
+  if (result.total !== null) {
+    inputs.total.value = formatAmountInput(result.total);
+  } else {
+    inputs.total.value = "";
+  }
+
+  item.base = inputs.base.value;
+  item.vat = resolveVatRateValue(inputs.vat.value);
+  item.vatAmount = inputs.vatAmount.value;
+  item.total = inputs.total.value;
+}
+
+function normalizeInvoiceAmounts(item) {
+  const baseValue = parseNumberInput(item.base);
+  const totalValue = parseNumberInput(item.total);
+  const vatRateValue = resolveVatRateValue(item.vat);
+  const source = baseValue !== null ? "base" : "total";
+  const result = calculateVatFields({
+    baseValue,
+    totalValue,
+    vatRateValue,
+    source,
+  });
+
+  return {
+    base: result.base !== null ? formatAmountInput(result.base) : "",
+    vatAmount: result.vatAmount !== null ? formatAmountInput(result.vatAmount) : "",
+    total: result.total !== null ? formatAmountInput(result.total) : "",
+  };
+}
+
 function formatMonthYear(month, year) {
   const name = monthNames[month - 1] || "";
   return `${name} ${year}`;
@@ -90,6 +228,7 @@ const monthSelect = document.getElementById("monthSelect");
 const yearSelect = document.getElementById("yearSelect");
 const periodSelect = document.getElementById("periodSelect");
 const companySelect = document.getElementById("companySelect");
+const supplierSuggestions = document.getElementById("supplierSuggestions");
 const billingMonthSelect = document.getElementById("billingMonthSelect");
 const billingYearSelect = document.getElementById("billingYearSelect");
 const billingDateInput = document.getElementById("billingDateInput");
@@ -265,6 +404,27 @@ function createNoInvoiceTypeSelect(selected) {
   });
   select.value = selected || "otro";
   return select;
+}
+
+function updateSupplierSuggestions() {
+  if (!supplierSuggestions) {
+    return;
+  }
+  const names = new Set();
+  currentInvoices.forEach((invoice) => {
+    if (invoice.supplier) {
+      names.add(String(invoice.supplier).trim());
+    }
+  });
+  supplierSuggestions.innerHTML = "";
+  [...names]
+    .filter((name) => name.length > 0)
+    .sort((a, b) => a.localeCompare(b))
+    .forEach((name) => {
+      const option = document.createElement("option");
+      option.value = name;
+      supplierSuggestions.appendChild(option);
+    });
 }
 
 function createDeductibleSelect(selected) {
@@ -1010,11 +1170,37 @@ function renderTable() {
     supplierInput.placeholder = "Proveedor";
     supplierInput.value = item.supplier;
     supplierInput.disabled = item.analysisPending;
+    if (supplierSuggestions) {
+      supplierInput.setAttribute("list", "supplierSuggestions");
+    }
+    const supplierWarning = document.createElement("div");
+    supplierWarning.className = "field-warning";
+    const updateSupplierWarning = () => {
+      const value = supplierInput.value.trim();
+      if (!value) {
+        supplierWarning.textContent = "Proveedor pendiente de completar.";
+        supplierWarning.style.display = "block";
+        supplierInput.classList.add("input-warning");
+        return;
+      }
+      if (isSupplierSameAsCompany(value)) {
+        supplierWarning.textContent =
+          "El proveedor no puede ser la empresa activa.";
+        supplierWarning.style.display = "block";
+        supplierInput.classList.add("input-warning");
+        return;
+      }
+      supplierWarning.textContent = "";
+      supplierWarning.style.display = "none";
+      supplierInput.classList.remove("input-warning");
+    };
     supplierInput.addEventListener("input", () => {
       item.supplier = supplierInput.value;
       item.touched.supplier = true;
+      updateSupplierWarning();
     });
     supplierTd.appendChild(supplierInput);
+    supplierTd.appendChild(supplierWarning);
 
     const baseTd = document.createElement("td");
     const baseInput = document.createElement("input");
@@ -1027,6 +1213,12 @@ function renderTable() {
     baseInput.addEventListener("input", () => {
       item.base = baseInput.value;
       item.touched.base = true;
+      applyVatCalculation(item, {
+        base: baseInput,
+        vat: vatSelect,
+        vatAmount: vatAmountInput,
+        total: totalInput,
+      }, "base");
     });
     baseTd.appendChild(baseInput);
 
@@ -1043,6 +1235,12 @@ function renderTable() {
     vatSelect.addEventListener("change", () => {
       item.vat = resolveVatRateValue(vatSelect.value);
       item.touched.vat = true;
+      applyVatCalculation(item, {
+        base: baseInput,
+        vat: vatSelect,
+        vatAmount: vatAmountInput,
+        total: totalInput,
+      }, "vat");
     });
     vatTd.appendChild(vatSelect);
 
@@ -1057,6 +1255,12 @@ function renderTable() {
     vatAmountInput.addEventListener("input", () => {
       item.vatAmount = vatAmountInput.value;
       item.touched.vatAmount = true;
+      applyVatCalculation(item, {
+        base: baseInput,
+        vat: vatSelect,
+        vatAmount: vatAmountInput,
+        total: totalInput,
+      }, "vatAmount");
     });
     vatAmountTd.appendChild(vatAmountInput);
 
@@ -1071,6 +1275,12 @@ function renderTable() {
     totalInput.addEventListener("input", () => {
       item.total = totalInput.value;
       item.touched.total = true;
+      applyVatCalculation(item, {
+        base: baseInput,
+        vat: vatSelect,
+        vatAmount: vatAmountInput,
+        total: totalInput,
+      }, "total");
     });
     totalTd.appendChild(totalInput);
 
@@ -1098,6 +1308,20 @@ function renderTable() {
     tr.appendChild(totalTd);
     tr.appendChild(actionsTd);
     uploadTableBody.appendChild(tr);
+
+    updateSupplierWarning();
+    const initialSource =
+      parseNumberInput(baseInput.value) !== null ? "base" : "total";
+    applyVatCalculation(
+      item,
+      {
+        base: baseInput,
+        vat: vatSelect,
+        vatAmount: vatAmountInput,
+        total: totalInput,
+      },
+      initialSource
+    );
 
     if (item.analysisPending || item.analysisError) {
       const statusRow = document.createElement("tr");
@@ -1187,6 +1411,12 @@ function renderIncomeTable() {
     baseInput.addEventListener("input", () => {
       item.base = baseInput.value;
       item.touched.base = true;
+      applyVatCalculation(item, {
+        base: baseInput,
+        vat: vatSelect,
+        vatAmount: vatAmountInput,
+        total: totalInput,
+      }, "base");
     });
     baseTd.appendChild(baseInput);
 
@@ -1203,6 +1433,12 @@ function renderIncomeTable() {
     vatSelect.addEventListener("change", () => {
       item.vat = resolveVatRateValue(vatSelect.value);
       item.touched.vat = true;
+      applyVatCalculation(item, {
+        base: baseInput,
+        vat: vatSelect,
+        vatAmount: vatAmountInput,
+        total: totalInput,
+      }, "vat");
     });
     vatTd.appendChild(vatSelect);
 
@@ -1217,6 +1453,12 @@ function renderIncomeTable() {
     vatAmountInput.addEventListener("input", () => {
       item.vatAmount = vatAmountInput.value;
       item.touched.vatAmount = true;
+      applyVatCalculation(item, {
+        base: baseInput,
+        vat: vatSelect,
+        vatAmount: vatAmountInput,
+        total: totalInput,
+      }, "vatAmount");
     });
     vatAmountTd.appendChild(vatAmountInput);
 
@@ -1231,6 +1473,12 @@ function renderIncomeTable() {
     totalInput.addEventListener("input", () => {
       item.total = totalInput.value;
       item.touched.total = true;
+      applyVatCalculation(item, {
+        base: baseInput,
+        vat: vatSelect,
+        vatAmount: vatAmountInput,
+        total: totalInput,
+      }, "total");
     });
     totalTd.appendChild(totalInput);
 
@@ -1258,6 +1506,19 @@ function renderIncomeTable() {
     tr.appendChild(totalTd);
     tr.appendChild(actionsTd);
     incomeUploadTableBody.appendChild(tr);
+
+    const initialSource =
+      parseNumberInput(baseInput.value) !== null ? "base" : "total";
+    applyVatCalculation(
+      item,
+      {
+        base: baseInput,
+        vat: vatSelect,
+        vatAmount: vatAmountInput,
+        total: totalInput,
+      },
+      initialSource
+    );
   });
 }
 
@@ -1318,6 +1579,17 @@ function analyzeIncomeForItem(item) {
         item.total = String(extracted.total_amount);
       }
 
+      const normalizedAmounts = normalizeInvoiceAmounts(item);
+      if (!item.touched.base && normalizedAmounts.base) {
+        item.base = normalizedAmounts.base;
+      }
+      if (!item.touched.vatAmount && normalizedAmounts.vatAmount) {
+        item.vatAmount = normalizedAmounts.vatAmount;
+      }
+      if (!item.touched.total && normalizedAmounts.total) {
+        item.total = normalizedAmounts.total;
+      }
+
       item.analysisPending = false;
       renderIncomeTable();
     })
@@ -1340,8 +1612,16 @@ function validateIncomePending() {
     if (!item.client.trim()) {
       errors.push(`Cliente obligatorio: ${item.file.name}`);
     }
-    if (!item.base || Number(item.base) < 0) {
+    const baseValue = parseNumberInput(item.base);
+    const totalValue = parseNumberInput(item.total);
+    if (baseValue === null && totalValue === null) {
+      errors.push(`Base imponible o total obligatorio: ${item.file.name}`);
+    }
+    if (baseValue !== null && baseValue < 0) {
       errors.push(`Base imponible inválida: ${item.file.name}`);
+    }
+    if (totalValue !== null && totalValue < 0) {
+      errors.push(`Total inválido: ${item.file.name}`);
     }
     if (!item.date) {
       errors.push(`Fecha obligatoria: ${item.file.name}`);
@@ -1370,19 +1650,22 @@ function uploadIncomePending() {
   }
   const payload = {
     companyId: getSelectedCompanyId(),
-    entries: pendingIncomeFiles.map((item) => ({
-      storedFilename: item.storedFilename,
-      originalFilename: item.originalFilename,
-      date: item.date,
-      paymentDate: computePaymentDate(item.date, item.paymentDate),
-      client: item.client.trim(),
-      base: item.base,
-      vat: item.vat,
-      vatAmount: item.vatAmount,
-      total: item.total,
-      analysisText: item.analysisText,
-      companyId: getSelectedCompanyId(),
-    })),
+    entries: pendingIncomeFiles.map((item) => {
+      const normalized = normalizeInvoiceAmounts(item);
+      return {
+        storedFilename: item.storedFilename,
+        originalFilename: item.originalFilename,
+        date: item.date,
+        paymentDate: computePaymentDate(item.date, item.paymentDate),
+        client: item.client.trim(),
+        base: normalized.base || item.base,
+        vat: resolveVatRateValue(item.vat),
+        vatAmount: normalized.vatAmount || item.vatAmount,
+        total: normalized.total || item.total,
+        analysisText: item.analysisText,
+        companyId: getSelectedCompanyId(),
+      };
+    }),
   };
 
   fetch("/api/income-invoices", {
@@ -1425,8 +1708,19 @@ function validatePending() {
     if (!item.supplier.trim()) {
       errors.push(`Proveedor obligatorio: ${item.file.name}`);
     }
-    if (!item.base || Number(item.base) < 0) {
+    if (isSupplierSameAsCompany(item.supplier)) {
+      errors.push(`El proveedor no puede ser la empresa activa: ${item.file.name}`);
+    }
+    const baseValue = parseNumberInput(item.base);
+    const totalValue = parseNumberInput(item.total);
+    if (baseValue === null && totalValue === null) {
+      errors.push(`Base imponible o total obligatorio: ${item.file.name}`);
+    }
+    if (baseValue !== null && baseValue < 0) {
       errors.push(`Base imponible inválida: ${item.file.name}`);
+    }
+    if (totalValue !== null && totalValue < 0) {
+      errors.push(`Total inválido: ${item.file.name}`);
     }
     if (!item.date) {
       errors.push(`Fecha obligatoria: ${item.file.name}`);
@@ -1460,7 +1754,11 @@ function analyzeInvoiceForItem(item) {
       item.analysisText = extracted.analysis_text || "";
 
       if (!item.touched.supplier && extracted.provider_name) {
-        item.supplier = extracted.provider_name;
+        if (!isSupplierSameAsCompany(extracted.provider_name)) {
+          item.supplier = extracted.provider_name;
+        } else {
+          item.supplier = "";
+        }
       }
       if (!item.touched.date && extracted.invoice_date) {
         item.date = extracted.invoice_date;
@@ -1488,6 +1786,17 @@ function analyzeInvoiceForItem(item) {
       }
       if (!item.touched.total && extracted.total_amount !== null && extracted.total_amount !== undefined) {
         item.total = String(extracted.total_amount);
+      }
+
+      const normalizedAmounts = normalizeInvoiceAmounts(item);
+      if (!item.touched.base && normalizedAmounts.base) {
+        item.base = normalizedAmounts.base;
+      }
+      if (!item.touched.vatAmount && normalizedAmounts.vatAmount) {
+        item.vatAmount = normalizedAmounts.vatAmount;
+      }
+      if (!item.touched.total && normalizedAmounts.total) {
+        item.total = normalizedAmounts.total;
       }
 
       item.analysisPending = false;
@@ -1528,19 +1837,22 @@ function uploadPending() {
   uploadBtn.disabled = true;
   const payload = {
     companyId: getSelectedCompanyId(),
-    entries: pendingFiles.map((item) => ({
-      storedFilename: item.storedFilename,
-      originalFilename: item.originalFilename,
-      date: item.date,
-      paymentDate: computePaymentDate(item.date, item.paymentDate),
-      companyId: getSelectedCompanyId(),
-      supplier: item.supplier.trim(),
-      base: item.base,
-      vat: item.vat,
-      vatAmount: item.vatAmount,
-      total: item.total,
-      analysisText: item.analysisText,
-    })),
+    entries: pendingFiles.map((item) => {
+      const normalized = normalizeInvoiceAmounts(item);
+      return {
+        storedFilename: item.storedFilename,
+        originalFilename: item.originalFilename,
+        date: item.date,
+        paymentDate: computePaymentDate(item.date, item.paymentDate),
+        companyId: getSelectedCompanyId(),
+        supplier: item.supplier.trim(),
+        base: normalized.base || item.base,
+        vat: resolveVatRateValue(item.vat),
+        vatAmount: normalized.vatAmount || item.vatAmount,
+        total: normalized.total || item.total,
+        analysisText: item.analysisText,
+      };
+    }),
   };
 
   fetch("/api/upload", {
@@ -1848,11 +2160,13 @@ function updateBillingChart() {
 
   const labels = [];
   const values = [];
+  let cumulative = 0;
   let cursor = new Date(start);
   while (cursor <= end) {
     const key = cursor.toISOString().slice(0, 10);
-    const value = Number((dayTotals[key] || 0).toFixed(2));
-    values.push(value);
+    const daily = Number((dayTotals[key] || 0).toFixed(2));
+    cumulative = Number((cumulative + daily).toFixed(2));
+    values.push(cumulative);
     if (period === "quarterly") {
       labels.push(`${cursor.getDate()} ${monthNames[cursor.getMonth()].slice(0, 3)}`);
     } else {
@@ -1872,7 +2186,7 @@ function updateBillingChart() {
         labels,
         datasets: [
           {
-            label: "Ingresos diarios",
+            label: "Ingresos acumulados",
             data: values,
             borderColor: "#1b5d4b",
             backgroundColor: "rgba(27, 93, 75, 0.12)",
@@ -1888,6 +2202,12 @@ function updateBillingChart() {
         plugins: {
           legend: {
             display: false,
+          },
+          tooltip: {
+            callbacks: {
+              label: (context) =>
+                `${context.label} · Acumulado: ${formatCurrency(context.parsed.y)}`,
+            },
           },
         },
         scales: {
@@ -1907,7 +2227,7 @@ function updateBillingChart() {
   } else {
     billingLineChart.data.labels = labels;
     billingLineChart.data.datasets[0].data = values;
-    billingLineChart.data.datasets[0].label = "Ingresos diarios";
+    billingLineChart.data.datasets[0].label = "Ingresos acumulados";
     billingLineChart.update();
   }
 }
@@ -2388,6 +2708,7 @@ function renderInvoices(invoices) {
   if (!invoices.length) {
     invoicesEmpty.style.display = "block";
     updateTaxSummary();
+    updateSupplierSuggestions();
     return;
   }
   invoicesEmpty.style.display = "none";
@@ -2456,6 +2777,7 @@ function renderInvoices(invoices) {
   });
 
   updateTaxSummary();
+  updateSupplierSuggestions();
 }
 
 function fetchIncomeInvoices(month, year) {
@@ -2592,6 +2914,38 @@ function enterIncomeInvoiceEditMode(row, invoice) {
   totalInput.min = "0";
   totalInput.value = invoice.total_amount;
 
+  const calcInputs = {
+    base: baseInput,
+    vat: vatSelect,
+    vatAmount: vatAmountInput,
+    total: totalInput,
+  };
+  baseInput.addEventListener("input", () => {
+    applyVatCalculation(invoice, calcInputs, "base");
+  });
+  vatSelect.addEventListener("change", () => {
+    applyVatCalculation(invoice, calcInputs, "vat");
+  });
+  totalInput.addEventListener("input", () => {
+    applyVatCalculation(invoice, calcInputs, "total");
+  });
+
+  const calcInputs = {
+    base: baseInput,
+    vat: vatSelect,
+    vatAmount: vatAmountInput,
+    total: totalInput,
+  };
+  baseInput.addEventListener("input", () => {
+    applyVatCalculation(invoice, calcInputs, "base");
+  });
+  vatSelect.addEventListener("change", () => {
+    applyVatCalculation(invoice, calcInputs, "vat");
+  });
+  totalInput.addEventListener("input", () => {
+    applyVatCalculation(invoice, calcInputs, "total");
+  });
+
   dateTd.textContent = "";
   dateTd.appendChild(dateInput);
   clientTd.textContent = "";
@@ -2604,6 +2958,10 @@ function enterIncomeInvoiceEditMode(row, invoice) {
   vatAmountTd.appendChild(vatAmountInput);
   totalTd.textContent = "";
   totalTd.appendChild(totalInput);
+
+  const initialSource =
+    parseNumberInput(baseInput.value) !== null ? "base" : "total";
+  applyVatCalculation(invoice, calcInputs, initialSource);
 
   actionsTd.innerHTML = "";
   const saveBtn = document.createElement("button");
@@ -2634,12 +2992,23 @@ function enterIncomeInvoiceEditMode(row, invoice) {
 }
 
 function updateIncomeInvoice(invoiceId, payload) {
+  const normalized = normalizeInvoiceAmounts({
+    base: payload.base_amount,
+    total: payload.total_amount,
+    vat: payload.vat_rate,
+  });
+  const normalizedPayload = {
+    ...payload,
+    base_amount: normalized.base || payload.base_amount,
+    vat_amount: normalized.vatAmount || payload.vat_amount,
+    total_amount: normalized.total || payload.total_amount,
+  };
   const url = withCompanyParam(`/api/income-invoices/${invoiceId}`);
   fetch(url, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      ...payload,
+      ...normalizedPayload,
       company_id: getSelectedCompanyId(),
     }),
   })
@@ -2693,6 +3062,31 @@ function enterInvoiceEditMode(row, invoice) {
   const supplierInput = document.createElement("input");
   supplierInput.type = "text";
   supplierInput.value = invoice.supplier;
+  if (supplierSuggestions) {
+    supplierInput.setAttribute("list", "supplierSuggestions");
+  }
+  const supplierWarning = document.createElement("div");
+  supplierWarning.className = "field-warning";
+  const updateSupplierWarning = () => {
+    const value = supplierInput.value.trim();
+    if (!value) {
+      supplierWarning.textContent = "Proveedor pendiente de completar.";
+      supplierWarning.style.display = "block";
+      supplierInput.classList.add("input-warning");
+      return;
+    }
+    if (isSupplierSameAsCompany(value)) {
+      supplierWarning.textContent =
+        "El proveedor no puede ser la empresa activa.";
+      supplierWarning.style.display = "block";
+      supplierInput.classList.add("input-warning");
+      return;
+    }
+    supplierWarning.textContent = "";
+    supplierWarning.style.display = "none";
+    supplierInput.classList.remove("input-warning");
+  };
+  supplierInput.addEventListener("input", updateSupplierWarning);
 
   const baseInput = document.createElement("input");
   baseInput.type = "number";
@@ -2720,6 +3114,8 @@ function enterInvoiceEditMode(row, invoice) {
   dateTd.appendChild(dateInput);
   supplierTd.textContent = "";
   supplierTd.appendChild(supplierInput);
+  supplierTd.appendChild(supplierWarning);
+  updateSupplierWarning();
   baseTd.textContent = "";
   baseTd.appendChild(baseInput);
   vatTd.textContent = "";
@@ -2730,6 +3126,9 @@ function enterInvoiceEditMode(row, invoice) {
   totalTd.appendChild(totalInput);
   categoryTd.textContent = "";
   categoryTd.appendChild(categorySelect);
+  const initialSource =
+    parseNumberInput(baseInput.value) !== null ? "base" : "total";
+  applyVatCalculation(invoice, calcInputs, initialSource);
 
   actionsTd.innerHTML = "";
   const saveBtn = document.createElement("button");
@@ -2761,6 +3160,21 @@ function enterInvoiceEditMode(row, invoice) {
 }
 
 function updateInvoice(invoiceId, payload) {
+  if (payload.supplier && isSupplierSameAsCompany(payload.supplier)) {
+    alert("El proveedor no puede ser la empresa activa.");
+    return;
+  }
+  const normalized = normalizeInvoiceAmounts({
+    base: payload.base_amount,
+    total: payload.total_amount,
+    vat: payload.vat_rate,
+  });
+  const normalizedPayload = {
+    ...payload,
+    base_amount: normalized.base || payload.base_amount,
+    vat_amount: normalized.vatAmount || payload.vat_amount,
+    total_amount: normalized.total || payload.total_amount,
+  };
   const url = withCompanyParam(`/api/invoices/${invoiceId}`);
   fetch(url, {
     method: "PUT",
@@ -2768,7 +3182,7 @@ function updateInvoice(invoiceId, payload) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      ...payload,
+      ...normalizedPayload,
       company_id: getSelectedCompanyId(),
     }),
   })
@@ -3651,6 +4065,8 @@ function bindEvents() {
       applyCompanyTaxModules();
       updatePnlSummary();
       updateHeaderContext();
+      renderTable();
+      renderIncomeTable();
       loadYears().then(() => refreshAllData());
     });
   }

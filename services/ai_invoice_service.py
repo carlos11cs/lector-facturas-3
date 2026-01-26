@@ -236,12 +236,23 @@ def _get_ocr_reader():
     model_dir = os.getenv("EASYOCR_MODEL_STORAGE_DIRECTORY", "/opt/easyocr-models")
     if not os.path.isdir(model_dir):
         logger.warning("Directorio de modelos EasyOCR no existe: %s", model_dir)
+    download_env = os.getenv("EASYOCR_DOWNLOAD_ENABLED", "").strip().lower()
+    download_enabled = download_env in {"1", "true", "yes"}
+    model_contents = []
+    if os.path.isdir(model_dir):
+        try:
+            model_contents = os.listdir(model_dir)
+        except OSError:
+            model_contents = []
+    if not os.path.isdir(model_dir) or not model_contents:
+        download_enabled = True
+        logger.warning("Modelos EasyOCR no encontrados. Se habilita descarga automática.")
     try:
         _ocr_reader = easyocr.Reader(
             ["es", "en"],
             gpu=False,
             model_storage_directory=model_dir,
-            download_enabled=False,
+            download_enabled=download_enabled,
         )
     except Exception as exc:
         logger.warning("Error inicializando EasyOCR (model_dir=%s): %s", model_dir, exc)
