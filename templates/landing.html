@@ -9,8 +9,18 @@
 <body class="landing-page">
   <header class="landing-header">
     <div class="brand">
-      <span class="brand-title">Ledged</span>
-      <span class="brand-subtitle">Plataforma fiscal para gestorías</span>
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 40 40" role="img" focusable="false">
+          <rect x="4" y="4" width="32" height="32" rx="8"></rect>
+          <rect x="12" y="10" width="6" height="6" rx="2" fill="var(--panel)"></rect>
+          <rect x="12" y="20" width="6" height="6" rx="2" fill="var(--panel)"></rect>
+          <rect x="22" y="10" width="12" height="16" rx="3" fill="var(--panel)"></rect>
+        </svg>
+      </span>
+      <div>
+        <span class="brand-title">Ledged</span>
+        <span class="brand-subtitle">Plataforma fiscal para gestorías</span>
+      </div>
     </div>
     <nav class="landing-nav">
       <a href="#beneficios">Beneficios</a>
@@ -96,45 +106,58 @@
 
     <section id="pricing" class="pricing">
       <h2>Planes para gestorías</h2>
-      <p class="pricing-subtitle">Escala tu cartera de clientes con planes claros por número de empresas.</p>
+      <p class="pricing-subtitle">Escala tu cartera de clientes con planes claros según el número de empresas que gestionas.</p>
       <div class="pricing-grid">
         <div class="price-card">
+          <span class="plan-icon">🧾</span>
           <h3>Starter</h3>
           <p class="price">Hasta 10 empresas</p>
-          <ul>
-            <li>1 usuario gestoría</li>
-            <li>OCR + informes</li>
-            <li>Calendario de pagos y cobros</li>
+          <ul class="check-list">
+            <li>✔️ 1 usuario</li>
+            <li>✔️ OCR automático</li>
+            <li>✔️ Informes y calendario fiscal</li>
           </ul>
           <a href="{{ url_for('register') }}" class="button ghost">Empieza hoy mismo</a>
         </div>
         <div class="price-card highlight">
+          <span class="plan-badge">⭐ Más elegido</span>
+          <span class="plan-icon">📊</span>
           <h3>Pro</h3>
           <p class="price">Hasta 50 empresas</p>
-          <ul>
-            <li>Hasta 5 usuarios</li>
-            <li>Informes trimestrales por email</li>
-            <li>Soporte prioritario</li>
+          <ul class="check-list">
+            <li>✔️ Hasta 5 usuarios</li>
+            <li>✔️ Informes trimestrales por email</li>
+            <li>✔️ Soporte prioritario</li>
           </ul>
           <a href="{{ url_for('register') }}" class="button primary">Empieza hoy mismo</a>
         </div>
         <div class="price-card">
+          <span class="plan-icon">🏢</span>
           <h3>Advanced</h3>
           <p class="price">Empresas ilimitadas</p>
-          <ul>
-            <li>Usuarios ilimitados</li>
-            <li>Informes personalizados</li>
-            <li>Prioridad máxima</li>
+          <ul class="check-list">
+            <li>✔️ Usuarios ilimitados</li>
+            <li>✔️ Informes personalizados</li>
+            <li>✔️ Prioridad máxima</li>
           </ul>
           <a href="{{ url_for('register') }}" class="button ghost">Solicita acceso</a>
         </div>
       </div>
-      <p class="pricing-note">El acceso del propietario (OWNER) está cubierto internamente.</p>
     </section>
   </main>
 
   <footer class="legal-footer">
-    <span>© 2026 Ledged · Contacto: soporte@ledged.app</span>
+    <div class="footer-brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 40 40" role="img" focusable="false">
+          <rect x="4" y="4" width="32" height="32" rx="8"></rect>
+          <rect x="12" y="10" width="6" height="6" rx="2" fill="var(--panel)"></rect>
+          <rect x="12" y="20" width="6" height="6" rx="2" fill="var(--panel)"></rect>
+          <rect x="22" y="10" width="12" height="16" rx="3" fill="var(--panel)"></rect>
+        </svg>
+      </span>
+      <span>© 2026 Ledged · Contacto: soporte@ledged.app</span>
+    </div>
     <div class="legal-links">
       <a href="{{ url_for('legal_notice') }}">Aviso legal</a>
       <a href="{{ url_for('privacy') }}">Política de privacidad</a>

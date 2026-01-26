@@ -10,8 +10,18 @@
   <div class="app-shell">
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-brand">
-        <span class="brand-title">Lector de Facturas</span>
-        <span class="brand-subtitle">Panel contable-fiscal</span>
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 40 40" role="img" focusable="false">
+            <rect x="4" y="4" width="32" height="32" rx="8"></rect>
+            <rect x="12" y="10" width="6" height="6" rx="2" fill="var(--panel)"></rect>
+            <rect x="12" y="20" width="6" height="6" rx="2" fill="var(--panel)"></rect>
+            <rect x="22" y="10" width="12" height="16" rx="3" fill="var(--panel)"></rect>
+          </svg>
+        </span>
+        <div>
+          <span class="brand-title">Ledged</span>
+          <span class="brand-subtitle">Panel contable-fiscal</span>
+        </div>
       </div>
       <nav class="sidebar-nav">
         <button class="nav-link active" data-section="dashboard" type="button">Dashboard</button>
@@ -32,6 +42,14 @@
       <header class="topbar">
         <div class="title-block">
           <button class="hamburger" id="sidebarToggle" type="button" aria-label="Mostrar menú">☰</button>
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 40 40" role="img" focusable="false">
+              <rect x="4" y="4" width="32" height="32" rx="8"></rect>
+              <rect x="12" y="10" width="6" height="6" rx="2" fill="var(--panel)"></rect>
+              <rect x="12" y="20" width="6" height="6" rx="2" fill="var(--panel)"></rect>
+              <rect x="22" y="10" width="12" height="16" rx="3" fill="var(--panel)"></rect>
+            </svg>
+          </span>
           <div>
             <p class="tag">Panel fiscal</p>
             <h1>Control contable</h1>
@@ -719,6 +737,26 @@
           <p class="pnl-note">Los importes son estimativos y no sustituyen el asesoramiento fiscal.</p>
         </section>
       </section>
+
+      <footer class="legal-footer app-footer">
+        <div class="footer-brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 40 40" role="img" focusable="false">
+              <rect x="4" y="4" width="32" height="32" rx="8"></rect>
+              <rect x="12" y="10" width="6" height="6" rx="2" fill="var(--panel)"></rect>
+              <rect x="12" y="20" width="6" height="6" rx="2" fill="var(--panel)"></rect>
+              <rect x="22" y="10" width="12" height="16" rx="3" fill="var(--panel)"></rect>
+            </svg>
+          </span>
+          <span>© 2026 Ledged · Contacto: soporte@ledged.app</span>
+        </div>
+        <div class="legal-links">
+          <a href="{{ url_for('legal_notice') }}">Aviso legal</a>
+          <a href="{{ url_for('privacy') }}">Política de privacidad</a>
+          <a href="{{ url_for('cookies') }}">Política de cookies</a>
+          <a href="{{ url_for('terms') }}">Términos del servicio</a>
+        </div>
+      </footer>
     </main>
   </div>
 
