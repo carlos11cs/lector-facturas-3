@@ -367,10 +367,10 @@ def get_company_names(company_id: int, conn) -> list:
         select(companies_table.c.display_name, companies_table.c.legal_name).where(
             companies_table.c.id == company_id
         )
-    ).mappings().first()
+    ).first()
     if not row:
         return []
-    return [row.get("display_name"), row.get("legal_name")]
+    return [row[0], row[1]]
 
 
 def is_supplier_same_as_company(supplier: str, company_id: int, conn) -> bool:
@@ -1451,16 +1451,11 @@ def upload_invoices():
                 if not stored_name:
                     errors.append(f"Archivo faltante en posición {idx + 1}.")
                     continue
-                if is_manual:
-                    if not supplier:
-                        errors.append(f"Proveedor obligatorio para {original_name}.")
-                        continue
-                else:
-                    if not supplier:
-                        app.logger.info(
-                            "Proveedor vacío para %s. Se permite guardado manual.",
-                            original_name,
-                        )
+                if not supplier:
+                    app.logger.info(
+                        "Proveedor vacío para %s. Se permite guardado manual.",
+                        original_name,
+                    )
 
                 try:
                     vat_rate_int = int(vat_rate_raw)
@@ -1479,7 +1474,7 @@ def upload_invoices():
                 if total_amount is None or total_amount < 0:
                     errors.append(f"Total inválido para {original_name}.")
                     continue
-                if not is_manual and is_supplier_same_as_company(supplier, company_id, conn):
+                if supplier and is_supplier_same_as_company(supplier, company_id, conn):
                     errors.append(
                         f"El proveedor no puede ser la empresa activa ({original_name})."
                     )
@@ -1573,8 +1568,7 @@ def upload_invoices():
             total_amount = parse_amount(totals[idx])
 
             if not supplier:
-                errors.append(f"Proveedor obligatorio para {original_name}.")
-                continue
+                app.logger.info("Proveedor vacío para %s. Se permite guardado manual.", original_name)
             try:
                 vat_rate_int = int(vat_rate)
             except ValueError:
@@ -1588,6 +1582,11 @@ def upload_invoices():
                 continue
             if total_amount is None or total_amount < 0:
                 errors.append(f"Total inválido para {original_name}.")
+                continue
+            if supplier and is_supplier_same_as_company(supplier, company_id, conn):
+                errors.append(
+                    f"El proveedor no puede ser la empresa activa ({original_name})."
+                )
                 continue
 
             file_bytes = file.read()

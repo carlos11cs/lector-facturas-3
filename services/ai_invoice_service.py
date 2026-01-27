@@ -180,6 +180,70 @@ def _is_same_entity(candidate: Optional[str], company_names) -> bool:
     return False
 
 
+def looks_like_person(name: Optional[str]) -> bool:
+    if not name:
+        return False
+    cleaned = re.sub(r"[^\w\s]", " ", name).strip()
+    if not cleaned:
+        return False
+    tokens = [token for token in cleaned.split() if token.isalpha()]
+    if not tokens:
+        return False
+    if has_legal_form(name):
+        return False
+    if len(tokens) in {2, 3} and all(len(token) > 1 for token in tokens):
+        return True
+    return False
+
+
+def has_legal_form(name: Optional[str]) -> bool:
+    if not name:
+        return False
+    return bool(
+        re.search(
+            r"\b(S\.?L\.?U?\.?|S\.?A\.?U?\.?|S\.?C\.?|COOP(?:ERATIVA)?|S\.?L\.?P\.?|UTE|CB|LTD|LIMITED|INC|GMBH|SARL|BV|NV)\b",
+            name,
+            re.IGNORECASE,
+        )
+    )
+
+
+def contains_forbidden_keyword(name: Optional[str]) -> bool:
+    if not name:
+        return False
+    lowered = name.lower()
+    forbidden = [
+        "vendedor",
+        "comercial",
+        "agente",
+        "transporte",
+        "reparto",
+        "envío",
+        "envio",
+        "logística",
+        "logistica",
+        "shipping",
+    ]
+    return any(keyword in lowered for keyword in forbidden)
+
+
+def _is_valid_supplier(candidate: Optional[str], company_names) -> bool:
+    if candidate is None:
+        return False
+    value = str(candidate).strip()
+    if not value:
+        return False
+    if looks_like_person(value):
+        return False
+    if contains_forbidden_keyword(value):
+        return False
+    if not has_legal_form(value):
+        return False
+    if _is_same_entity(value, company_names):
+        return False
+    return True
+
+
 def _looks_like_metadata(line: str) -> bool:
     lowered = line.lower()
     blocked = [
@@ -206,15 +270,7 @@ def _looks_like_metadata(line: str) -> bool:
 
 
 def _contains_legal_form(line: str) -> bool:
-    if not line:
-        return False
-    return bool(
-        re.search(
-            r"\b(S\.L\.U\.|S\.L\.|S\.A\.U\.|S\.A\.|S\.C\.|S\.Coop\.|S\.L\.P\.|UTE|CB|GmbH|SARL|LTD|INC|BV|NV)\b",
-            line,
-            re.IGNORECASE,
-        )
-    )
+    return has_legal_form(line)
 
 
 def _has_tax_id(line: str) -> bool:
@@ -259,6 +315,8 @@ def _extract_supplier_candidates(text: str, company_names=None) -> List[Tuple[st
         "expedición",
         "mensajería",
         "portes",
+        "logística",
+        "shipping",
     ]
 
     header_lines = lines[:8]
@@ -278,6 +336,8 @@ def _extract_supplier_candidates(text: str, company_names=None) -> List[Tuple[st
         if _looks_like_metadata(line):
             continue
         if _is_same_entity(line, company_names):
+            continue
+        if contains_forbidden_keyword(line):
             continue
 
         score = 0
@@ -321,13 +381,11 @@ def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
         "bill to",
         "ship to",
     ]
-    excluded_terms = [
-        "transporte",
-        "envío",
-        "envio",
-        "logística",
-        "logistica",
-        "shipping",
+    anchor_keywords = [
+        "titular",
+        "iban",
+        "datos bancarios",
+        "datos fiscales",
     ]
 
     for idx, line in enumerate(lines):
@@ -338,32 +396,32 @@ def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
                     parts = re.split(keyword, line, flags=re.IGNORECASE)
                     if len(parts) > 1:
                         candidate = parts[1].strip(" :-")
-                        if candidate and not _is_same_entity(candidate, company_names):
-                            if not any(word in candidate.lower() for word in client_keywords):
-                                return candidate
+                        if _is_valid_supplier(candidate, company_names):
+                            return candidate
             for offset in (1, 2):
                 if idx + offset < len(lines):
                     candidate = lines[idx + offset].strip()
-                    if not candidate:
-                        continue
-                    if any(term in candidate.lower() for term in excluded_terms):
-                        return None
-                    if any(word in candidate.lower() for word in client_keywords):
-                        continue
-                    if _looks_like_metadata(candidate):
-                        continue
-                    if _is_same_entity(candidate, company_names):
-                        continue
-                    return candidate
+                    if _is_valid_supplier(candidate, company_names):
+                        return candidate
+
+    for idx, line in enumerate(lines):
+        lowered = line.lower()
+        if any(anchor in lowered for anchor in anchor_keywords):
+            parts = line.split(":", 1)
+            if len(parts) > 1 and _is_valid_supplier(parts[1], company_names):
+                return parts[1].strip()
+            for offset in (1, 2):
+                if idx + offset < len(lines):
+                    candidate = lines[idx + offset].strip()
+                    if _is_valid_supplier(candidate, company_names):
+                        return candidate
 
     candidates = _extract_supplier_candidates(text, company_names)
     if not candidates:
         return None
     candidates.sort(key=lambda item: item[1], reverse=True)
     best, score = candidates[0]
-    if any(term in best.lower() for term in excluded_terms):
-        return None
-    if _contains_legal_form(best) or score >= 60:
+    if _is_valid_supplier(best, company_names):
         return best
     return None
 
@@ -710,14 +768,17 @@ def analyze_invoice(
 
     if document_type != "income":
         supplier_source_text = embedded_text if pdf_kind == "original" else extracted_text
-        if _is_same_entity(provider_name, company_names):
+        provider_name = provider_name.strip() if isinstance(provider_name, str) else provider_name
+        if provider_name is not None and not _is_valid_supplier(provider_name, company_names):
             provider_name = None
         if provider_name is None:
             heuristic_supplier = _extract_supplier_from_text(
                 supplier_source_text,
                 company_names,
             )
-            if _is_same_entity(heuristic_supplier, company_names):
+            if heuristic_supplier is not None and not _is_valid_supplier(
+                heuristic_supplier, company_names
+            ):
                 heuristic_supplier = None
             provider_name = heuristic_supplier
 
