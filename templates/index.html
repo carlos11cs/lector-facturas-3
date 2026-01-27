@@ -33,6 +33,9 @@
         <button class="nav-link" data-section="reports" type="button">Informes</button>
         <button class="nav-link" data-section="taxes" type="button">Modelos de impuestos</button>
         <button class="nav-link" data-section="pnl" type="button">Pérdidas y Ganancias</button>
+        {% if user and user.role == "owner" %}
+        <a class="nav-link" href="{{ url_for('admin_dashboard') }}">Panel de gestorías</a>
+        {% endif %}
       </nav>
     </aside>
 
