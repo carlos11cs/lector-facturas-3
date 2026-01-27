@@ -51,6 +51,11 @@ const noInvoiceTypeLabels = {
   otro: "Otro",
 };
 
+const ANALYSIS_ERROR_MESSAGE =
+  "No se ha podido analizar la factura automáticamente. Puedes introducir los datos manualmente.";
+const LOW_QUALITY_SCAN_MESSAGE =
+  "La calidad de la factura escaneada no es óptima y no se puede leer correctamente el texto. Por favor, introduce los datos manualmente.";
+
 function formatCurrency(value) {
   const number = Number(value || 0);
   return `${number.toFixed(2).replace(".", ",")} €`;
@@ -313,6 +318,9 @@ function isAllowedFile(fileName) {
 }
 
 function populateMonthSelects() {
+  if (!monthSelect || !billingMonthSelect) {
+    return;
+  }
   monthSelect.innerHTML = "";
   billingMonthSelect.innerHTML = "";
   monthNames.forEach((name, index) => {
@@ -443,6 +451,9 @@ function createDeductibleSelect(selected) {
 }
 
 function setYearOptions(select, years) {
+  if (!select) {
+    return;
+  }
   const current = select.value;
   select.innerHTML = "";
   years.forEach((year) => {
@@ -917,10 +928,20 @@ function updateStaff(staffId, payload) {
 }
 
 function getSelectedPeriod() {
+  if (!periodSelect) {
+    return "monthly";
+  }
   return periodSelect.value || "monthly";
 }
 
 function getSelectedMonthYear() {
+  if (!monthSelect || !yearSelect) {
+    const now = new Date();
+    return {
+      month: now.getMonth() + 1,
+      year: now.getFullYear(),
+    };
+  }
   return {
     month: Number(monthSelect.value),
     year: Number(yearSelect.value),
@@ -980,6 +1001,9 @@ function getPeriodLabel() {
 }
 
 function updateHeaderContext() {
+  if (!monthSelect || !yearSelect || !periodSelect) {
+    return;
+  }
   if (headerPeriodLabel) {
     const label = getPeriodLabel();
     headerPeriodLabel.textContent = label ? `Periodo: ${label}` : "";
@@ -1006,6 +1030,9 @@ function applyRoleVisibility() {
 }
 
 function persistFilters() {
+  if (!monthSelect || !yearSelect || !periodSelect) {
+    return;
+  }
   localStorage.setItem("selectedMonth", monthSelect.value);
   localStorage.setItem("selectedYear", yearSelect.value);
   localStorage.setItem("selectedPeriod", periodSelect.value);
@@ -1015,6 +1042,9 @@ function persistFilters() {
 }
 
 function restoreFilters(now) {
+  if (!monthSelect || !yearSelect || !periodSelect) {
+    return;
+  }
   const storedMonth = localStorage.getItem("selectedMonth");
   const storedYear = localStorage.getItem("selectedYear");
   const storedPeriod = localStorage.getItem("selectedPeriod");
@@ -1063,6 +1093,7 @@ function addFiles(fileList) {
       analysisText: "",
       analysisPending: true,
       analysisError: false,
+      analysisErrorMessage: "",
       touched: {
         date: false,
         supplier: false,
@@ -1098,6 +1129,7 @@ function addIncomeFiles(fileList) {
       analysisText: "",
       analysisPending: true,
       analysisError: false,
+      analysisErrorMessage: "",
       touched: {
         date: false,
         client: false,
@@ -1340,7 +1372,7 @@ function renderTable() {
       }
       const message = document.createElement("span");
       message.textContent = item.analysisError
-        ? "No se ha podido analizar la factura automáticamente. Puedes introducir los datos manualmente."
+        ? item.analysisErrorMessage || ANALYSIS_ERROR_MESSAGE
         : "Analizando factura… Las facturas escaneadas pueden tardar hasta 1 minuto.";
       statusWrapper.appendChild(message);
       statusTd.appendChild(statusWrapper);
@@ -1519,6 +1551,31 @@ function renderIncomeTable() {
       },
       initialSource
     );
+
+    if (item.analysisPending || item.analysisError) {
+      const statusRow = document.createElement("tr");
+      statusRow.className = "processing-row";
+      if (item.analysisError) {
+        statusRow.classList.add("error");
+      }
+      const statusTd = document.createElement("td");
+      statusTd.colSpan = 8;
+      const statusWrapper = document.createElement("div");
+      statusWrapper.className = "processing-status";
+      if (item.analysisPending) {
+        const spinner = document.createElement("span");
+        spinner.className = "spinner";
+        statusWrapper.appendChild(spinner);
+      }
+      const message = document.createElement("span");
+      message.textContent = item.analysisError
+        ? item.analysisErrorMessage || ANALYSIS_ERROR_MESSAGE
+        : "Analizando factura… Las facturas escaneadas pueden tardar hasta 1 minuto.";
+      statusWrapper.appendChild(message);
+      statusTd.appendChild(statusWrapper);
+      statusRow.appendChild(statusTd);
+      incomeUploadTableBody.appendChild(statusRow);
+    }
   });
 }
 
@@ -1540,12 +1597,20 @@ function analyzeIncomeForItem(item) {
       if (!data.ok) {
         item.analysisPending = false;
         item.analysisError = true;
+        item.analysisErrorMessage = ANALYSIS_ERROR_MESSAGE;
         renderIncomeTable();
         return;
       }
       const extracted = data.extracted || {};
       item.storedFilename = data.storedFilename || "";
       item.analysisText = extracted.analysis_text || "";
+      if (extracted.analysis_status === "low_quality_scan") {
+        item.analysisPending = false;
+        item.analysisError = true;
+        item.analysisErrorMessage = LOW_QUALITY_SCAN_MESSAGE;
+        renderIncomeTable();
+        return;
+      }
       const detectedClient = extracted.client_name || extracted.provider_name;
 
       if (!item.touched.client && detectedClient) {
@@ -1596,6 +1661,7 @@ function analyzeIncomeForItem(item) {
     .catch(() => {
       item.analysisPending = false;
       item.analysisError = true;
+      item.analysisErrorMessage = ANALYSIS_ERROR_MESSAGE;
       renderIncomeTable();
     });
 }
@@ -1746,12 +1812,20 @@ function analyzeInvoiceForItem(item) {
       if (!data.ok) {
         item.analysisPending = false;
         item.analysisError = true;
+        item.analysisErrorMessage = ANALYSIS_ERROR_MESSAGE;
         renderTable();
         return;
       }
       const extracted = data.extracted || {};
       item.storedFilename = data.storedFilename || "";
       item.analysisText = extracted.analysis_text || "";
+      if (extracted.analysis_status === "low_quality_scan") {
+        item.analysisPending = false;
+        item.analysisError = true;
+        item.analysisErrorMessage = LOW_QUALITY_SCAN_MESSAGE;
+        renderTable();
+        return;
+      }
 
       if (!item.touched.supplier && extracted.provider_name) {
         if (!isSupplierSameAsCompany(extracted.provider_name)) {
@@ -1809,11 +1883,13 @@ function analyzeInvoiceForItem(item) {
         extracted.total_amount,
       ].some((value) => value !== null && value !== undefined && value !== "");
       item.analysisError = !hasExtractedValue && !item.analysisText;
+      item.analysisErrorMessage = item.analysisError ? ANALYSIS_ERROR_MESSAGE : "";
       renderTable();
     })
     .catch(() => {
       item.analysisPending = false;
       item.analysisError = true;
+      item.analysisErrorMessage = ANALYSIS_ERROR_MESSAGE;
       renderTable();
     });
 }
@@ -3976,7 +4052,12 @@ function setActiveSection(sectionId) {
 
 function initNavigation() {
   const storedSection = localStorage.getItem("activeSection");
-  const defaultSection = storedSection || "dashboard";
+  const availableSections = Array.from(sections || []).map(
+    (section) => section.dataset.section
+  );
+  const defaultSection = availableSections.includes(storedSection)
+    ? storedSection
+    : availableSections[0] || "dashboard";
   setActiveSection(defaultSection);
 
   navLinks.forEach((link) => {
@@ -3998,25 +4079,36 @@ function initNavigation() {
 }
 
 function bindEvents() {
-  document.getElementById("selectFiles").addEventListener("click", () => {
-    fileInput.click();
-  });
-  document.getElementById("selectFolder").addEventListener("click", () => {
-    folderInput.click();
-  });
-  if (incomeFileInput) {
-    document.getElementById("incomeSelectFiles").addEventListener("click", () => {
+  const selectFilesBtn = document.getElementById("selectFiles");
+  const selectFolderBtn = document.getElementById("selectFolder");
+  const incomeSelectFilesBtn = document.getElementById("incomeSelectFiles");
+  if (selectFilesBtn && fileInput) {
+    selectFilesBtn.addEventListener("click", () => {
+      fileInput.click();
+    });
+  }
+  if (selectFolderBtn && folderInput) {
+    selectFolderBtn.addEventListener("click", () => {
+      folderInput.click();
+    });
+  }
+  if (incomeFileInput && incomeSelectFilesBtn) {
+    incomeSelectFilesBtn.addEventListener("click", () => {
       incomeFileInput.click();
     });
   }
-  fileInput.addEventListener("change", (event) => {
-    addFiles(event.target.files);
-    fileInput.value = "";
-  });
-  folderInput.addEventListener("change", (event) => {
-    addFiles(event.target.files);
-    folderInput.value = "";
-  });
+  if (fileInput) {
+    fileInput.addEventListener("change", (event) => {
+      addFiles(event.target.files);
+      fileInput.value = "";
+    });
+  }
+  if (folderInput) {
+    folderInput.addEventListener("change", (event) => {
+      addFiles(event.target.files);
+      folderInput.value = "";
+    });
+  }
   if (incomeFileInput) {
     incomeFileInput.addEventListener("change", (event) => {
       addIncomeFiles(event.target.files);
@@ -4024,20 +4116,22 @@ function bindEvents() {
     });
   }
 
-  dropZone.addEventListener("dragover", (event) => {
-    event.preventDefault();
-    dropZone.classList.add("dragover");
-  });
-  dropZone.addEventListener("dragleave", () => {
-    dropZone.classList.remove("dragover");
-  });
-  dropZone.addEventListener("drop", (event) => {
-    event.preventDefault();
-    dropZone.classList.remove("dragover");
-    if (event.dataTransfer.files) {
-      addFiles(event.dataTransfer.files);
-    }
-  });
+  if (dropZone) {
+    dropZone.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      dropZone.classList.add("dragover");
+    });
+    dropZone.addEventListener("dragleave", () => {
+      dropZone.classList.remove("dragover");
+    });
+    dropZone.addEventListener("drop", (event) => {
+      event.preventDefault();
+      dropZone.classList.remove("dragover");
+      if (event.dataTransfer.files) {
+        addFiles(event.dataTransfer.files);
+      }
+    });
+  }
   if (incomeDropZone) {
     incomeDropZone.addEventListener("dragover", (event) => {
       event.preventDefault();
@@ -4055,7 +4149,9 @@ function bindEvents() {
     });
   }
 
-  uploadBtn.addEventListener("click", uploadPending);
+  if (uploadBtn) {
+    uploadBtn.addEventListener("click", uploadPending);
+  }
   if (incomeUploadBtn) {
     incomeUploadBtn.addEventListener("click", uploadIncomePending);
   }
@@ -4065,22 +4161,31 @@ function bindEvents() {
   if (staffSaveBtn) {
     staffSaveBtn.addEventListener("click", saveStaff);
   }
-  monthSelect.addEventListener("change", () => {
-    persistFilters();
-    updateHeaderContext();
-    refreshAllData();
-  });
-  yearSelect.addEventListener("change", () => {
-    persistFilters();
-    updateHeaderContext();
-    refreshAllData();
-  });
-  periodSelect.addEventListener("change", () => {
-    document.body.classList.toggle("period-quarterly", getSelectedPeriod() === "quarterly");
-    persistFilters();
-    updateHeaderContext();
-    refreshAllData();
-  });
+  if (monthSelect) {
+    monthSelect.addEventListener("change", () => {
+      persistFilters();
+      updateHeaderContext();
+      refreshAllData();
+    });
+  }
+  if (yearSelect) {
+    yearSelect.addEventListener("change", () => {
+      persistFilters();
+      updateHeaderContext();
+      refreshAllData();
+    });
+  }
+  if (periodSelect) {
+    periodSelect.addEventListener("change", () => {
+      document.body.classList.toggle(
+        "period-quarterly",
+        getSelectedPeriod() === "quarterly"
+      );
+      persistFilters();
+      updateHeaderContext();
+      refreshAllData();
+    });
+  }
   if (companySelect) {
     companySelect.addEventListener("change", () => {
       selectedCompanyId = companySelect.value;
@@ -4093,8 +4198,12 @@ function bindEvents() {
       loadYears().then(() => refreshAllData());
     });
   }
-  billingSaveBtn.addEventListener("click", saveBillingEntry);
-  noInvoiceSaveBtn.addEventListener("click", saveNoInvoiceExpense);
+  if (billingSaveBtn) {
+    billingSaveBtn.addEventListener("click", saveBillingEntry);
+  }
+  if (noInvoiceSaveBtn) {
+    noInvoiceSaveBtn.addEventListener("click", saveNoInvoiceExpense);
+  }
   if (exportPnlBtn) {
     exportPnlBtn.addEventListener("click", exportPnlPdf);
   }
