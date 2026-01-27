@@ -1,7 +1,9 @@
+import gc
 import json
 import logging
 import os
 import re
+import time
 from datetime import date, timedelta
 from typing import Any, Dict, Optional, List, Tuple
 
@@ -17,6 +19,8 @@ DEFAULT_MODEL = os.getenv("OPENAI_CHAT_MODEL", os.getenv("OPENAI_VISION_MODEL", 
 MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "500"))
 PDF_TEXT_THRESHOLD = int(os.getenv("PDF_TEXT_THRESHOLD", "100"))
 PDF_OCR_ZOOM = float(os.getenv("PDF_OCR_ZOOM", "2.0"))
+OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", "5"))
+OCR_MAX_SECONDS = int(os.getenv("OCR_MAX_SECONDS", "7"))
 _client: Optional[OpenAI] = None
 _ocr_reader = None
 
@@ -107,6 +111,50 @@ def _find_payment_date_by_keywords(text: str) -> Optional[str]:
             if found:
                 return found
     return None
+
+
+def _find_payment_dates_by_keywords(text: str, invoice_date_iso: Optional[str]) -> List[str]:
+    if not text:
+        return []
+    dates: List[str] = []
+    keywords = [
+        "fecha de vencimiento",
+        "vencimiento",
+        "vence el",
+        "fecha de pago",
+        "fecha pago",
+        "pago",
+        "pagos",
+        "cuota",
+        "cuotas",
+    ]
+    for line in text.splitlines():
+        lowered = line.lower()
+        if any(keyword in lowered for keyword in keywords):
+            for match in re.findall(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", line):
+                normalized = _normalize_date(match)
+                if normalized:
+                    dates.append(normalized)
+            for match in re.findall(r"\d{4}[/-]\d{1,2}[/-]\d{1,2}", line):
+                normalized = _normalize_date(match)
+                if normalized:
+                    dates.append(normalized)
+        day_matches = re.findall(r"(\d{1,3})\s*d[ií]as", lowered)
+        if day_matches and invoice_date_iso:
+            try:
+                base_date = date.fromisoformat(invoice_date_iso)
+            except ValueError:
+                base_date = None
+            if base_date:
+                for days_str in day_matches:
+                    try:
+                        days = int(days_str)
+                    except ValueError:
+                        continue
+                    due_date = (base_date + timedelta(days=days)).isoformat()
+                    dates.append(due_date)
+    unique_dates = sorted({d for d in dates if d})
+    return unique_dates
 
 
 def _normalize_rate(value: Any) -> Optional[float]:
@@ -506,6 +554,34 @@ def _is_text_significant(text: str, min_chars: int = 100) -> bool:
     return useful_chars >= min_chars
 
 
+def _is_low_quality_ocr(text: str, min_chars: int = 200) -> bool:
+    if not text:
+        return True
+    stripped = text.strip()
+    if not stripped:
+        return True
+    total = len(stripped)
+    alnum = sum(1 for char in stripped if char.isalnum())
+    letters = sum(1 for char in stripped if char.isalpha())
+    if alnum < min_chars:
+        return True
+    if alnum == 0:
+        return True
+    if letters / alnum < 0.3:
+        return True
+    garbage = sum(
+        1
+        for char in stripped
+        if not (char.isalnum() or char.isspace() or char in ".,:-/%()")
+    )
+    if garbage / max(total, 1) > 0.3:
+        return True
+    tokens = re.findall(r"[A-Za-zÀ-ÿ0-9]{2,}", stripped)
+    if len(set(tokens)) < 10:
+        return True
+    return False
+
+
 def _extract_pdf_text(file_path: str) -> str:
     with fitz.open(file_path) as doc:
         parts = []
@@ -605,8 +681,13 @@ def _extract_pdf_text_ocr_from_bytes(data: bytes) -> str:
 
     parts = []
     matrix = fitz.Matrix(PDF_OCR_ZOOM, PDF_OCR_ZOOM)
+    start_time = time.time()
     with fitz.open(stream=data, filetype="pdf") as doc:
-        for page in doc:
+        for idx, page in enumerate(doc):
+            if idx >= OCR_MAX_PAGES:
+                break
+            if time.time() - start_time > OCR_MAX_SECONDS:
+                break
             pix = page.get_pixmap(matrix=matrix)
             image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
                 pix.height, pix.width, pix.n
@@ -616,6 +697,8 @@ def _extract_pdf_text_ocr_from_bytes(data: bytes) -> str:
             lines = reader.readtext(image, detail=0)
             if lines:
                 parts.append("\n".join(lines))
+            del image, pix
+            gc.collect()
     return "\n".join(parts).strip()
 
 
@@ -723,12 +806,35 @@ def analyze_invoice(
         len(extracted_text.strip()),
     )
 
+    analysis_status = "ok"
+    if used_ocr and _is_low_quality_ocr(extracted_text):
+        analysis_status = "low_quality_scan"
+        logger.warning(
+            "OCR de baja calidad (%s). Se omite analisis IA.", filename
+        )
+        return {
+            "analysis_status": analysis_status,
+            "supplier": None,
+            "provider_name": None,
+            "client_name": None,
+            "invoice_date": None,
+            "payment_dates": [],
+            "payment_date": None,
+            "base_amount": None,
+            "vat_rate": None,
+            "vat_amount": None,
+            "total_amount": None,
+            "analysis_text": "",
+            "validation": {"is_consistent": None, "difference": None},
+        }
+
     is_income = document_type == "income"
     if is_income:
         prompt = (
             "Analiza el siguiente texto extraido de una factura emitida (ingreso). "
             "Devuelve SOLO JSON valido con estas claves: "
-            "client, invoice_date, payment_date, base_amount, vat_rate, vat_amount, total_amount. "
+            "client, invoice_date, payment_dates, base_amount, vat_rate, vat_amount, total_amount. "
+            "payment_dates debe ser una lista de fechas (YYYY-MM-DD) y puede estar vacia. "
             "Usa null si no puedes inferir un dato con seguridad. "
             "No incluyas texto adicional fuera del JSON.\n\n"
             f"TEXTO_FACTURA:\n{extracted_text}"
@@ -737,9 +843,10 @@ def analyze_invoice(
         prompt = (
             "Analiza el siguiente texto extraido de una factura recibida (gasto). "
             "Devuelve SOLO JSON valido con estas claves: "
-            "supplier, invoice_date, payment_date, base_amount, vat_rate, vat_amount, total_amount. "
+            "supplier, invoice_date, payment_dates, base_amount, vat_rate, vat_amount, total_amount. "
             "El supplier debe ser la razon social del emisor (forma juridica si aparece) "
             "y no debe ser el cliente/receptor. "
+            "payment_dates debe ser una lista de fechas (YYYY-MM-DD) y puede estar vacia. "
             "Usa null si no puedes inferir un dato con seguridad. "
             "No incluyas texto adicional fuera del JSON.\n\n"
             f"TEXTO_FACTURA:\n{extracted_text}"
@@ -778,12 +885,32 @@ def analyze_invoice(
     invoice_date = _normalize_date(
         data.get("invoice_date") or data.get("fecha_factura") or data.get("fecha")
     )
-    payment_date = _normalize_date(
+    payment_dates: List[str] = []
+    raw_payment_dates = (
+        data.get("payment_dates")
+        or data.get("fechas_pago")
+        or data.get("fechas_vencimiento")
+        or data.get("vencimientos")
+    )
+    if isinstance(raw_payment_dates, list):
+        for item in raw_payment_dates:
+            normalized = _normalize_date(str(item)) if item is not None else None
+            if normalized:
+                payment_dates.append(normalized)
+    elif isinstance(raw_payment_dates, str):
+        for chunk in re.split(r"[;,]\s*", raw_payment_dates):
+            normalized = _normalize_date(chunk.strip())
+            if normalized:
+                payment_dates.append(normalized)
+
+    single_payment_date = _normalize_date(
         data.get("payment_date")
         or data.get("fecha_pago")
         or data.get("fecha_vencimiento")
         or data.get("vencimiento")
     )
+    if single_payment_date:
+        payment_dates.append(single_payment_date)
     base_amount = _normalize_amount(
         data.get("base_amount") or data.get("base_imponible") or data.get("base")
     )
@@ -823,13 +950,10 @@ def analyze_invoice(
                 heuristic_supplier = None
             provider_name = heuristic_supplier
 
-    if payment_date is None:
-        payment_date = _find_payment_date_by_keywords(extracted_text)
-    if payment_date is None and invoice_date:
-        try:
-            payment_date = (date.fromisoformat(invoice_date) + timedelta(days=30)).isoformat()
-        except ValueError:
-            payment_date = None
+    if not payment_dates:
+        payment_dates = _find_payment_dates_by_keywords(extracted_text, invoice_date)
+    payment_dates = sorted({d for d in payment_dates if d})
+    payment_date = payment_dates[0] if payment_dates else None
 
     assumed_vat = False
     if vat_rate is None and not _has_vat_exemption_indicators(extracted_text):
@@ -872,9 +996,12 @@ def analyze_invoice(
     )
 
     return {
+        "analysis_status": analysis_status,
+        "supplier": provider_name,
         "provider_name": provider_name,
         "client_name": client_name,
         "invoice_date": invoice_date,
+        "payment_dates": payment_dates,
         "payment_date": payment_date,
         "base_amount": base_amount,
         "vat_rate": vat_rate,
