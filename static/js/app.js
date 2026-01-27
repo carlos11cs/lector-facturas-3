@@ -56,6 +56,26 @@ const ANALYSIS_ERROR_MESSAGE =
 const LOW_QUALITY_SCAN_MESSAGE =
   "La calidad de la factura escaneada no es óptima y no se puede leer correctamente el texto. Por favor, introduce los datos manualmente.";
 
+function showLowQualityModal() {
+  const modal = document.getElementById("lowQualityModal");
+  if (!modal) {
+    return;
+  }
+  modal.classList.add("is-visible");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+}
+
+function hideLowQualityModal() {
+  const modal = document.getElementById("lowQualityModal");
+  if (!modal) {
+    return;
+  }
+  modal.classList.remove("is-visible");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
 function formatCurrency(value) {
   const number = Number(value || 0);
   return `${number.toFixed(2).replace(".", ",")} €`;
@@ -1608,6 +1628,7 @@ function analyzeIncomeForItem(item) {
         item.analysisPending = false;
         item.analysisError = true;
         item.analysisErrorMessage = LOW_QUALITY_SCAN_MESSAGE;
+        showLowQualityModal();
         renderIncomeTable();
         return;
       }
@@ -1823,6 +1844,7 @@ function analyzeInvoiceForItem(item) {
         item.analysisPending = false;
         item.analysisError = true;
         item.analysisErrorMessage = LOW_QUALITY_SCAN_MESSAGE;
+        showLowQualityModal();
         renderTable();
         return;
       }
@@ -4082,6 +4104,10 @@ function bindEvents() {
   const selectFilesBtn = document.getElementById("selectFiles");
   const selectFolderBtn = document.getElementById("selectFolder");
   const incomeSelectFilesBtn = document.getElementById("incomeSelectFiles");
+  const lowQualityAccept = document.getElementById("lowQualityAccept");
+  if (lowQualityAccept) {
+    lowQualityAccept.addEventListener("click", hideLowQualityModal);
+  }
   if (selectFilesBtn && fileInput) {
     selectFilesBtn.addEventListener("click", () => {
       fileInput.click();
