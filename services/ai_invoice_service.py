@@ -275,7 +275,12 @@ def contains_forbidden_keyword(name: Optional[str]) -> bool:
     return any(keyword in lowered for keyword in forbidden)
 
 
-def _is_valid_supplier(candidate: Optional[str], company_names, text: Optional[str] = None) -> bool:
+def _is_valid_supplier(
+    candidate: Optional[str],
+    company_names,
+    text: Optional[str] = None,
+    require_tax_id: bool = True,
+) -> bool:
     if candidate is None:
         return False
     value = str(candidate).strip()
@@ -289,7 +294,7 @@ def _is_valid_supplier(candidate: Optional[str], company_names, text: Optional[s
         return False
     if _is_same_entity(value, company_names):
         return False
-    if text and not _supplier_has_near_tax_id_or_iban(text, value):
+    if require_tax_id and text and not _supplier_has_near_tax_id_or_iban(text, value):
         return False
     return True
 
@@ -935,17 +940,18 @@ def analyze_invoice(
     if document_type != "income":
         supplier_source_text = embedded_text if pdf_kind == "original" else extracted_text
         provider_name = provider_name.strip() if isinstance(provider_name, str) else provider_name
+        require_tax_id = pdf_kind != "original"
         if provider_name is not None and not _is_valid_supplier(
-            provider_name, company_names, supplier_source_text
+            provider_name, company_names, supplier_source_text, require_tax_id=require_tax_id
         ):
             provider_name = None
-        if provider_name is None:
+        if provider_name is None and pdf_kind != "original":
             heuristic_supplier = _extract_supplier_from_text(
                 supplier_source_text,
                 company_names,
             )
             if heuristic_supplier is not None and not _is_valid_supplier(
-                heuristic_supplier, company_names, supplier_source_text
+                heuristic_supplier, company_names, supplier_source_text, require_tax_id=True
             ):
                 heuristic_supplier = None
             provider_name = heuristic_supplier

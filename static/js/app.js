@@ -1105,6 +1105,7 @@ function addFiles(fileList) {
       storedFilename: "",
       date: new Date().toISOString().slice(0, 10),
       paymentDate: "",
+      paymentDates: [],
       supplier: "",
       base: "",
       vat: "21",
@@ -1141,6 +1142,7 @@ function addIncomeFiles(fileList) {
       storedFilename: "",
       date: new Date().toISOString().slice(0, 10),
       paymentDate: "",
+      paymentDates: [],
       client: "",
       base: "",
       vat: "21",
@@ -1640,8 +1642,12 @@ function analyzeIncomeForItem(item) {
       if (!item.touched.date && extracted.invoice_date) {
         item.date = extracted.invoice_date;
       }
+      if (Array.isArray(extracted.payment_dates) && extracted.payment_dates.length) {
+        item.paymentDates = extracted.payment_dates.slice();
+      }
       if (!item.paymentDate) {
-        item.paymentDate = computePaymentDate(item.date, extracted.payment_date);
+        const primaryDate = item.paymentDates[0] || extracted.payment_date;
+        item.paymentDate = computePaymentDate(item.date, primaryDate);
       }
       if (!item.touched.base && extracted.base_amount !== null && extracted.base_amount !== undefined) {
         item.base = String(extracted.base_amount);
@@ -1744,6 +1750,7 @@ function uploadIncomePending() {
         originalFilename: item.originalFilename,
         date: item.date,
         paymentDate: computePaymentDate(item.date, item.paymentDate),
+        paymentDates: item.paymentDates || [],
         client: item.client.trim(),
         base: normalized.base || item.base,
         vat: resolveVatRateValue(item.vat),
@@ -1859,8 +1866,12 @@ function analyzeInvoiceForItem(item) {
       if (!item.touched.date && extracted.invoice_date) {
         item.date = extracted.invoice_date;
       }
+      if (Array.isArray(extracted.payment_dates) && extracted.payment_dates.length) {
+        item.paymentDates = extracted.payment_dates.slice();
+      }
       if (!item.paymentDate) {
-        item.paymentDate = computePaymentDate(item.date, extracted.payment_date);
+        const primaryDate = item.paymentDates[0] || extracted.payment_date;
+        item.paymentDate = computePaymentDate(item.date, primaryDate);
       }
       if (!item.touched.base && extracted.base_amount !== null && extracted.base_amount !== undefined) {
         item.base = String(extracted.base_amount);
@@ -1942,6 +1953,7 @@ function uploadPending() {
         originalFilename: item.originalFilename,
         date: item.date,
         paymentDate: computePaymentDate(item.date, item.paymentDate),
+        paymentDates: item.paymentDates || [],
         companyId: getSelectedCompanyId(),
         supplier: item.supplier.trim(),
         base: normalized.base || item.base,

@@ -1,4 +1,5 @@
 import calendar
+import json
 import logging
 import multiprocessing as mp
 import os
@@ -106,6 +107,7 @@ invoices_table = Table(
     Column("vat_amount", Float),
     Column("total_amount", Float, nullable=False),
     Column("payment_date", String),
+    Column("payment_dates", Text),
     Column("ocr_text", Text),
     Column("expense_category", String, nullable=False, server_default="with_invoice"),
     Column("created_at", String, nullable=False),
@@ -126,8 +128,20 @@ income_invoices_table = Table(
     Column("vat_amount", Float),
     Column("total_amount", Float, nullable=False),
     Column("payment_date", String),
+    Column("payment_dates", Text),
     Column("ocr_text", Text),
     Column("created_at", String, nullable=False),
+)
+
+known_suppliers_table = Table(
+    "known_suppliers",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", Integer, nullable=False, server_default=str(DEFAULT_USER_ID)),
+    Column("company_id", Integer, nullable=True),
+    Column("name", String, nullable=False),
+    Column("tax_id", String),
+    Column("confirmed_at", String, nullable=False),
 )
 
 facturacion_table = Table(
@@ -187,6 +201,7 @@ def init_db():
     add_column_if_missing("invoices", "user_id", "INTEGER")
     add_column_if_missing("invoices", "company_id", "INTEGER")
     add_column_if_missing("invoices", "payment_date", "VARCHAR")
+    add_column_if_missing("invoices", "payment_dates", "TEXT")
     if "invoices" in table_names:
         with engine.begin() as conn:
             conn.execute(
@@ -221,6 +236,7 @@ def init_db():
     add_column_if_missing("income_invoices", "user_id", "INTEGER")
     add_column_if_missing("income_invoices", "company_id", "INTEGER")
     add_column_if_missing("income_invoices", "payment_date", "VARCHAR")
+    add_column_if_missing("income_invoices", "payment_dates", "TEXT")
     if "income_invoices" in table_names:
         with engine.begin() as conn:
             conn.execute(
@@ -601,6 +617,61 @@ def compute_payment_date(invoice_date_value, payment_date_value=None):
     except ValueError:
         return None
     return (base_date + timedelta(days=30)).isoformat()
+
+
+def parse_payment_dates(raw_value):
+    if not raw_value:
+        return []
+    if isinstance(raw_value, list):
+        values = raw_value
+    else:
+        value = raw_value
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return []
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    values = parsed
+                else:
+                    values = [parsed]
+            except json.JSONDecodeError:
+                values = [item.strip() for item in re.split(r"[;,]\s*", value) if item.strip()]
+        else:
+            values = [value]
+
+    normalized = []
+    for item in values:
+        norm = normalize_date(str(item)) if item else None
+        if norm:
+            normalized.append(norm)
+    return sorted(set(normalized))
+
+
+def store_known_supplier(conn, user_id, company_id, supplier):
+    if not supplier:
+        return
+    normalized = supplier.strip()
+    if not normalized:
+        return
+    existing = conn.execute(
+        select(known_suppliers_table.c.id)
+        .where(known_suppliers_table.c.user_id == user_id)
+        .where(known_suppliers_table.c.company_id == company_id)
+        .where(func.lower(known_suppliers_table.c.name) == normalized.lower())
+    ).first()
+    if existing:
+        return
+    conn.execute(
+        known_suppliers_table.insert().values(
+            user_id=user_id,
+            company_id=company_id,
+            name=normalized,
+            tax_id=None,
+            confirmed_at=datetime.utcnow().isoformat(),
+        )
+    )
 
 
 def _parse_period_params():
@@ -1441,9 +1512,14 @@ def upload_invoices():
                 vat_rate_raw = str(entry.get("vat") or "").strip()
                 vat_amount = parse_amount(str(entry.get("vatAmount") or ""))
                 total_amount = parse_amount(str(entry.get("total") or ""))
+                payment_dates = parse_payment_dates(
+                    entry.get("paymentDates") or entry.get("payment_dates")
+                )
                 payment_date = compute_payment_date(
                     invoice_date,
-                    entry.get("paymentDate") or entry.get("payment_date"),
+                    entry.get("paymentDate")
+                    or entry.get("payment_date")
+                    or (payment_dates[0] if payment_dates else None),
                 )
                 analysis_text = entry.get("analysisText") or entry.get("ocrText")
                 expense_category = entry.get("expenseCategory") or "with_invoice"
@@ -1506,12 +1582,14 @@ def upload_invoices():
                         vat_amount=vat_amount,
                         total_amount=total_amount,
                         payment_date=payment_date,
+                        payment_dates=json.dumps(payment_dates) if payment_dates else None,
                         ocr_text=analysis_text,
                         expense_category=expense_category,
                         created_at=created_at,
                     )
                 )
                 inserted += 1
+                store_known_supplier(conn, data_owner_id, company_id, supplier)
 
         return jsonify({"ok": True, "inserted": inserted, "errors": errors})
 
@@ -1560,7 +1638,11 @@ def upload_invoices():
                 continue
 
             invoice_date = dates[idx] or date.today().isoformat()
-            payment_date = compute_payment_date(invoice_date, payment_dates[idx] if payment_dates else None)
+            payment_dates_list = parse_payment_dates(payment_dates[idx] if payment_dates else None)
+            payment_date = compute_payment_date(
+                invoice_date,
+                payment_dates[idx] if payment_dates else None,
+            )
             supplier = suppliers[idx].strip() if suppliers[idx] else ""
             base_amount = parse_amount(bases[idx])
             vat_rate = vats[idx].strip() if vats[idx] else ""
@@ -1615,12 +1697,14 @@ def upload_invoices():
                     vat_amount=vat_amount,
                     total_amount=total_amount,
                     payment_date=payment_date,
+                    payment_dates=json.dumps(payment_dates_list) if payment_dates_list else None,
                     ocr_text=None,
                     expense_category="with_invoice",
                     created_at=created_at,
                 )
             )
             inserted += 1
+            store_known_supplier(conn, data_owner_id, company_id, supplier)
 
     return jsonify({"ok": True, "inserted": inserted, "errors": errors})
 
@@ -1899,6 +1983,7 @@ def list_payments():
                 invoices_table.c.id,
                 invoices_table.c.invoice_date,
                 invoices_table.c.payment_date,
+                invoices_table.c.payment_dates,
                 invoices_table.c.supplier,
                 invoices_table.c.total_amount,
                 invoices_table.c.original_filename,
@@ -1922,6 +2007,7 @@ def list_payments():
                 income_invoices_table.c.id,
                 income_invoices_table.c.invoice_date,
                 income_invoices_table.c.payment_date,
+                income_invoices_table.c.payment_dates,
                 income_invoices_table.c.client,
                 income_invoices_table.c.total_amount,
                 income_invoices_table.c.original_filename,
@@ -1943,52 +2029,72 @@ def list_payments():
     items = []
     day_totals = {}
     for row in expense_rows:
-        payment_date = row["payment_date"] or compute_payment_date(row["invoice_date"], None)
-        if not payment_date:
+        payment_dates = parse_payment_dates(row.get("payment_dates"))
+        if not payment_dates:
+            fallback = row["payment_date"] or compute_payment_date(row["invoice_date"], None)
+            if fallback:
+                payment_dates = [fallback]
+        if not payment_dates:
             continue
-        try:
-            payment_dt = date.fromisoformat(payment_date)
-        except ValueError:
-            continue
-        if payment_dt < start or payment_dt > end:
-            continue
-        day = payment_dt.day
-        amount = float(row["total_amount"] or 0)
-        day_totals[day] = round(day_totals.get(day, 0.0) + amount, 2)
-        items.append(
-            {
-                "id": row["id"],
-                "counterparty": row["supplier"],
-                "concept": row["original_filename"],
-                "payment_date": payment_date,
-                "amount": amount,
-                "type": "expense",
-            }
-        )
+        total_amount = float(row["total_amount"] or 0)
+        split_count = len(payment_dates)
+        base_amount = round(total_amount / split_count, 2) if split_count else total_amount
+        amounts = [base_amount] * split_count
+        if split_count > 1:
+            amounts[-1] = round(total_amount - base_amount * (split_count - 1), 2)
+        for payment_date, amount in zip(payment_dates, amounts):
+            try:
+                payment_dt = date.fromisoformat(payment_date)
+            except ValueError:
+                continue
+            if payment_dt < start or payment_dt > end:
+                continue
+            day = payment_dt.day
+            day_totals[day] = round(day_totals.get(day, 0.0) + amount, 2)
+            items.append(
+                {
+                    "id": row["id"],
+                    "counterparty": row["supplier"],
+                    "concept": row["original_filename"],
+                    "payment_date": payment_date,
+                    "amount": amount,
+                    "type": "expense",
+                }
+            )
 
     for row in income_rows:
-        payment_date = row["payment_date"] or compute_payment_date(row["invoice_date"], None)
-        if not payment_date:
+        payment_dates = parse_payment_dates(row.get("payment_dates"))
+        if not payment_dates:
+            fallback = row["payment_date"] or compute_payment_date(row["invoice_date"], None)
+            if fallback:
+                payment_dates = [fallback]
+        if not payment_dates:
             continue
-        try:
-            payment_dt = date.fromisoformat(payment_date)
-        except ValueError:
-            continue
-        if payment_dt < start or payment_dt > end:
-            continue
-        day = payment_dt.day
-        amount = float(row["total_amount"] or 0)
-        day_totals[day] = round(day_totals.get(day, 0.0) + amount, 2)
-        items.append(
-            {
-                "id": row["id"],
-                "counterparty": row["client"],
-                "concept": row["original_filename"],
-                "payment_date": payment_date,
-                "amount": amount,
-                "type": "income",
-            }
-        )
+        total_amount = float(row["total_amount"] or 0)
+        split_count = len(payment_dates)
+        base_amount = round(total_amount / split_count, 2) if split_count else total_amount
+        amounts = [base_amount] * split_count
+        if split_count > 1:
+            amounts[-1] = round(total_amount - base_amount * (split_count - 1), 2)
+        for payment_date, amount in zip(payment_dates, amounts):
+            try:
+                payment_dt = date.fromisoformat(payment_date)
+            except ValueError:
+                continue
+            if payment_dt < start or payment_dt > end:
+                continue
+            day = payment_dt.day
+            day_totals[day] = round(day_totals.get(day, 0.0) + amount, 2)
+            items.append(
+                {
+                    "id": row["id"],
+                    "counterparty": row["client"],
+                    "concept": row["original_filename"],
+                    "payment_date": payment_date,
+                    "amount": amount,
+                    "type": "income",
+                }
+            )
 
     return jsonify({"items": items, "dayTotals": day_totals})
 
@@ -2149,9 +2255,13 @@ def update_invoice(invoice_id):
     payload = request.get_json(silent=True) or {}
 
     invoice_date = payload.get("invoice_date") or ""
+    payment_dates_payload = payload.get("payment_dates") or payload.get("paymentDates")
+    payment_dates = parse_payment_dates(payment_dates_payload)
     payment_date = compute_payment_date(
         invoice_date,
-        payload.get("payment_date") or payload.get("paymentDate"),
+        payload.get("payment_date")
+        or payload.get("paymentDate")
+        or (payment_dates[0] if payment_dates else None),
     )
     supplier = (payload.get("supplier") or "").strip()
     base_amount = parse_amount(str(payload.get("base_amount") or ""))
@@ -2191,22 +2301,26 @@ def update_invoice(invoice_id):
         base_amount, vat_rate, vat_amount, total_amount
     )
 
+    updates = {
+        "invoice_date": invoice_date,
+        "supplier": supplier,
+        "base_amount": base_amount,
+        "vat_rate": vat_rate,
+        "vat_amount": vat_amount,
+        "total_amount": total_amount,
+        "payment_date": payment_date,
+        "expense_category": expense_category,
+    }
+    if payment_dates_payload is not None:
+        updates["payment_dates"] = json.dumps(payment_dates) if payment_dates else None
+
     with engine.begin() as conn:
         result = conn.execute(
             invoices_table.update()
             .where(invoices_table.c.id == invoice_id)
             .where(invoices_table.c.user_id == data_owner_id)
             .where(invoices_table.c.company_id == company_id)
-            .values(
-                invoice_date=invoice_date,
-                supplier=supplier,
-                base_amount=base_amount,
-                vat_rate=vat_rate,
-                vat_amount=vat_amount,
-                total_amount=total_amount,
-                payment_date=payment_date,
-                expense_category=expense_category,
-            )
+            .values(**updates)
         )
 
     if result.rowcount == 0:
@@ -2219,6 +2333,7 @@ def update_invoice(invoice_id):
                 "id": invoice_id,
                 "invoice_date": invoice_date,
                 "payment_date": payment_date,
+                "payment_dates": payment_dates if payment_dates_payload is not None else None,
                 "supplier": supplier,
                 "base_amount": base_amount,
                 "vat_rate": vat_rate,
@@ -2329,9 +2444,14 @@ def create_income_invoices():
             vat_rate_raw = str(entry.get("vat") or "").strip()
             vat_amount = parse_amount(str(entry.get("vatAmount") or ""))
             total_amount = parse_amount(str(entry.get("total") or ""))
+            payment_dates = parse_payment_dates(
+                entry.get("paymentDates") or entry.get("payment_dates")
+            )
             payment_date = compute_payment_date(
                 invoice_date,
-                entry.get("paymentDate") or entry.get("payment_date"),
+                entry.get("paymentDate")
+                or entry.get("payment_date")
+                or (payment_dates[0] if payment_dates else None),
             )
             analysis_text = entry.get("analysisText") or entry.get("ocrText")
 
@@ -2385,6 +2505,7 @@ def create_income_invoices():
                     vat_amount=vat_amount,
                     total_amount=total_amount,
                     payment_date=payment_date,
+                    payment_dates=json.dumps(payment_dates) if payment_dates else None,
                     ocr_text=analysis_text,
                     created_at=created_at,
                 )
@@ -2403,9 +2524,13 @@ def update_income_invoice(invoice_id):
 
     payload = request.get_json(silent=True) or {}
     invoice_date = payload.get("invoice_date") or ""
+    payment_dates_payload = payload.get("payment_dates") or payload.get("paymentDates")
+    payment_dates = parse_payment_dates(payment_dates_payload)
     payment_date = compute_payment_date(
         invoice_date,
-        payload.get("payment_date") or payload.get("paymentDate"),
+        payload.get("payment_date")
+        or payload.get("paymentDate")
+        or (payment_dates[0] if payment_dates else None),
     )
     client = (payload.get("client") or "").strip()
     base_amount = parse_amount(str(payload.get("base_amount") or ""))
@@ -2438,21 +2563,25 @@ def update_income_invoice(invoice_id):
         base_amount, vat_rate, vat_amount, total_amount
     )
 
+    updates = {
+        "invoice_date": invoice_date,
+        "payment_date": payment_date,
+        "client": client,
+        "base_amount": base_amount,
+        "vat_rate": vat_rate,
+        "vat_amount": vat_amount,
+        "total_amount": total_amount,
+    }
+    if payment_dates_payload is not None:
+        updates["payment_dates"] = json.dumps(payment_dates) if payment_dates else None
+
     with engine.begin() as conn:
         result = conn.execute(
             income_invoices_table.update()
             .where(income_invoices_table.c.id == invoice_id)
             .where(income_invoices_table.c.user_id == data_owner_id)
             .where(income_invoices_table.c.company_id == company_id)
-            .values(
-                invoice_date=invoice_date,
-                payment_date=payment_date,
-                client=client,
-                base_amount=base_amount,
-                vat_rate=vat_rate,
-                vat_amount=vat_amount,
-                total_amount=total_amount,
-            )
+            .values(**updates)
         )
 
     if result.rowcount == 0:
