@@ -238,9 +238,32 @@ h1 {
   display: flex;
 }
 
-.calendar-header {
+.calendar-toolbar {
   margin-bottom: 12px;
   color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+}
+
+.calendar-nav-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: #ffffff;
+  color: var(--text);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.2rem;
+  box-shadow: 0 6px 16px rgba(24, 30, 25, 0.08);
+}
+
+.calendar-nav-btn:hover {
+  background: #f1f6f3;
 }
 
 .calendar-wrapper {
@@ -782,6 +805,25 @@ h1 {
 
 .button.ghost:hover {
   transform: translateY(-1px);
+}
+
+.button.small {
+  padding: 6px 12px;
+  font-size: 0.8rem;
+}
+
+.payment-edit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.payment-edit input[type="date"] {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 0.85rem;
 }
 
 .upload-panel {

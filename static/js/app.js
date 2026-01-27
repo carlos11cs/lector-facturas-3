@@ -16,6 +16,9 @@ let annualBillingBaseTotal = 0;
 let annualDeductibleExpenses = 0;
 let currentPayments = null;
 let selectedPaymentDay = null;
+let calendarMonth = null;
+let calendarYear = null;
+let calendarOverride = false;
 let companies = [];
 let selectedCompanyId = null;
 let pendingIncomeFiles = [];
@@ -240,6 +243,49 @@ function computePaymentDate(invoiceDate, paymentDate) {
   return base.toISOString().slice(0, 10);
 }
 
+function getCalendarMonthYear() {
+  if (calendarMonth && calendarYear) {
+    return { month: calendarMonth, year: calendarYear };
+  }
+  return getSelectedMonthYear();
+}
+
+function setCalendarMonthYear(month, year, override = true) {
+  calendarMonth = month;
+  calendarYear = year;
+  calendarOverride = override;
+}
+
+function syncCalendarWithFilters() {
+  if (calendarOverride) {
+    return;
+  }
+  const { month, year } = getSelectedMonthYear();
+  if (month && year) {
+    setCalendarMonthYear(month, year, false);
+  }
+}
+
+function shiftCalendarMonth(delta) {
+  const { month, year } = getCalendarMonthYear();
+  if (!month || !year) {
+    return;
+  }
+  let newMonth = month + delta;
+  let newYear = year;
+  if (newMonth < 1) {
+    newMonth = 12;
+    newYear -= 1;
+  }
+  if (newMonth > 12) {
+    newMonth = 1;
+    newYear += 1;
+  }
+  setCalendarMonthYear(newMonth, newYear, true);
+  selectedPaymentDay = null;
+  refreshPayments();
+}
+
 function withCompanyParam(url) {
   const companyId = getSelectedCompanyId();
   if (!companyId) {
@@ -325,6 +371,8 @@ const reportStatus = document.getElementById("reportStatus");
 const currentUserRole = document.body ? document.body.dataset.userRole : null;
 const paymentCalendar = document.getElementById("paymentCalendar");
 const paymentCalendarTitle = document.getElementById("paymentCalendarTitle");
+const paymentPrevMonth = document.getElementById("paymentPrevMonth");
+const paymentNextMonth = document.getElementById("paymentNextMonth");
 const paymentDayTitle = document.getElementById("paymentDayTitle");
 const paymentDayList = document.getElementById("paymentDayList");
 const paymentDayTotal = document.getElementById("paymentDayTotal");
@@ -2636,6 +2684,62 @@ function renderPaymentCalendar(month, year, data) {
   renderPaymentDayDetails(selectedPaymentDay);
 }
 
+function updatePaymentDateFromCalendar(item, newDate) {
+  if (!newDate) {
+    alert("Selecciona una fecha válida.");
+    return Promise.resolve();
+  }
+  const existingDates = Array.isArray(item.payment_dates) && item.payment_dates.length
+    ? item.payment_dates.slice()
+    : item.payment_date
+    ? [item.payment_date]
+    : [];
+  const updatedDates = existingDates.map((date) =>
+    date === item.payment_date ? newDate : date
+  );
+  if (!updatedDates.includes(newDate)) {
+    updatedDates.push(newDate);
+  }
+  const payload = {
+    invoice_date: item.invoice_date,
+    payment_date: newDate,
+    payment_dates: updatedDates,
+    base_amount: item.base_amount,
+    vat_rate: item.vat_rate,
+    vat_amount: item.vat_amount,
+    total_amount: item.total_amount,
+  };
+  if (item.type === "income") {
+    payload.client = item.counterparty || "";
+  } else {
+    payload.supplier = item.counterparty || "";
+    payload.expense_category = item.expense_category || "with_invoice";
+  }
+  const url = withCompanyParam(
+    item.type === "income"
+      ? `/api/income-invoices/${item.id}`
+      : `/api/invoices/${item.id}`
+  );
+  return fetch(url, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        alert((data.errors || ["Error al actualizar."]).join("\n"));
+        return;
+      }
+      refreshPayments();
+    })
+    .catch(() => {
+      alert("No se pudo actualizar la fecha de vencimiento.");
+    });
+}
+
 function renderPaymentDayDetails(day) {
   if (!paymentDayTitle || !paymentDayList || !paymentDayTotal) {
     return;
@@ -2647,7 +2751,11 @@ function renderPaymentDayDetails(day) {
     return;
   }
   const items = currentPayments.itemsByDay[day];
-  const monthLabel = formatMonthYear(Number(monthSelect.value), Number(yearSelect.value));
+  const { month: calendarMonthValue, year: calendarYearValue } = getCalendarMonthYear();
+  const monthLabel = formatMonthYear(
+    Number(calendarMonthValue || monthSelect?.value),
+    Number(calendarYearValue || yearSelect?.value)
+  );
   paymentDayTitle.textContent = `Pagos del ${day} ${monthLabel}`;
 
   let total = 0;
@@ -2663,10 +2771,41 @@ function renderPaymentDayDetails(day) {
     dateLabel.textContent = item.payment_date;
     const amount = document.createElement("span");
     amount.textContent = `${formatCurrency(item.amount)} (${item.type === "income" ? "Ingreso" : "Gasto"})`;
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "button ghost small";
+    editBtn.textContent = "Editar fecha";
+    const editContainer = document.createElement("div");
+    editContainer.className = "payment-edit";
+    editBtn.addEventListener("click", () => {
+      editContainer.innerHTML = "";
+      const dateInput = document.createElement("input");
+      dateInput.type = "date";
+      dateInput.value = item.payment_date || "";
+      const saveBtn = document.createElement("button");
+      saveBtn.type = "button";
+      saveBtn.className = "button primary small";
+      saveBtn.textContent = "Guardar";
+      const cancelBtn = document.createElement("button");
+      cancelBtn.type = "button";
+      cancelBtn.className = "button ghost small";
+      cancelBtn.textContent = "Cancelar";
+      cancelBtn.addEventListener("click", () => {
+        editContainer.innerHTML = "";
+      });
+      saveBtn.addEventListener("click", () => {
+        updatePaymentDateFromCalendar(item, dateInput.value);
+      });
+      editContainer.appendChild(dateInput);
+      editContainer.appendChild(saveBtn);
+      editContainer.appendChild(cancelBtn);
+    });
     row.appendChild(supplier);
     row.appendChild(concept);
     row.appendChild(dateLabel);
     row.appendChild(amount);
+    row.appendChild(editBtn);
+    row.appendChild(editContainer);
     paymentDayList.appendChild(row);
     total += Number(item.amount || 0);
   });
@@ -2838,7 +2977,8 @@ function refreshPayments() {
   if (!paymentCalendar) {
     return Promise.resolve();
   }
-  const { month, year } = getSelectedMonthYear();
+  syncCalendarWithFilters();
+  const { month, year } = getCalendarMonthYear();
   if (!month || !year) {
     return Promise.resolve();
   }
@@ -4137,6 +4277,12 @@ function bindEvents() {
   if (lowQualityClose) {
     lowQualityClose.addEventListener("click", hideLowQualityModal);
   }
+  if (paymentPrevMonth) {
+    paymentPrevMonth.addEventListener("click", () => shiftCalendarMonth(-1));
+  }
+  if (paymentNextMonth) {
+    paymentNextMonth.addEventListener("click", () => shiftCalendarMonth(1));
+  }
   if (selectFilesBtn && fileInput) {
     selectFilesBtn.addEventListener("click", () => {
       fileInput.click();
@@ -4220,6 +4366,8 @@ function bindEvents() {
     monthSelect.addEventListener("change", () => {
       persistFilters();
       updateHeaderContext();
+      calendarOverride = false;
+      syncCalendarWithFilters();
       refreshAllData();
     });
   }
@@ -4227,6 +4375,8 @@ function bindEvents() {
     yearSelect.addEventListener("change", () => {
       persistFilters();
       updateHeaderContext();
+      calendarOverride = false;
+      syncCalendarWithFilters();
       refreshAllData();
     });
   }
@@ -4238,6 +4388,8 @@ function bindEvents() {
       );
       persistFilters();
       updateHeaderContext();
+      calendarOverride = false;
+      syncCalendarWithFilters();
       refreshAllData();
     });
   }
@@ -4248,6 +4400,8 @@ function bindEvents() {
       applyCompanyTaxModules();
       updatePnlSummary();
       updateHeaderContext();
+      calendarOverride = false;
+      syncCalendarWithFilters();
       renderTable();
       renderIncomeTable();
       loadYears().then(() => refreshAllData());
@@ -4285,6 +4439,7 @@ function init() {
   initNavigation();
   applyRoleVisibility();
   restoreFilters(now);
+  syncCalendarWithFilters();
   loadStaff()
     .then(() => loadCompanies())
     .then(() => loadYears())

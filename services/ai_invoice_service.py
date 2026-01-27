@@ -247,13 +247,33 @@ def looks_like_person(name: Optional[str]) -> bool:
 def has_legal_form(name: Optional[str]) -> bool:
     if not name:
         return False
-    return bool(
-        re.search(
-            r"\b(S\.?L\.?U?\.?|S\.?L\.?L\.?|S\.?A\.?U?\.?|S\.?C\.?P?\.?|S\.?C\.?OOP\.?|COOP(?:ERATIVA)?|S\.?L\.?P\.?|AIE|UTE|CB|LTD|LIMITED|INC|GMBH|SARL|BV|NV|SAS|SRL)\b",
-            name,
-            re.IGNORECASE,
-        )
-    )
+    compact = re.sub(r"[\\s\\.]", "", name).upper()
+    legal_tokens = [
+        "SLU",
+        "SL",
+        "SLL",
+        "SAU",
+        "SA",
+        "SLP",
+        "SCP",
+        "SC",
+        "SCOOP",
+        "COOP",
+        "COOPERATIVA",
+        "AIE",
+        "UTE",
+        "CB",
+        "LTD",
+        "LIMITED",
+        "INC",
+        "GMBH",
+        "SARL",
+        "BV",
+        "NV",
+        "SAS",
+        "SRL",
+    ]
+    return any(token in compact for token in legal_tokens)
 
 
 def contains_forbidden_keyword(name: Optional[str]) -> bool:
@@ -290,11 +310,11 @@ def _is_valid_supplier(
         return False
     if contains_forbidden_keyword(value):
         return False
-    if not has_legal_form(value):
+    has_form = has_legal_form(value)
+    has_tax = bool(text and _supplier_has_near_tax_id_or_iban(text, value))
+    if not has_form and not has_tax:
         return False
     if _is_same_entity(value, company_names):
-        return False
-    if require_tax_id and text and not _supplier_has_near_tax_id_or_iban(text, value):
         return False
     return True
 
@@ -977,9 +997,8 @@ def analyze_invoice(
     if document_type != "income":
         supplier_source_text = embedded_text if pdf_kind == "original" else extracted_text
         provider_name = provider_name.strip() if isinstance(provider_name, str) else provider_name
-        require_tax_id = pdf_kind != "original"
         if provider_name is not None and not _is_valid_supplier(
-            provider_name, company_names, supplier_source_text, require_tax_id=require_tax_id
+            provider_name, company_names, supplier_source_text, require_tax_id=False
         ):
             provider_name = None
         if provider_name is None and analysis_status == "ok":
@@ -988,13 +1007,13 @@ def analyze_invoice(
             )
             if learned_supplier:
                 provider_name = learned_supplier
-        if provider_name is None and pdf_kind != "original":
+        if provider_name is None and analysis_status == "ok":
             heuristic_supplier = _extract_supplier_from_text(
                 supplier_source_text,
                 company_names,
             )
             if heuristic_supplier is not None and not _is_valid_supplier(
-                heuristic_supplier, company_names, supplier_source_text, require_tax_id=True
+                heuristic_supplier, company_names, supplier_source_text, require_tax_id=False
             ):
                 heuristic_supplier = None
             provider_name = heuristic_supplier

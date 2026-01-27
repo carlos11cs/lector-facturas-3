@@ -10,6 +10,7 @@ from functools import wraps
 from uuid import uuid4
 
 import httpx
+import fitz
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for, g
 from sqlalchemy import (
     Boolean,
@@ -801,10 +802,12 @@ def _report_period_label(year, months, quarter=None):
     return str(year)
 
 
-def _empty_extracted():
+def _empty_extracted(analysis_status="ok"):
     return {
+        "analysis_status": analysis_status,
         "provider_name": None,
         "invoice_date": None,
+        "payment_dates": [],
         "payment_date": None,
         "base_amount": None,
         "vat_rate": None,
@@ -813,6 +816,23 @@ def _empty_extracted():
         "analysis_text": "",
         "validation": {"is_consistent": None, "difference": None},
     }
+
+
+def _pdf_has_text(data: bytes, min_chars: int = 100) -> bool:
+    try:
+        with fitz.open(stream=data, filetype="pdf") as doc:
+            total = 0
+            for idx, page in enumerate(doc):
+                text = page.get_text("text") or ""
+                total += len(text.strip())
+                if total >= min_chars:
+                    return True
+                if idx >= 1:
+                    break
+    except Exception as exc:
+        app.logger.warning("No se pudo verificar texto embebido en PDF: %s", exc)
+        return False
+    return False
 
 
 def _analysis_worker(
@@ -846,6 +866,7 @@ def _analyze_invoice_with_timeout(
     document_type="expense",
     company_names=None,
     known_suppliers=None,
+    fallback_status=None,
 ):
     ctx = mp.get_context("spawn")
     queue = ctx.Queue(1)
@@ -872,7 +893,7 @@ def _analyze_invoice_with_timeout(
             stored_name,
             ANALYSIS_TIMEOUT_SECONDS,
         )
-        return _empty_extracted()
+        return _empty_extracted(fallback_status or "ok")
 
     if process.exitcode != 0:
         app.logger.warning(
@@ -880,7 +901,7 @@ def _analyze_invoice_with_timeout(
             stored_name,
             process.exitcode,
         )
-        return _empty_extracted()
+        return _empty_extracted(fallback_status or "ok")
 
     try:
         result = queue.get_nowait()
@@ -889,14 +910,14 @@ def _analyze_invoice_with_timeout(
             "Analisis sin resultado para %s. Se pasa a modo manual.",
             stored_name,
         )
-        return _empty_extracted()
+        return _empty_extracted(fallback_status or "ok")
 
     if not isinstance(result, dict) or result.get("__error__"):
         app.logger.warning(
             "Analisis con error para %s. Se pasa a modo manual.",
             stored_name,
         )
-        return _empty_extracted()
+        return _empty_extracted(fallback_status or "ok")
 
     return result
 
@@ -1766,6 +1787,13 @@ def analyze_invoice_api():
     file_bytes = file.read()
     safe_name = secure_filename(original_name)
     stored_name = f"{uuid4().hex}_{safe_name}"
+    fallback_status = None
+    mime_lower = (file.mimetype or "").lower()
+    if mime_lower.startswith("image/"):
+        fallback_status = "low_quality_scan"
+    elif mime_lower == "application/pdf":
+        if not _pdf_has_text(file_bytes, min_chars=100):
+            fallback_status = "low_quality_scan"
     try:
         storage_url = upload_bytes(file_bytes, stored_name, file.mimetype)
     except Exception:
@@ -1780,6 +1808,7 @@ def analyze_invoice_api():
         document_type=document_type,
         company_names=company_names,
         known_suppliers=known_suppliers,
+        fallback_status=fallback_status,
     )
 
     app.logger.info(
@@ -2017,8 +2046,12 @@ def list_payments():
                 invoices_table.c.payment_date,
                 invoices_table.c.payment_dates,
                 invoices_table.c.supplier,
+                invoices_table.c.base_amount,
+                invoices_table.c.vat_rate,
+                invoices_table.c.vat_amount,
                 invoices_table.c.total_amount,
                 invoices_table.c.original_filename,
+                invoices_table.c.expense_category,
             )
             .where(
                 (
@@ -2041,6 +2074,9 @@ def list_payments():
                 income_invoices_table.c.payment_date,
                 income_invoices_table.c.payment_dates,
                 income_invoices_table.c.client,
+                income_invoices_table.c.base_amount,
+                income_invoices_table.c.vat_rate,
+                income_invoices_table.c.vat_amount,
                 income_invoices_table.c.total_amount,
                 income_invoices_table.c.original_filename,
             )
@@ -2089,6 +2125,15 @@ def list_payments():
                     "counterparty": row["supplier"],
                     "concept": row["original_filename"],
                     "payment_date": payment_date,
+                    "payment_dates": payment_dates,
+                    "invoice_date": row["invoice_date"],
+                    "base_amount": float(row["base_amount"] or 0),
+                    "vat_rate": int(row["vat_rate"] or 0),
+                    "vat_amount": float(row["vat_amount"] or 0)
+                    if row["vat_amount"] is not None
+                    else None,
+                    "total_amount": total_amount,
+                    "expense_category": row["expense_category"] or "with_invoice",
                     "amount": amount,
                     "type": "expense",
                 }
@@ -2123,6 +2168,14 @@ def list_payments():
                     "counterparty": row["client"],
                     "concept": row["original_filename"],
                     "payment_date": payment_date,
+                    "payment_dates": payment_dates,
+                    "invoice_date": row["invoice_date"],
+                    "base_amount": float(row["base_amount"] or 0),
+                    "vat_rate": int(row["vat_rate"] or 0),
+                    "vat_amount": float(row["vat_amount"] or 0)
+                    if row["vat_amount"] is not None
+                    else None,
+                    "total_amount": total_amount,
                     "amount": amount,
                     "type": "income",
                 }
