@@ -21,6 +21,7 @@ let selectedCompanyId = null;
 let pendingIncomeFiles = [];
 let currentIncomeInvoices = [];
 let staffMembers = [];
+const lowQualityDismissedIds = new Set();
 
 const monthNames = [
   "Enero",
@@ -54,7 +55,7 @@ const noInvoiceTypeLabels = {
 const ANALYSIS_ERROR_MESSAGE =
   "No se ha podido analizar la factura automáticamente. Puedes introducir los datos manualmente.";
 const LOW_QUALITY_SCAN_MESSAGE =
-  "La calidad de la factura escaneada no es óptima y no se puede leer correctamente el texto. Por favor, introduce los datos manualmente.";
+  "No se ha podido analizar la factura automáticamente. La calidad del escaneo no es suficiente para leer correctamente el texto. Por favor, introduce los datos manualmente.";
 
 function showLowQualityModal() {
   const modal = document.getElementById("lowQualityModal");
@@ -1630,7 +1631,10 @@ function analyzeIncomeForItem(item) {
         item.analysisPending = false;
         item.analysisError = true;
         item.analysisErrorMessage = LOW_QUALITY_SCAN_MESSAGE;
-        showLowQualityModal();
+        if (!lowQualityDismissedIds.has(item.id)) {
+          showLowQualityModal();
+          lowQualityDismissedIds.add(item.id);
+        }
         renderIncomeTable();
         return;
       }
@@ -1851,7 +1855,10 @@ function analyzeInvoiceForItem(item) {
         item.analysisPending = false;
         item.analysisError = true;
         item.analysisErrorMessage = LOW_QUALITY_SCAN_MESSAGE;
-        showLowQualityModal();
+        if (!lowQualityDismissedIds.has(item.id)) {
+          showLowQualityModal();
+          lowQualityDismissedIds.add(item.id);
+        }
         renderTable();
         return;
       }
@@ -4117,8 +4124,12 @@ function bindEvents() {
   const selectFolderBtn = document.getElementById("selectFolder");
   const incomeSelectFilesBtn = document.getElementById("incomeSelectFiles");
   const lowQualityAccept = document.getElementById("lowQualityAccept");
+  const lowQualityClose = document.getElementById("lowQualityClose");
   if (lowQualityAccept) {
     lowQualityAccept.addEventListener("click", hideLowQualityModal);
+  }
+  if (lowQualityClose) {
+    lowQualityClose.addEventListener("click", hideLowQualityModal);
   }
   if (selectFilesBtn && fileInput) {
     selectFilesBtn.addEventListener("click", () => {

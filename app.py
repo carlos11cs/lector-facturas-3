@@ -674,6 +674,15 @@ def store_known_supplier(conn, user_id, company_id, supplier):
     )
 
 
+def fetch_known_suppliers(conn, user_id, company_id):
+    rows = conn.execute(
+        select(known_suppliers_table.c.name)
+        .where(known_suppliers_table.c.user_id == user_id)
+        .where(known_suppliers_table.c.company_id == company_id)
+    ).scalars().all()
+    return [name for name in rows if name]
+
+
 def _parse_period_params():
     year = request.args.get("year") or request.args.get("anio") or request.args.get("año")
     quarter = request.args.get("quarter")
@@ -806,7 +815,15 @@ def _empty_extracted():
     }
 
 
-def _analysis_worker(file_bytes, filename, mime_type, document_type, company_names, queue):
+def _analysis_worker(
+    file_bytes,
+    filename,
+    mime_type,
+    document_type,
+    company_names,
+    known_suppliers,
+    queue,
+):
     try:
         result = analyze_invoice(
             file_bytes=file_bytes,
@@ -814,6 +831,7 @@ def _analysis_worker(file_bytes, filename, mime_type, document_type, company_nam
             mime_type=mime_type,
             document_type=document_type,
             company_names=company_names,
+            known_suppliers=known_suppliers,
         )
         queue.put(result)
     except Exception as exc:
@@ -827,12 +845,21 @@ def _analyze_invoice_with_timeout(
     mime_type,
     document_type="expense",
     company_names=None,
+    known_suppliers=None,
 ):
     ctx = mp.get_context("spawn")
     queue = ctx.Queue(1)
     process = ctx.Process(
         target=_analysis_worker,
-        args=(file_bytes, filename, mime_type, document_type, company_names or [], queue),
+        args=(
+            file_bytes,
+            filename,
+            mime_type,
+            document_type,
+            company_names or [],
+            known_suppliers or [],
+            queue,
+        ),
     )
     process.start()
     process.join(ANALYSIS_TIMEOUT_SECONDS)
@@ -1722,6 +1749,7 @@ def analyze_invoice_api():
     document_type = request.form.get("document_type") or request.args.get("document_type") or "expense"
     company_id = get_company_id(required=False)
     company_names = []
+    known_suppliers = []
     if company_id and is_company_accessible(company_id):
         with engine.connect() as conn:
             row = conn.execute(
@@ -1731,6 +1759,7 @@ def analyze_invoice_api():
             ).mappings().first()
             if row:
                 company_names = [row.get("display_name"), row.get("legal_name")]
+            known_suppliers = fetch_known_suppliers(conn, get_data_owner_id(), company_id)
     app.logger.info("Solicitud de análisis recibida: %s (%s)", original_name, file.mimetype)
     file_bytes = file.read()
     safe_name = secure_filename(original_name)
@@ -1748,6 +1777,7 @@ def analyze_invoice_api():
         file.mimetype,
         document_type=document_type,
         company_names=company_names,
+        known_suppliers=known_suppliers,
     )
 
     app.logger.info(
@@ -2322,6 +2352,8 @@ def update_invoice(invoice_id):
             .where(invoices_table.c.company_id == company_id)
             .values(**updates)
         )
+        if result.rowcount:
+            store_known_supplier(conn, data_owner_id, company_id, supplier)
 
     if result.rowcount == 0:
         return jsonify({"ok": False, "errors": ["Factura no encontrada."]}), 404

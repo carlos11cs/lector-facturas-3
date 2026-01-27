@@ -513,6 +513,24 @@ def _extract_supplier_from_text(text: str, company_names=None) -> Optional[str]:
     return _select_best_supplier(text, company_names)
 
 
+def _match_known_supplier(text: str, known_suppliers: Optional[List[str]], company_names=None) -> Optional[str]:
+    if not text or not known_suppliers:
+        return None
+    normalized_text = _normalize_entity_name(text)
+    if not normalized_text:
+        return None
+    for name in known_suppliers:
+        if not name:
+            continue
+        cleaned = str(name).strip()
+        if not cleaned:
+            continue
+        if _normalize_entity_name(cleaned) in normalized_text:
+            if _is_valid_supplier(cleaned, company_names, text, require_tax_id=False):
+                return cleaned
+    return None
+
+
 def _validate_math(
     base_amount: Optional[float],
     vat_amount: Optional[float],
@@ -745,6 +763,7 @@ def analyze_invoice(
     mime_type: Optional[str] = None,
     document_type: str = "expense",
     company_names: Optional[list] = None,
+    known_suppliers: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     client = _get_client()
     if file_bytes is None:
@@ -945,6 +964,12 @@ def analyze_invoice(
             provider_name, company_names, supplier_source_text, require_tax_id=require_tax_id
         ):
             provider_name = None
+        if provider_name is None and analysis_status == "ok":
+            learned_supplier = _match_known_supplier(
+                supplier_source_text, known_suppliers, company_names
+            )
+            if learned_supplier:
+                provider_name = learned_supplier
         if provider_name is None and pdf_kind != "original":
             heuristic_supplier = _extract_supplier_from_text(
                 supplier_source_text,
