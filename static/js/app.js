@@ -4010,7 +4010,7 @@ function exportPnlPdf() {
 
   doc.setFont("helvetica", "bold");
   doc.setFontSize(18);
-  doc.text("Cuenta de resultados", margin, y);
+  doc.text("Cuenta de pérdidas y ganancias (estimada)", margin, y);
 
   doc.setFont("helvetica", "normal");
   doc.setFontSize(11);
@@ -4038,11 +4038,11 @@ function exportPnlPdf() {
 
   doc.setFont("helvetica", "normal");
   const rows = [
-    ["Ingresos", incomeValue],
-    ["Gastos deducibles", expensesValue],
-    ["Resultado antes de impuestos", preTaxValue],
-    ["Impuestos estimados", taxesValue],
-    ["Resultado neto", netValue],
+    ["Importe neto de la cifra de negocios", incomeValue],
+    ["Aprovisionamientos y otros gastos de explotación", expensesValue],
+    ["Resultado de explotación", preTaxValue],
+    ["Impuesto sobre beneficios (estimado)", taxesValue],
+    ["Resultado del ejercicio", netValue],
   ];
 
   rows.forEach(([label, value]) => {
