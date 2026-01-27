@@ -527,6 +527,8 @@ def _get_ocr_reader():
     download_env = os.getenv("EASYOCR_DOWNLOAD_ENABLED", "").strip().lower()
     download_enabled = download_env in {"1", "true", "yes"}
     runtime_env = os.getenv("ENV", "").strip().lower()
+    if runtime_env == "production":
+        download_enabled = False
     model_contents = []
     if os.path.isdir(model_dir):
         try:
@@ -534,7 +536,7 @@ def _get_ocr_reader():
         except OSError:
             model_contents = []
     if not os.path.isdir(model_dir) or not model_contents:
-        if runtime_env == "production" and not download_enabled:
+        if runtime_env == "production":
             logger.warning(
                 "Modelos EasyOCR no encontrados y descarga deshabilitada en producción. OCR omitido."
             )
