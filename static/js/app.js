@@ -1116,6 +1116,7 @@ function addFiles(fileList) {
       analysisPending: true,
       analysisError: false,
       analysisErrorMessage: "",
+      analysisStatus: "ok",
       touched: {
         date: false,
         supplier: false,
@@ -1153,6 +1154,7 @@ function addIncomeFiles(fileList) {
       analysisPending: true,
       analysisError: false,
       analysisErrorMessage: "",
+      analysisStatus: "ok",
       touched: {
         date: false,
         client: false,
@@ -1627,6 +1629,7 @@ function analyzeIncomeForItem(item) {
       const extracted = data.extracted || {};
       item.storedFilename = data.storedFilename || "";
       item.analysisText = extracted.analysis_text || "";
+      item.analysisStatus = extracted.analysis_status || "ok";
       if (extracted.analysis_status === "low_quality_scan") {
         item.analysisPending = false;
         item.analysisError = true;
@@ -1755,6 +1758,7 @@ function uploadIncomePending() {
         date: item.date,
         paymentDate: computePaymentDate(item.date, item.paymentDate),
         paymentDates: item.paymentDates || [],
+        analysisStatus: item.analysisStatus || "ok",
         client: item.client.trim(),
         base: normalized.base || item.base,
         vat: resolveVatRateValue(item.vat),
@@ -1851,6 +1855,7 @@ function analyzeInvoiceForItem(item) {
       const extracted = data.extracted || {};
       item.storedFilename = data.storedFilename || "";
       item.analysisText = extracted.analysis_text || "";
+      item.analysisStatus = extracted.analysis_status || "ok";
       if (extracted.analysis_status === "low_quality_scan") {
         item.analysisPending = false;
         item.analysisError = true;
@@ -1961,6 +1966,7 @@ function uploadPending() {
         date: item.date,
         paymentDate: computePaymentDate(item.date, item.paymentDate),
         paymentDates: item.paymentDates || [],
+        analysisStatus: item.analysisStatus || "ok",
         companyId: getSelectedCompanyId(),
         supplier: item.supplier.trim(),
         base: normalized.base || item.base,

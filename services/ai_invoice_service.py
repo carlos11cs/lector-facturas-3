@@ -249,7 +249,7 @@ def has_legal_form(name: Optional[str]) -> bool:
         return False
     return bool(
         re.search(
-            r"\b(S\.?L\.?U?\.?|S\.?A\.?U?\.?|S\.?C\.?|COOP(?:ERATIVA)?|S\.?L\.?P\.?|UTE|CB|LTD|LIMITED|INC|GMBH|SARL|BV|NV)\b",
+            r"\b(S\.?L\.?U?\.?|S\.?L\.?L\.?|S\.?A\.?U?\.?|S\.?C\.?P?\.?|S\.?C\.?OOP\.?|COOP(?:ERATIVA)?|S\.?L\.?P\.?|AIE|UTE|CB|LTD|LIMITED|INC|GMBH|SARL|BV|NV|SAS|SRL)\b",
             name,
             re.IGNORECASE,
         )
@@ -605,6 +605,24 @@ def _is_low_quality_ocr(text: str, min_chars: int = 200) -> bool:
     return False
 
 
+def _has_amount_hints(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    keywords = ["total", "base", "imponible", "iva", "vat", "subtotal"]
+    amount_pattern = r"\d{1,3}(?:[\.\s]\d{3})*(?:[,\.\u00b7]\d{2})"
+    percent_pattern = r"\d{1,2}\s?%"
+    if any(keyword in lowered for keyword in keywords):
+        for line in text.splitlines():
+            line_lower = line.lower()
+            if any(keyword in line_lower for keyword in keywords):
+                if re.search(amount_pattern, line) or re.search(percent_pattern, line):
+                    return True
+    if re.search(amount_pattern, text) and re.search(percent_pattern, text):
+        return True
+    return False
+
+
 def _extract_pdf_text(file_path: str) -> str:
     with fitz.open(file_path) as doc:
         parts = []
@@ -831,7 +849,7 @@ def analyze_invoice(
     )
 
     analysis_status = "ok"
-    if used_ocr and _is_low_quality_ocr(extracted_text):
+    if used_ocr and _is_low_quality_ocr(extracted_text) and not _has_amount_hints(extracted_text):
         analysis_status = "low_quality_scan"
         logger.warning(
             "OCR de baja calidad (%s). Se omite analisis IA.", filename

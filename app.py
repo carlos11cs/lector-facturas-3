@@ -1549,6 +1549,7 @@ def upload_invoices():
                     or (payment_dates[0] if payment_dates else None),
                 )
                 analysis_text = entry.get("analysisText") or entry.get("ocrText")
+                analysis_status = entry.get("analysisStatus") or entry.get("analysis_status") or "ok"
                 expense_category = entry.get("expenseCategory") or "with_invoice"
 
                 if not stored_name:
@@ -1616,7 +1617,8 @@ def upload_invoices():
                     )
                 )
                 inserted += 1
-                store_known_supplier(conn, data_owner_id, company_id, supplier)
+                if analysis_text and analysis_status != "low_quality_scan":
+                    store_known_supplier(conn, data_owner_id, company_id, supplier)
 
         return jsonify({"ok": True, "inserted": inserted, "errors": errors})
 
@@ -1731,7 +1733,7 @@ def upload_invoices():
                 )
             )
             inserted += 1
-            store_known_supplier(conn, data_owner_id, company_id, supplier)
+            # Entrada manual (sin OCR/IA) no genera aprendizaje automático.
 
     return jsonify({"ok": True, "inserted": inserted, "errors": errors})
 
@@ -2345,6 +2347,12 @@ def update_invoice(invoice_id):
         updates["payment_dates"] = json.dumps(payment_dates) if payment_dates else None
 
     with engine.begin() as conn:
+        existing = conn.execute(
+            select(invoices_table.c.ocr_text)
+            .where(invoices_table.c.id == invoice_id)
+            .where(invoices_table.c.user_id == data_owner_id)
+            .where(invoices_table.c.company_id == company_id)
+        ).mappings().first()
         result = conn.execute(
             invoices_table.update()
             .where(invoices_table.c.id == invoice_id)
@@ -2352,7 +2360,7 @@ def update_invoice(invoice_id):
             .where(invoices_table.c.company_id == company_id)
             .values(**updates)
         )
-        if result.rowcount:
+        if result.rowcount and existing and existing.get("ocr_text"):
             store_known_supplier(conn, data_owner_id, company_id, supplier)
 
     if result.rowcount == 0:
