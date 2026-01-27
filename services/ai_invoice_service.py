@@ -279,9 +279,9 @@ def _has_tax_id(line: str) -> bool:
     if not line:
         return False
     patterns = [
-        r"\b[A-HJ-NP-SUVW]\d{7}[0-9A-J]\b",  # CIF
-        r"\b\d{8}[A-Z]\b",  # NIF
-        r"\b[A-Z]{2}\s?\d{6,12}\b",  # VAT/IVA intracomunitario
+        r"\b[A-HJ-NP-SUVW]\s?-?\d{7}\s?-?[0-9A-J]\b",  # CIF con separadores
+        r"\b\d{8}\s?-?[A-Z]\b",  # NIF con separador
+        r"\b[A-Z]{2}\s?-?\d{6,12}\b",  # VAT/IVA intracomunitario
     ]
     return any(re.search(pattern, line, re.IGNORECASE) for pattern in patterns)
 
@@ -526,6 +526,7 @@ def _get_ocr_reader():
         logger.warning("Directorio de modelos EasyOCR no existe: %s", model_dir)
     download_env = os.getenv("EASYOCR_DOWNLOAD_ENABLED", "").strip().lower()
     download_enabled = download_env in {"1", "true", "yes"}
+    runtime_env = os.getenv("ENV", "").strip().lower()
     model_contents = []
     if os.path.isdir(model_dir):
         try:
@@ -533,8 +534,14 @@ def _get_ocr_reader():
         except OSError:
             model_contents = []
     if not os.path.isdir(model_dir) or not model_contents:
-        download_enabled = True
-        logger.warning("Modelos EasyOCR no encontrados. Se habilita descarga automática.")
+        if runtime_env == "production" and not download_enabled:
+            logger.warning(
+                "Modelos EasyOCR no encontrados y descarga deshabilitada en producción. OCR omitido."
+            )
+            return None
+        if not download_enabled:
+            download_enabled = True
+            logger.warning("Modelos EasyOCR no encontrados. Se habilita descarga automática.")
     try:
         _ocr_reader = easyocr.Reader(
             ["es", "en"],

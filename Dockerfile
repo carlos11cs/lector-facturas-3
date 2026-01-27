@@ -27,7 +27,12 @@ import easyocr
 import os
 os.environ["EASYOCR_MODEL_STORAGE_DIRECTORY"] = os.getenv("EASYOCR_MODEL_STORAGE_DIRECTORY", "/opt/easyocr-models")
 # Preload models at build time so runtime doesn't download.
-easyocr.Reader(["es", "en"], gpu=False)
+easyocr.Reader(
+    ["es", "en"],
+    gpu=False,
+    model_storage_directory=os.environ["EASYOCR_MODEL_STORAGE_DIRECTORY"],
+    download_enabled=True,
+)
 PY
 
 COPY . .
