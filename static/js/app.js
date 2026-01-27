@@ -373,6 +373,8 @@ const paymentCalendar = document.getElementById("paymentCalendar");
 const paymentCalendarTitle = document.getElementById("paymentCalendarTitle");
 const paymentPrevMonth = document.getElementById("paymentPrevMonth");
 const paymentNextMonth = document.getElementById("paymentNextMonth");
+const paymentMonthTotal = document.getElementById("paymentMonthTotal");
+const paymentMonthEmpty = document.getElementById("paymentMonthEmpty");
 const paymentDayTitle = document.getElementById("paymentDayTitle");
 const paymentDayList = document.getElementById("paymentDayList");
 const paymentDayTotal = document.getElementById("paymentDayTotal");
@@ -2617,6 +2619,16 @@ function renderPaymentCalendar(month, year, data) {
   paymentCalendar.innerHTML = "";
   if (paymentCalendarTitle) {
     paymentCalendarTitle.textContent = formatMonthYear(month, year);
+  }
+  const monthTotal = Object.values(data.dayTotals || {}).reduce(
+    (sum, value) => sum + (Number(value) || 0),
+    0
+  );
+  if (paymentMonthTotal) {
+    paymentMonthTotal.textContent = `Total a pagar del mes: ${formatCurrency(monthTotal)}`;
+  }
+  if (paymentMonthEmpty) {
+    paymentMonthEmpty.style.display = monthTotal > 0 ? "none" : "block";
   }
 
   const dayNames = ["L", "M", "X", "J", "V", "S", "D"];
