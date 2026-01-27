@@ -241,7 +241,7 @@ def _is_valid_supplier(candidate: Optional[str], company_names, text: Optional[s
         return False
     if _is_same_entity(value, company_names):
         return False
-    if text and not _supplier_has_near_tax_id(text, value):
+    if text and not _supplier_has_near_tax_id_or_iban(text, value):
         return False
     return True
 
@@ -286,7 +286,17 @@ def _has_tax_id(line: str) -> bool:
     return any(re.search(pattern, line, re.IGNORECASE) for pattern in patterns)
 
 
-def _supplier_has_near_tax_id(text: str, supplier: str, window: int = 2) -> bool:
+def _has_iban(line: str) -> bool:
+    if not line:
+        return False
+    patterns = [
+        r"\bES\d{22}\b",
+        r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b",
+    ]
+    return any(re.search(pattern, line, re.IGNORECASE) for pattern in patterns)
+
+
+def _supplier_has_near_tax_id_or_iban(text: str, supplier: str, window: int = 2) -> bool:
     if not text or not supplier:
         return False
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -298,7 +308,7 @@ def _supplier_has_near_tax_id(text: str, supplier: str, window: int = 2) -> bool
             start = max(0, idx - window)
             end = min(len(lines), idx + window + 1)
             for candidate in lines[start:end]:
-                if _has_tax_id(candidate):
+                if _has_tax_id(candidate) or _has_iban(candidate) or "iban" in candidate.lower():
                     return True
             return False
     return False
