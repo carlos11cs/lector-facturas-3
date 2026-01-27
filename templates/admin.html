@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ledged · Panel de gestorías</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body class="admin-body">
+  <main class="admin-page">
+    <header class="panel-header">
+      <div>
+        <h2>Panel de gestorías</h2>
+        <p>Gestión interna de Ledged (solo OWNER).</p>
+      </div>
+      <a class="button ghost" href="{{ url_for('app_home') }}">Volver a la app</a>
+    </header>
+
+    <section class="panel">
+      <div class="billing-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Gestoría</th>
+              <th>Email</th>
+              <th>Plan</th>
+              <th>Estado</th>
+              <th>Nº empresas</th>
+              <th>Nº usuarios</th>
+              <th>Último login</th>
+              <th>Stripe</th>
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for agency in agencies %}
+            <tr>
+              <td>{{ agency.name }}</td>
+              <td>{{ agency.email }}</td>
+              <td>{{ agency.plan }}</td>
+              <td>{{ agency.status }}</td>
+              <td>{{ agency.company_count }}</td>
+              <td>{{ agency.user_count }}</td>
+              <td>{{ agency.last_login or '-' }}</td>
+              <td>{{ agency.stripe_status }}</td>
+              <td>
+                <form method="post" action="{{ url_for('admin_update_plan', agency_id=agency.id) }}" style="margin-bottom: 6px;">
+                  <select name="plan">
+                    {% for plan in ['starter','pro','advanced'] %}
+                    <option value="{{ plan }}" {% if plan == agency.plan %}selected{% endif %}>{{ plan }}</option>
+                    {% endfor %}
+                  </select>
+                  <button type="submit" class="button ghost small">Actualizar plan</button>
+                </form>
+                <form method="post" action="{{ url_for('admin_update_status', agency_id=agency.id) }}" style="margin-bottom: 6px;">
+                  {% if agency.status == 'suspended' %}
+                  <input type="hidden" name="status" value="active" />
+                  <button type="submit" class="button primary small">Reactivar</button>
+                  {% else %}
+                  <input type="hidden" name="status" value="suspended" />
+                  <button type="submit" class="button ghost small">Suspender</button>
+                  {% endif %}
+                </form>
+                <form method="post" action="{{ url_for('admin_reset_trial', agency_id=agency.id) }}">
+                  <button type="submit" class="button ghost small">Reset trial</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

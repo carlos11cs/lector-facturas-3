@@ -25,6 +25,20 @@ body {
   min-height: 100vh;
 }
 
+.admin-body {
+  background: radial-gradient(circle at top left, #f9fbf7 0%, var(--bg) 55%),
+    linear-gradient(135deg, #f2f8f3 0%, #edf1f0 100%);
+}
+
+.admin-page {
+  max-width: 1200px;
+  margin: 32px auto 48px;
+  padding: 0 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
 .app-shell {
   display: flex;
   min-height: 100vh;

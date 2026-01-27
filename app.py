@@ -83,6 +83,22 @@ users_table = Table(
     Column("is_active", Boolean, nullable=False, server_default="1"),
 )
 
+agencies_table = Table(
+    "agencies",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("name", String, nullable=False),
+    Column("email", String, nullable=False),
+    Column("phone", String),
+    Column("plan", String, nullable=False),  # starter | pro | advanced
+    Column("status", String, nullable=False),  # trial | active | suspended
+    Column("stripe_customer_id", String),
+    Column("stripe_subscription_id", String),
+    Column("trial_ends_at", String),
+    Column("created_at", String, nullable=False),
+    Column("last_login_at", String),
+)
+
 password_resets_table = Table(
     "password_resets",
     metadata,
@@ -272,6 +288,48 @@ def init_db():
                 .values(agency_id=users_table.c.id)
             )
 
+    add_column_if_missing("agencies", "phone", "VARCHAR")
+    add_column_if_missing("agencies", "name", "VARCHAR")
+    add_column_if_missing("agencies", "email", "VARCHAR")
+    add_column_if_missing("agencies", "plan", "VARCHAR")
+    add_column_if_missing("agencies", "status", "VARCHAR")
+    add_column_if_missing("agencies", "stripe_customer_id", "VARCHAR")
+    add_column_if_missing("agencies", "stripe_subscription_id", "VARCHAR")
+    add_column_if_missing("agencies", "trial_ends_at", "VARCHAR")
+    add_column_if_missing("agencies", "last_login_at", "VARCHAR")
+    if "agencies" in table_names:
+        with engine.begin() as conn:
+            existing_ids = {
+                row[0] for row in conn.execute(select(agencies_table.c.id)).all()
+            }
+            agency_users = conn.execute(
+                select(
+                    users_table.c.id,
+                    users_table.c.email,
+                    users_table.c.created_at,
+                ).where(users_table.c.role == "agency")
+            ).mappings().all()
+            for user in agency_users:
+                if user["id"] in existing_ids:
+                    continue
+                created_at = user.get("created_at") or datetime.utcnow().isoformat()
+                trial_ends = (datetime.utcnow() + timedelta(days=14)).isoformat()
+                conn.execute(
+                    agencies_table.insert().values(
+                        id=user["id"],
+                        name=user["email"],
+                        email=user["email"],
+                        phone=None,
+                        plan="starter",
+                        status="trial",
+                        stripe_customer_id=None,
+                        stripe_subscription_id=None,
+                        trial_ends_at=trial_ends,
+                        created_at=created_at,
+                        last_login_at=None,
+                    )
+                )
+
 
 def allowed_file(filename):
     _, ext = os.path.splitext(filename.lower())
@@ -330,6 +388,17 @@ def require_plan(allowed_plans):
         return wrapped
 
     return decorator
+
+
+def require_owner(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        user = getattr(g, "current_user", None)
+        if not user or user.get("role") != "owner":
+            return jsonify({"ok": False, "errors": ["No autorizado."]}), 403
+        return view(*args, **kwargs)
+
+    return wrapped
 
 
 @app.before_request
@@ -992,6 +1061,15 @@ def login():
     if not check_password_hash(row["password_hash"], password):
         return render_template("login.html", error="Credenciales inválidas.")
     session["user_id"] = row["id"]
+    if row["role"] in {"agency", "staff"}:
+        agency_id = row["id"] if row["role"] == "agency" else row.get("agency_id")
+        if agency_id:
+            with engine.begin() as conn:
+                conn.execute(
+                    agencies_table.update()
+                    .where(agencies_table.c.id == agency_id)
+                    .values(last_login_at=datetime.utcnow().isoformat())
+                )
     return redirect(url_for("app_home"))
 
 
@@ -1041,6 +1119,23 @@ def register():
             .where(users_table.c.id == new_user_id)
             .values(agency_id=new_user_id)
         )
+        if role == "agency":
+            trial_ends = (datetime.utcnow() + timedelta(days=14)).isoformat()
+            conn.execute(
+                agencies_table.insert().values(
+                    id=new_user_id,
+                    name=email,
+                    email=email,
+                    phone=None,
+                    plan="starter",
+                    status="trial",
+                    stripe_customer_id=None,
+                    stripe_subscription_id=None,
+                    trial_ends_at=trial_ends,
+                    created_at=datetime.utcnow().isoformat(),
+                    last_login_at=None,
+                )
+            )
         session["user_id"] = new_user_id
     return redirect(url_for("app_home"))
 
@@ -1155,6 +1250,111 @@ def landing_alias():
 @app.route("/app")
 def app_home():
     return render_template("index.html", user=g.current_user)
+
+
+@app.route("/admin")
+@require_owner
+def admin_dashboard():
+    with engine.connect() as conn:
+        agencies = conn.execute(select(agencies_table)).mappings().all()
+        company_counts = {
+            row["agency_id"]: row["count"]
+            for row in conn.execute(
+                select(
+                    companies_table.c.agency_id,
+                    func.count().label("count"),
+                ).group_by(companies_table.c.agency_id)
+            ).mappings().all()
+        }
+        user_counts = {
+            row["agency_id"]: row["count"]
+            for row in conn.execute(
+                select(
+                    users_table.c.agency_id,
+                    func.count().label("count"),
+                )
+                .where(users_table.c.role.in_(["agency", "staff"]))
+                .group_by(users_table.c.agency_id)
+            ).mappings().all()
+        }
+
+    view_rows = []
+    for agency in agencies:
+        stripe_status = (
+            "Con suscripción"
+            if agency.get("stripe_subscription_id")
+            else "Sin suscripción"
+        )
+        view_rows.append(
+            {
+                "id": agency["id"],
+                "name": agency["name"],
+                "email": agency["email"],
+                "plan": agency["plan"],
+                "status": agency["status"],
+                "company_count": company_counts.get(agency["id"], 0),
+                "user_count": user_counts.get(agency["id"], 0),
+                "last_login": agency.get("last_login_at"),
+                "stripe_status": stripe_status,
+            }
+        )
+    view_rows.sort(key=lambda item: item["name"].lower())
+    return render_template("admin.html", agencies=view_rows)
+
+
+@app.route("/admin/agency/<int:agency_id>/plan", methods=["POST"])
+@require_owner
+def admin_update_plan(agency_id):
+    plan = (request.form.get("plan") or "").strip().lower()
+    if plan not in {"starter", "pro", "advanced"}:
+        return jsonify({"ok": False, "errors": ["Plan inválido."]}), 400
+    with engine.begin() as conn:
+        result = conn.execute(
+            agencies_table.update()
+            .where(agencies_table.c.id == agency_id)
+            .values(plan=plan)
+        )
+    if result.rowcount == 0:
+        return jsonify({"ok": False, "errors": ["Gestoría no encontrada."]}), 404
+    return redirect(url_for("admin_dashboard"))
+
+
+@app.route("/admin/agency/<int:agency_id>/status", methods=["POST"])
+@require_owner
+def admin_update_status(agency_id):
+    status = (request.form.get("status") or "").strip().lower()
+    if status not in {"trial", "active", "suspended"}:
+        return jsonify({"ok": False, "errors": ["Estado inválido."]}), 400
+    with engine.begin() as conn:
+        result = conn.execute(
+            agencies_table.update()
+            .where(agencies_table.c.id == agency_id)
+            .values(status=status)
+        )
+        if result.rowcount:
+            conn.execute(
+                users_table.update()
+                .where(users_table.c.agency_id == agency_id)
+                .values(is_active=status != "suspended")
+            )
+    if result.rowcount == 0:
+        return jsonify({"ok": False, "errors": ["Gestoría no encontrada."]}), 404
+    return redirect(url_for("admin_dashboard"))
+
+
+@app.route("/admin/agency/<int:agency_id>/trial", methods=["POST"])
+@require_owner
+def admin_reset_trial(agency_id):
+    trial_ends = (datetime.utcnow() + timedelta(days=14)).isoformat()
+    with engine.begin() as conn:
+        result = conn.execute(
+            agencies_table.update()
+            .where(agencies_table.c.id == agency_id)
+            .values(status="trial", trial_ends_at=trial_ends)
+        )
+    if result.rowcount == 0:
+        return jsonify({"ok": False, "errors": ["Gestoría no encontrada."]}), 404
+    return redirect(url_for("admin_dashboard"))
 
 
 @app.route("/aviso-legal")

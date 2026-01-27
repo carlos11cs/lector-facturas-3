@@ -312,9 +312,11 @@ def _is_valid_supplier(
         return False
     has_form = has_legal_form(value)
     has_tax = bool(text and _supplier_has_near_tax_id_or_iban(text, value))
-    if not has_form and not has_tax:
+    if not has_form:
         return False
     if _is_same_entity(value, company_names):
+        return False
+    if require_tax_id and text and not has_tax:
         return False
     return True
 
@@ -369,7 +371,7 @@ def _has_iban(line: str) -> bool:
     return any(re.search(pattern, line, re.IGNORECASE) for pattern in patterns)
 
 
-def _supplier_has_near_tax_id_or_iban(text: str, supplier: str, window: int = 2) -> bool:
+def _supplier_has_near_tax_id_or_iban(text: str, supplier: str, window: int = 4) -> bool:
     if not text or not supplier:
         return False
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -546,7 +548,7 @@ def _match_known_supplier(text: str, known_suppliers: Optional[List[str]], compa
         if not cleaned:
             continue
         if _normalize_entity_name(cleaned) in normalized_text:
-            if _is_valid_supplier(cleaned, company_names, text, require_tax_id=False):
+            if _is_valid_supplier(cleaned, company_names, text, require_tax_id=True):
                 return cleaned
     return None
 
@@ -998,7 +1000,7 @@ def analyze_invoice(
         supplier_source_text = embedded_text if pdf_kind == "original" else extracted_text
         provider_name = provider_name.strip() if isinstance(provider_name, str) else provider_name
         if provider_name is not None and not _is_valid_supplier(
-            provider_name, company_names, supplier_source_text, require_tax_id=False
+            provider_name, company_names, supplier_source_text, require_tax_id=True
         ):
             provider_name = None
         if provider_name is None and analysis_status == "ok":
@@ -1007,13 +1009,13 @@ def analyze_invoice(
             )
             if learned_supplier:
                 provider_name = learned_supplier
-        if provider_name is None and analysis_status == "ok":
+        if provider_name is None and analysis_status == "ok" and pdf_kind != "original":
             heuristic_supplier = _extract_supplier_from_text(
                 supplier_source_text,
                 company_names,
             )
             if heuristic_supplier is not None and not _is_valid_supplier(
-                heuristic_supplier, company_names, supplier_source_text, require_tax_id=False
+                heuristic_supplier, company_names, supplier_source_text, require_tax_id=True
             ):
                 heuristic_supplier = None
             provider_name = heuristic_supplier

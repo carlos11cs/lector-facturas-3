@@ -58,7 +58,7 @@ const noInvoiceTypeLabels = {
 const ANALYSIS_ERROR_MESSAGE =
   "No se ha podido analizar la factura automáticamente. Puedes introducir los datos manualmente.";
 const LOW_QUALITY_SCAN_MESSAGE =
-  "No se ha podido analizar la factura automáticamente. La calidad del escaneo no es suficiente para leer correctamente el texto. Por favor, introduce los datos manualmente.";
+  "La calidad de la factura escaneada no es óptima. No se puede leer correctamente. Por favor, introduce los datos manualmente.";
 
 function showLowQualityModal() {
   const modal = document.getElementById("lowQualityModal");
@@ -4038,9 +4038,12 @@ function exportPnlPdf() {
 
   doc.setFont("helvetica", "normal");
   const rows = [
-    ["Importe neto de la cifra de negocios", incomeValue],
-    ["Aprovisionamientos y otros gastos de explotación", expensesValue],
-    ["Resultado de explotación", preTaxValue],
+    ["Cifra de negocios", incomeValue],
+    [
+      "Aprovisionamientos, gastos de personal, otros gastos de explotación y amortización del inmovilizado",
+      expensesValue,
+    ],
+    ["Resultado de explotación (resultado antes de impuestos)", preTaxValue],
     ["Impuesto sobre beneficios (estimado)", taxesValue],
     ["Resultado del ejercicio", netValue],
   ];
