@@ -227,7 +227,7 @@ def contains_forbidden_keyword(name: Optional[str]) -> bool:
     return any(keyword in lowered for keyword in forbidden)
 
 
-def _is_valid_supplier(candidate: Optional[str], company_names) -> bool:
+def _is_valid_supplier(candidate: Optional[str], company_names, text: Optional[str] = None) -> bool:
     if candidate is None:
         return False
     value = str(candidate).strip()
@@ -240,6 +240,8 @@ def _is_valid_supplier(candidate: Optional[str], company_names) -> bool:
     if not has_legal_form(value):
         return False
     if _is_same_entity(value, company_names):
+        return False
+    if text and not _supplier_has_near_tax_id(text, value):
         return False
     return True
 
@@ -282,6 +284,24 @@ def _has_tax_id(line: str) -> bool:
         r"\b[A-Z]{2}\s?\d{6,12}\b",  # VAT/IVA intracomunitario
     ]
     return any(re.search(pattern, line, re.IGNORECASE) for pattern in patterns)
+
+
+def _supplier_has_near_tax_id(text: str, supplier: str, window: int = 2) -> bool:
+    if not text or not supplier:
+        return False
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    normalized_supplier = _normalize_entity_name(supplier)
+    if not normalized_supplier:
+        return False
+    for idx, line in enumerate(lines):
+        if normalized_supplier in _normalize_entity_name(line):
+            start = max(0, idx - window)
+            end = min(len(lines), idx + window + 1)
+            for candidate in lines[start:end]:
+                if _has_tax_id(candidate):
+                    return True
+            return False
+    return False
 
 
 def _extract_supplier_candidates(text: str, company_names=None) -> List[Tuple[str, int]]:
@@ -396,24 +416,24 @@ def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
                     parts = re.split(keyword, line, flags=re.IGNORECASE)
                     if len(parts) > 1:
                         candidate = parts[1].strip(" :-")
-                        if _is_valid_supplier(candidate, company_names):
+                        if _is_valid_supplier(candidate, company_names, text):
                             return candidate
             for offset in (1, 2):
                 if idx + offset < len(lines):
                     candidate = lines[idx + offset].strip()
-                    if _is_valid_supplier(candidate, company_names):
+                    if _is_valid_supplier(candidate, company_names, text):
                         return candidate
 
     for idx, line in enumerate(lines):
         lowered = line.lower()
         if any(anchor in lowered for anchor in anchor_keywords):
             parts = line.split(":", 1)
-            if len(parts) > 1 and _is_valid_supplier(parts[1], company_names):
+            if len(parts) > 1 and _is_valid_supplier(parts[1], company_names, text):
                 return parts[1].strip()
             for offset in (1, 2):
                 if idx + offset < len(lines):
                     candidate = lines[idx + offset].strip()
-                    if _is_valid_supplier(candidate, company_names):
+                    if _is_valid_supplier(candidate, company_names, text):
                         return candidate
 
     candidates = _extract_supplier_candidates(text, company_names)
@@ -421,7 +441,7 @@ def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
         return None
     candidates.sort(key=lambda item: item[1], reverse=True)
     best, score = candidates[0]
-    if _is_valid_supplier(best, company_names):
+    if _is_valid_supplier(best, company_names, text):
         return best
     return None
 
@@ -769,7 +789,9 @@ def analyze_invoice(
     if document_type != "income":
         supplier_source_text = embedded_text if pdf_kind == "original" else extracted_text
         provider_name = provider_name.strip() if isinstance(provider_name, str) else provider_name
-        if provider_name is not None and not _is_valid_supplier(provider_name, company_names):
+        if provider_name is not None and not _is_valid_supplier(
+            provider_name, company_names, supplier_source_text
+        ):
             provider_name = None
         if provider_name is None:
             heuristic_supplier = _extract_supplier_from_text(
@@ -777,7 +799,7 @@ def analyze_invoice(
                 company_names,
             )
             if heuristic_supplier is not None and not _is_valid_supplier(
-                heuristic_supplier, company_names
+                heuristic_supplier, company_names, supplier_source_text
             ):
                 heuristic_supplier = None
             provider_name = heuristic_supplier
