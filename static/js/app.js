@@ -1488,10 +1488,7 @@ function renderTable() {
     baseInput.value = item.base;
     const breakdownActive =
       Array.isArray(item.vatBreakdown) && item.vatBreakdown.length > 0;
-    const breakdownActive =
-      Array.isArray(item.vatBreakdown) && item.vatBreakdown.length > 0;
     baseInput.disabled = item.analysisPending;
-    baseInput.readOnly = breakdownActive;
     baseInput.readOnly = breakdownActive;
     baseInput.addEventListener("input", () => {
       item.base = baseInput.value;
