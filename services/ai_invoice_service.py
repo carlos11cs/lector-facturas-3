@@ -1000,7 +1000,7 @@ def analyze_invoice(
         supplier_source_text = embedded_text if pdf_kind == "original" else extracted_text
         provider_name = provider_name.strip() if isinstance(provider_name, str) else provider_name
         if provider_name is not None and not _is_valid_supplier(
-            provider_name, company_names, supplier_source_text, require_tax_id=True
+            provider_name, company_names, supplier_source_text, require_tax_id=False
         ):
             provider_name = None
         if provider_name is None and analysis_status == "ok":
