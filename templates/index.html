@@ -440,6 +440,21 @@
                 <option value="21">21%</option>
               </select>
             </div>
+            <div class="field">
+              <label for="billingVatAmountInput">IVA repercutido (€)</label>
+              <input
+                type="number"
+                id="billingVatAmountInput"
+                min="0"
+                step="0.01"
+                placeholder="0,00"
+                readonly
+              />
+            </div>
+            <div class="field">
+              <label for="billingTotalInput">Total facturado (€)</label>
+              <input type="number" id="billingTotalInput" min="0" step="0.01" placeholder="0,00" />
+            </div>
             <button id="billingSaveBtn" class="button primary">Guardar</button>
           </div>
           <div class="billing-entries">
@@ -723,24 +738,116 @@
               </thead>
               <tbody>
                 <tr>
-                  <td>Cifra de negocios</td>
-                  <td id="pnlIncome">0,00 €</td>
+                  <td>1. Importe neto de la cifra de negocios</td>
+                  <td><input class="pnl-input" id="pnlLine1" type="number" step="0.01" /></td>
                 </tr>
                 <tr>
-                  <td>Aprovisionamientos, gastos de personal, otros gastos de explotación y amortización del inmovilizado</td>
-                  <td id="pnlExpenses">0,00 €</td>
+                  <td>2. Variación de existencias de productos terminados y en curso</td>
+                  <td><input class="pnl-input" id="pnlLine2" type="number" step="0.01" /></td>
                 </tr>
                 <tr>
-                  <td>Resultado de explotación (resultado antes de impuestos)</td>
-                  <td id="pnlPreTax">0,00 €</td>
+                  <td>3. Trabajos realizados por la empresa para su activo</td>
+                  <td><input class="pnl-input" id="pnlLine3" type="number" step="0.01" /></td>
                 </tr>
                 <tr>
-                  <td>Impuesto sobre beneficios (estimado)</td>
-                  <td id="pnlTaxes">0,00 €</td>
+                  <td>4. Aprovisionamientos</td>
+                  <td><input class="pnl-input" id="pnlLine4" type="number" step="0.01" /></td>
                 </tr>
                 <tr>
-                  <td><strong>Resultado del ejercicio</strong></td>
-                  <td id="pnlNet">0,00 €</td>
+                  <td>5. Otros ingresos de explotación</td>
+                  <td><input class="pnl-input" id="pnlLine5" type="number" step="0.01" /></td>
+                </tr>
+                <tr>
+                  <td>6. Gastos de personal</td>
+                  <td><input class="pnl-input" id="pnlLine6" type="number" step="0.01" /></td>
+                </tr>
+                <tr>
+                  <td>7. Otros gastos de explotación</td>
+                  <td><input class="pnl-input" id="pnlLine7" type="number" step="0.01" /></td>
+                </tr>
+                <tr>
+                  <td>8. Amortización del inmovilizado</td>
+                  <td><input class="pnl-input" id="pnlLine8" type="number" step="0.01" /></td>
+                </tr>
+                <tr>
+                  <td>9. Imputación de subvenciones de inmovilizado no financiero y otras</td>
+                  <td><input class="pnl-input" id="pnlLine9" type="number" step="0.01" /></td>
+                </tr>
+                <tr>
+                  <td>10. Excesos de provisiones</td>
+                  <td><input class="pnl-input" id="pnlLine10" type="number" step="0.01" /></td>
+                </tr>
+                <tr>
+                  <td>11. Deterioro y resultado por enajenación del inmovilizado</td>
+                  <td><input class="pnl-input" id="pnlLine11" type="number" step="0.01" /></td>
+                </tr>
+                <tr>
+                  <td>12. Otros resultados</td>
+                  <td><input class="pnl-input" id="pnlLine12" type="number" step="0.01" /></td>
+                </tr>
+                <tr class="pnl-total">
+                  <td><strong>A) RESULTADO DE EXPLOTACIÓN</strong></td>
+                  <td><strong id="pnlOperatingResult">0,00 €</strong></td>
+                </tr>
+                <tr>
+                  <td>13. Ingresos financieros</td>
+                  <td></td>
+                </tr>
+                <tr>
+                  <td class="pnl-indent">a) Imputación de subvenciones, donaciones y legados de carácter financiero</td>
+                  <td><input class="pnl-input" id="pnlLine13a" type="number" step="0.01" /></td>
+                </tr>
+                <tr>
+                  <td class="pnl-indent">b) Otros ingresos financieros</td>
+                  <td><input class="pnl-input" id="pnlLine13b" type="number" step="0.01" /></td>
+                </tr>
+                <tr>
+                  <td>14. Gastos financieros</td>
+                  <td><input class="pnl-input" id="pnlLine14" type="number" step="0.01" /></td>
+                </tr>
+                <tr>
+                  <td>15. Variación de valor razonable en instrumentos financieros</td>
+                  <td><input class="pnl-input" id="pnlLine15" type="number" step="0.01" /></td>
+                </tr>
+                <tr>
+                  <td>16. Diferencias de cambio</td>
+                  <td><input class="pnl-input" id="pnlLine16" type="number" step="0.01" /></td>
+                </tr>
+                <tr>
+                  <td>17. Deterioro y resultado por enajenación de instrumentos financieros</td>
+                  <td><input class="pnl-input" id="pnlLine17" type="number" step="0.01" /></td>
+                </tr>
+                <tr>
+                  <td>18. Otros ingresos y gastos de carácter financiero</td>
+                  <td></td>
+                </tr>
+                <tr>
+                  <td class="pnl-indent">a) Incorporación al activo de gastos financieros</td>
+                  <td><input class="pnl-input" id="pnlLine18a" type="number" step="0.01" /></td>
+                </tr>
+                <tr>
+                  <td class="pnl-indent">b) Ingresos financieros derivados de convenios de acreedores</td>
+                  <td><input class="pnl-input" id="pnlLine18b" type="number" step="0.01" /></td>
+                </tr>
+                <tr>
+                  <td class="pnl-indent">c) Resto de ingresos y gastos</td>
+                  <td><input class="pnl-input" id="pnlLine18c" type="number" step="0.01" /></td>
+                </tr>
+                <tr class="pnl-total">
+                  <td><strong>B) RESULTADO FINANCIERO</strong></td>
+                  <td><strong id="pnlFinancialResult">0,00 €</strong></td>
+                </tr>
+                <tr class="pnl-total">
+                  <td><strong>C) RESULTADO ANTES DE IMPUESTOS</strong></td>
+                  <td><strong id="pnlPreTax">0,00 €</strong></td>
+                </tr>
+                <tr>
+                  <td>19. Impuestos sobre beneficios</td>
+                  <td><input class="pnl-input" id="pnlLine19" type="number" step="0.01" /></td>
+                </tr>
+                <tr class="pnl-total">
+                  <td><strong>D) RESULTADO DEL EJERCICIO</strong></td>
+                  <td><strong id="pnlNet">0,00 €</strong></td>
                 </tr>
               </tbody>
             </table>
