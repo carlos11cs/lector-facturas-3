@@ -359,6 +359,30 @@ h1 {
   color: var(--accent-strong);
 }
 
+.pnl-input {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #ffffff;
+  text-align: right;
+  font-size: 0.9rem;
+}
+
+.pnl-input:focus {
+  outline: 2px solid rgba(34, 124, 101, 0.25);
+  border-color: var(--accent);
+}
+
+.pnl-indent {
+  padding-left: 18px;
+  color: var(--muted);
+}
+
+.pnl-total td {
+  background: rgba(34, 124, 101, 0.06);
+}
+
 .payment-day-list {
   display: flex;
   flex-direction: column;
@@ -940,6 +964,86 @@ h1 {
   border: 1px solid var(--border);
   background: #f7faf7;
   font-size: 0.9rem;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--primary);
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+.vat-breakdown-toggle {
+  margin-top: 6px;
+}
+
+.vat-mixed-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #e8f3ff;
+  color: #2a5c8a;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.vat-breakdown-row td {
+  padding-top: 0;
+}
+
+.vat-breakdown {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: #f8fbf9;
+}
+
+.vat-breakdown-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.vat-breakdown-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.vat-breakdown-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 10px;
+  font-size: 0.85rem;
+}
+
+.vat-breakdown-table th,
+.vat-breakdown-table td {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
+.vat-breakdown-table input,
+.vat-breakdown-table select {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #ffffff;
+  font-size: 0.85rem;
+}
+
+.vat-breakdown-empty {
+  color: var(--muted);
+  font-size: 0.85rem;
 }
 
 .input-warning {

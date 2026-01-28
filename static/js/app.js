@@ -105,6 +105,38 @@ function formatAmountInput(value) {
   return Number(value).toFixed(2);
 }
 
+function getPnlInputValue(id) {
+  const el = document.getElementById(id);
+  if (!el) {
+    return 0;
+  }
+  const parsed = parseNumberInput(el.value);
+  return parsed === null ? 0 : parsed;
+}
+
+function setPnlInputValue(id, value, auto = false) {
+  const el = document.getElementById(id);
+  if (!el) {
+    return;
+  }
+  if (!auto || !pnlManualOverrides.has(id)) {
+    el.value = formatAmountInput(value);
+  }
+}
+
+function bindPnlInputs() {
+  pnlInputIds.forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) {
+      return;
+    }
+    el.addEventListener("input", () => {
+      pnlManualOverrides.add(id);
+      updatePnlSummary();
+    });
+  });
+}
+
 function normalizeEntityName(value) {
   if (!value) {
     return "";
@@ -378,6 +410,31 @@ const paymentMonthEmpty = document.getElementById("paymentMonthEmpty");
 const paymentDayTitle = document.getElementById("paymentDayTitle");
 const paymentDayList = document.getElementById("paymentDayList");
 const paymentDayTotal = document.getElementById("paymentDayTotal");
+const pnlInputIds = [
+  "pnlLine1",
+  "pnlLine2",
+  "pnlLine3",
+  "pnlLine4",
+  "pnlLine5",
+  "pnlLine6",
+  "pnlLine7",
+  "pnlLine8",
+  "pnlLine9",
+  "pnlLine10",
+  "pnlLine11",
+  "pnlLine12",
+  "pnlLine13a",
+  "pnlLine13b",
+  "pnlLine14",
+  "pnlLine15",
+  "pnlLine16",
+  "pnlLine17",
+  "pnlLine18a",
+  "pnlLine18b",
+  "pnlLine18c",
+  "pnlLine19",
+];
+const pnlManualOverrides = new Set();
 
 function isAllowedFile(fileName) {
   const lower = fileName.toLowerCase();
@@ -447,6 +504,115 @@ function applyVatSelection(select, value, fallback = "21") {
     select.appendChild(option);
   }
   select.value = normalized;
+}
+
+function parseVatBreakdown(value) {
+  if (!value) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (err) {
+      return [];
+    }
+  }
+  return [];
+}
+
+function normalizeBreakdownLine(line) {
+  const rateValue = normalizeVatRateValue(line.rate);
+  const baseValue = parseNumberInput(line.base);
+  if (rateValue === null || baseValue === null) {
+    return null;
+  }
+  const rate = Number(rateValue);
+  const vatAmount = roundAmount(baseValue * (rate / 100));
+  const total = roundAmount(baseValue + vatAmount);
+  return {
+    rate,
+    base: roundAmount(baseValue),
+    vat_amount: vatAmount,
+    total,
+  };
+}
+
+function summarizeVatBreakdown(lines) {
+  if (!lines.length) {
+    return null;
+  }
+  let baseTotal = 0;
+  let vatTotal = 0;
+  let totalTotal = 0;
+  lines.forEach((line) => {
+    const normalized = normalizeBreakdownLine(line);
+    if (!normalized) {
+      return;
+    }
+    baseTotal += normalized.base;
+    vatTotal += normalized.vat_amount;
+    totalTotal += normalized.total;
+  });
+  return {
+    base: roundAmount(baseTotal),
+    vatAmount: roundAmount(vatTotal),
+    total: roundAmount(totalTotal),
+  };
+}
+
+function getBreakdownRates(lines) {
+  const rates = new Set();
+  lines.forEach((line) => {
+    const normalized = normalizeBreakdownLine(line);
+    if (normalized) {
+      rates.add(normalized.rate);
+    }
+  });
+  return [...rates];
+}
+
+function buildVatBreakdownPayload(lines) {
+  const payload = [];
+  lines.forEach((line) => {
+    const normalized = normalizeBreakdownLine(line);
+    if (!normalized) {
+      return;
+    }
+    payload.push({
+      rate: normalized.rate,
+      base: normalized.base,
+      vat_amount: normalized.vat_amount,
+      total: normalized.total,
+    });
+  });
+  return payload;
+}
+
+function getPrimaryVatRateFromBreakdown(lines, fallback = "21") {
+  const normalized = buildVatBreakdownPayload(lines);
+  if (!normalized.length) {
+    return fallback;
+  }
+  return String(normalized[0].rate);
+}
+
+function getVatDisplayFromInvoice(invoice) {
+  const breakdown = parseVatBreakdown(invoice.vat_breakdown || invoice.vatBreakdown);
+  const rates = getBreakdownRates(breakdown);
+  if (rates.length > 1) {
+    return {
+      label: "Mixto",
+      title: `IVA: ${rates.map((rate) => `${rate}%`).join(" · ")}`,
+    };
+  }
+  if (rates.length === 1) {
+    return { label: `${rates[0]}%`, title: "" };
+  }
+  return { label: `${invoice.vat_rate}%`, title: "" };
 }
 
 function formatExpenseCategory(category) {
@@ -1162,6 +1328,8 @@ function addFiles(fileList) {
       vat: "21",
       vatAmount: "",
       total: "",
+      vatBreakdown: [],
+      vatBreakdownOpen: false,
       analysisText: "",
       analysisPending: true,
       analysisError: false,
@@ -1200,6 +1368,8 @@ function addIncomeFiles(fileList) {
       vat: "21",
       vatAmount: "",
       total: "",
+      vatBreakdown: [],
+      vatBreakdownOpen: false,
       analysisText: "",
       analysisPending: true,
       analysisError: false,
@@ -1316,7 +1486,13 @@ function renderTable() {
     baseInput.min = "0";
     baseInput.placeholder = "0,00";
     baseInput.value = item.base;
+    const breakdownActive =
+      Array.isArray(item.vatBreakdown) && item.vatBreakdown.length > 0;
+    const breakdownActive =
+      Array.isArray(item.vatBreakdown) && item.vatBreakdown.length > 0;
     baseInput.disabled = item.analysisPending;
+    baseInput.readOnly = breakdownActive;
+    baseInput.readOnly = breakdownActive;
     baseInput.addEventListener("input", () => {
       item.base = baseInput.value;
       item.touched.base = true;
@@ -1338,7 +1514,7 @@ function renderTable() {
       vatSelect.appendChild(option);
     });
     applyVatSelection(vatSelect, item.vat);
-    vatSelect.disabled = item.analysisPending;
+    vatSelect.disabled = item.analysisPending || breakdownActive;
     vatSelect.addEventListener("change", () => {
       item.vat = resolveVatRateValue(vatSelect.value);
       item.touched.vat = true;
@@ -1350,6 +1526,24 @@ function renderTable() {
       }, "vat");
     });
     vatTd.appendChild(vatSelect);
+    if (breakdownActive && getBreakdownRates(item.vatBreakdown).length > 1) {
+      const mixedBadge = document.createElement("span");
+      mixedBadge.className = "vat-mixed-badge";
+      mixedBadge.textContent = "Mixto";
+      vatTd.appendChild(mixedBadge);
+    }
+    const breakdownToggle = document.createElement("button");
+    breakdownToggle.type = "button";
+    breakdownToggle.className = "link-button vat-breakdown-toggle";
+    breakdownToggle.textContent = item.vatBreakdownOpen
+      ? "Ocultar desglose"
+      : "Desglose IVA";
+    breakdownToggle.disabled = item.analysisPending;
+    breakdownToggle.addEventListener("click", () => {
+      item.vatBreakdownOpen = !item.vatBreakdownOpen;
+      renderTable();
+    });
+    vatTd.appendChild(breakdownToggle);
 
     const vatAmountTd = document.createElement("td");
     const vatAmountInput = document.createElement("input");
@@ -1359,6 +1553,7 @@ function renderTable() {
     vatAmountInput.placeholder = "0,00";
     vatAmountInput.value = item.vatAmount;
     vatAmountInput.disabled = item.analysisPending;
+    vatAmountInput.readOnly = breakdownActive;
     vatAmountInput.addEventListener("input", () => {
       item.vatAmount = vatAmountInput.value;
       item.touched.vatAmount = true;
@@ -1379,6 +1574,7 @@ function renderTable() {
     totalInput.placeholder = "0,00";
     totalInput.value = item.total;
     totalInput.disabled = item.analysisPending;
+    totalInput.readOnly = breakdownActive;
     totalInput.addEventListener("input", () => {
       item.total = totalInput.value;
       item.touched.total = true;
@@ -1416,19 +1612,195 @@ function renderTable() {
     tr.appendChild(actionsTd);
     uploadTableBody.appendChild(tr);
 
+    if (item.vatBreakdownOpen || (item.vatBreakdown && item.vatBreakdown.length)) {
+      const breakdownRow = document.createElement("tr");
+      breakdownRow.className = "vat-breakdown-row";
+      const breakdownCell = document.createElement("td");
+      breakdownCell.colSpan = 8;
+      const breakdownWrapper = document.createElement("div");
+      breakdownWrapper.className = "vat-breakdown";
+
+      const breakdownHeader = document.createElement("div");
+      breakdownHeader.className = "vat-breakdown-header";
+      const headerTitle = document.createElement("span");
+      headerTitle.textContent = "Desglose de IVA";
+      breakdownHeader.appendChild(headerTitle);
+      const headerActions = document.createElement("div");
+      headerActions.className = "vat-breakdown-actions";
+      const addLineBtn = document.createElement("button");
+      addLineBtn.type = "button";
+      addLineBtn.className = "button ghost";
+      addLineBtn.textContent = "Añadir tramo";
+      addLineBtn.disabled = item.analysisPending;
+      addLineBtn.addEventListener("click", () => {
+        item.vatBreakdown = item.vatBreakdown || [];
+        item.vatBreakdown.push({ rate: "21", base: "", vat_amount: "", total: "" });
+        renderTable();
+      });
+      headerActions.appendChild(addLineBtn);
+      if (item.vatBreakdown && item.vatBreakdown.length) {
+        const clearBtn = document.createElement("button");
+        clearBtn.type = "button";
+        clearBtn.className = "button ghost";
+        clearBtn.textContent = "Usar IVA simple";
+        clearBtn.disabled = item.analysisPending;
+        clearBtn.addEventListener("click", () => {
+          item.vatBreakdown = [];
+          item.vatBreakdownOpen = false;
+          renderTable();
+        });
+        headerActions.appendChild(clearBtn);
+      }
+      breakdownHeader.appendChild(headerActions);
+      breakdownWrapper.appendChild(breakdownHeader);
+
+      const breakdownTable = document.createElement("table");
+      breakdownTable.className = "vat-breakdown-table";
+      breakdownTable.innerHTML = `
+        <thead>
+          <tr>
+            <th>Tipo IVA</th>
+            <th>Base (€)</th>
+            <th>IVA (€)</th>
+            <th>Total (€)</th>
+            <th></th>
+          </tr>
+        </thead>
+      `;
+      const breakdownBody = document.createElement("tbody");
+
+      if (!item.vatBreakdown || !item.vatBreakdown.length) {
+        const emptyRow = document.createElement("tr");
+        const emptyCell = document.createElement("td");
+        emptyCell.colSpan = 5;
+        emptyCell.className = "vat-breakdown-empty";
+        emptyCell.textContent = "Añade tramos si la factura tiene varios tipos de IVA.";
+        emptyRow.appendChild(emptyCell);
+        breakdownBody.appendChild(emptyRow);
+      } else {
+        item.vatBreakdown.forEach((line, lineIndex) => {
+          const row = document.createElement("tr");
+          const rateTd = document.createElement("td");
+          const rateSelect = document.createElement("select");
+          ["0", "4", "10", "21"].forEach((rate) => {
+            const option = document.createElement("option");
+            option.value = rate;
+            option.textContent = `${rate}%`;
+            rateSelect.appendChild(option);
+          });
+          rateSelect.value = resolveVatRateValue(line.rate);
+          rateSelect.disabled = item.analysisPending;
+          rateTd.appendChild(rateSelect);
+
+          const baseTd = document.createElement("td");
+          const baseLineInput = document.createElement("input");
+          baseLineInput.type = "number";
+          baseLineInput.step = "0.01";
+          baseLineInput.min = "0";
+          baseLineInput.placeholder = "0,00";
+          baseLineInput.value = line.base || "";
+          baseLineInput.disabled = item.analysisPending;
+          baseTd.appendChild(baseLineInput);
+
+          const vatTdLine = document.createElement("td");
+          const vatLineInput = document.createElement("input");
+          vatLineInput.type = "number";
+          vatLineInput.step = "0.01";
+          vatLineInput.min = "0";
+          vatLineInput.readOnly = true;
+          vatLineInput.value = line.vat_amount || "";
+          vatTdLine.appendChild(vatLineInput);
+
+          const totalTdLine = document.createElement("td");
+          const totalLineInput = document.createElement("input");
+          totalLineInput.type = "number";
+          totalLineInput.step = "0.01";
+          totalLineInput.min = "0";
+          totalLineInput.readOnly = true;
+          totalLineInput.value = line.total || "";
+          totalTdLine.appendChild(totalLineInput);
+
+          const actionsLineTd = document.createElement("td");
+          const removeLineBtn = document.createElement("button");
+          removeLineBtn.type = "button";
+          removeLineBtn.className = "button ghost";
+          removeLineBtn.textContent = "Quitar";
+          removeLineBtn.disabled = item.analysisPending;
+          removeLineBtn.addEventListener("click", () => {
+            item.vatBreakdown.splice(lineIndex, 1);
+            renderTable();
+          });
+          actionsLineTd.appendChild(removeLineBtn);
+
+          const syncLine = () => {
+            line.rate = rateSelect.value;
+            line.base = baseLineInput.value;
+            const normalized = normalizeBreakdownLine(line);
+            if (normalized) {
+              line.vat_amount = formatAmountInput(normalized.vat_amount);
+              line.total = formatAmountInput(normalized.total);
+              vatLineInput.value = line.vat_amount;
+              totalLineInput.value = line.total;
+            } else {
+              line.vat_amount = "";
+              line.total = "";
+              vatLineInput.value = "";
+              totalLineInput.value = "";
+            }
+            const totals = summarizeVatBreakdown(item.vatBreakdown || []);
+            if (totals) {
+              item.base = formatAmountInput(totals.base);
+              item.vatAmount = formatAmountInput(totals.vatAmount);
+              item.total = formatAmountInput(totals.total);
+              baseInput.value = item.base;
+              vatAmountInput.value = item.vatAmount;
+              totalInput.value = item.total;
+            }
+          };
+          rateSelect.addEventListener("change", syncLine);
+          baseLineInput.addEventListener("input", syncLine);
+          syncLine();
+
+          row.appendChild(rateTd);
+          row.appendChild(baseTd);
+          row.appendChild(vatTdLine);
+          row.appendChild(totalTdLine);
+          row.appendChild(actionsLineTd);
+          breakdownBody.appendChild(row);
+        });
+      }
+      breakdownTable.appendChild(breakdownBody);
+      breakdownWrapper.appendChild(breakdownTable);
+      breakdownCell.appendChild(breakdownWrapper);
+      breakdownRow.appendChild(breakdownCell);
+      uploadTableBody.appendChild(breakdownRow);
+    }
+
     updateSupplierWarning();
     const initialSource =
       parseNumberInput(baseInput.value) !== null ? "base" : "total";
-    applyVatCalculation(
-      item,
-      {
-        base: baseInput,
-        vat: vatSelect,
-        vatAmount: vatAmountInput,
-        total: totalInput,
-      },
-      initialSource
-    );
+    if (breakdownActive) {
+      const totals = summarizeVatBreakdown(item.vatBreakdown || []);
+      if (totals) {
+        item.base = formatAmountInput(totals.base);
+        item.vatAmount = formatAmountInput(totals.vatAmount);
+        item.total = formatAmountInput(totals.total);
+        baseInput.value = item.base;
+        vatAmountInput.value = item.vatAmount;
+        totalInput.value = item.total;
+      }
+    } else {
+      applyVatCalculation(
+        item,
+        {
+          base: baseInput,
+          vat: vatSelect,
+          vatAmount: vatAmountInput,
+          total: totalInput,
+        },
+        initialSource
+      );
+    }
 
     if (item.analysisPending || item.analysisError) {
       const statusRow = document.createElement("tr");
@@ -1536,7 +1908,7 @@ function renderIncomeTable() {
       vatSelect.appendChild(option);
     });
     applyVatSelection(vatSelect, item.vat);
-    vatSelect.disabled = item.analysisPending;
+    vatSelect.disabled = item.analysisPending || breakdownActive;
     vatSelect.addEventListener("change", () => {
       item.vat = resolveVatRateValue(vatSelect.value);
       item.touched.vat = true;
@@ -1548,6 +1920,24 @@ function renderIncomeTable() {
       }, "vat");
     });
     vatTd.appendChild(vatSelect);
+    if (breakdownActive && getBreakdownRates(item.vatBreakdown).length > 1) {
+      const mixedBadge = document.createElement("span");
+      mixedBadge.className = "vat-mixed-badge";
+      mixedBadge.textContent = "Mixto";
+      vatTd.appendChild(mixedBadge);
+    }
+    const breakdownToggle = document.createElement("button");
+    breakdownToggle.type = "button";
+    breakdownToggle.className = "link-button vat-breakdown-toggle";
+    breakdownToggle.textContent = item.vatBreakdownOpen
+      ? "Ocultar desglose"
+      : "Desglose IVA";
+    breakdownToggle.disabled = item.analysisPending;
+    breakdownToggle.addEventListener("click", () => {
+      item.vatBreakdownOpen = !item.vatBreakdownOpen;
+      renderIncomeTable();
+    });
+    vatTd.appendChild(breakdownToggle);
 
     const vatAmountTd = document.createElement("td");
     const vatAmountInput = document.createElement("input");
@@ -1557,6 +1947,7 @@ function renderIncomeTable() {
     vatAmountInput.placeholder = "0,00";
     vatAmountInput.value = item.vatAmount;
     vatAmountInput.disabled = item.analysisPending;
+    vatAmountInput.readOnly = breakdownActive;
     vatAmountInput.addEventListener("input", () => {
       item.vatAmount = vatAmountInput.value;
       item.touched.vatAmount = true;
@@ -1577,6 +1968,7 @@ function renderIncomeTable() {
     totalInput.placeholder = "0,00";
     totalInput.value = item.total;
     totalInput.disabled = item.analysisPending;
+    totalInput.readOnly = breakdownActive;
     totalInput.addEventListener("input", () => {
       item.total = totalInput.value;
       item.touched.total = true;
@@ -1614,18 +2006,194 @@ function renderIncomeTable() {
     tr.appendChild(actionsTd);
     incomeUploadTableBody.appendChild(tr);
 
+    if (item.vatBreakdownOpen || (item.vatBreakdown && item.vatBreakdown.length)) {
+      const breakdownRow = document.createElement("tr");
+      breakdownRow.className = "vat-breakdown-row";
+      const breakdownCell = document.createElement("td");
+      breakdownCell.colSpan = 8;
+      const breakdownWrapper = document.createElement("div");
+      breakdownWrapper.className = "vat-breakdown";
+
+      const breakdownHeader = document.createElement("div");
+      breakdownHeader.className = "vat-breakdown-header";
+      const headerTitle = document.createElement("span");
+      headerTitle.textContent = "Desglose de IVA";
+      breakdownHeader.appendChild(headerTitle);
+      const headerActions = document.createElement("div");
+      headerActions.className = "vat-breakdown-actions";
+      const addLineBtn = document.createElement("button");
+      addLineBtn.type = "button";
+      addLineBtn.className = "button ghost";
+      addLineBtn.textContent = "Añadir tramo";
+      addLineBtn.disabled = item.analysisPending;
+      addLineBtn.addEventListener("click", () => {
+        item.vatBreakdown = item.vatBreakdown || [];
+        item.vatBreakdown.push({ rate: "21", base: "", vat_amount: "", total: "" });
+        renderIncomeTable();
+      });
+      headerActions.appendChild(addLineBtn);
+      if (item.vatBreakdown && item.vatBreakdown.length) {
+        const clearBtn = document.createElement("button");
+        clearBtn.type = "button";
+        clearBtn.className = "button ghost";
+        clearBtn.textContent = "Usar IVA simple";
+        clearBtn.disabled = item.analysisPending;
+        clearBtn.addEventListener("click", () => {
+          item.vatBreakdown = [];
+          item.vatBreakdownOpen = false;
+          renderIncomeTable();
+        });
+        headerActions.appendChild(clearBtn);
+      }
+      breakdownHeader.appendChild(headerActions);
+      breakdownWrapper.appendChild(breakdownHeader);
+
+      const breakdownTable = document.createElement("table");
+      breakdownTable.className = "vat-breakdown-table";
+      breakdownTable.innerHTML = `
+        <thead>
+          <tr>
+            <th>Tipo IVA</th>
+            <th>Base (€)</th>
+            <th>IVA (€)</th>
+            <th>Total (€)</th>
+            <th></th>
+          </tr>
+        </thead>
+      `;
+      const breakdownBody = document.createElement("tbody");
+
+      if (!item.vatBreakdown || !item.vatBreakdown.length) {
+        const emptyRow = document.createElement("tr");
+        const emptyCell = document.createElement("td");
+        emptyCell.colSpan = 5;
+        emptyCell.className = "vat-breakdown-empty";
+        emptyCell.textContent = "Añade tramos si la factura tiene varios tipos de IVA.";
+        emptyRow.appendChild(emptyCell);
+        breakdownBody.appendChild(emptyRow);
+      } else {
+        item.vatBreakdown.forEach((line, lineIndex) => {
+          const row = document.createElement("tr");
+          const rateTd = document.createElement("td");
+          const rateSelect = document.createElement("select");
+          ["0", "4", "10", "21"].forEach((rate) => {
+            const option = document.createElement("option");
+            option.value = rate;
+            option.textContent = `${rate}%`;
+            rateSelect.appendChild(option);
+          });
+          rateSelect.value = resolveVatRateValue(line.rate);
+          rateSelect.disabled = item.analysisPending;
+          rateTd.appendChild(rateSelect);
+
+          const baseTd = document.createElement("td");
+          const baseLineInput = document.createElement("input");
+          baseLineInput.type = "number";
+          baseLineInput.step = "0.01";
+          baseLineInput.min = "0";
+          baseLineInput.placeholder = "0,00";
+          baseLineInput.value = line.base || "";
+          baseLineInput.disabled = item.analysisPending;
+          baseTd.appendChild(baseLineInput);
+
+          const vatTdLine = document.createElement("td");
+          const vatLineInput = document.createElement("input");
+          vatLineInput.type = "number";
+          vatLineInput.step = "0.01";
+          vatLineInput.min = "0";
+          vatLineInput.readOnly = true;
+          vatLineInput.value = line.vat_amount || "";
+          vatTdLine.appendChild(vatLineInput);
+
+          const totalTdLine = document.createElement("td");
+          const totalLineInput = document.createElement("input");
+          totalLineInput.type = "number";
+          totalLineInput.step = "0.01";
+          totalLineInput.min = "0";
+          totalLineInput.readOnly = true;
+          totalLineInput.value = line.total || "";
+          totalTdLine.appendChild(totalLineInput);
+
+          const actionsLineTd = document.createElement("td");
+          const removeLineBtn = document.createElement("button");
+          removeLineBtn.type = "button";
+          removeLineBtn.className = "button ghost";
+          removeLineBtn.textContent = "Quitar";
+          removeLineBtn.disabled = item.analysisPending;
+          removeLineBtn.addEventListener("click", () => {
+            item.vatBreakdown.splice(lineIndex, 1);
+            renderIncomeTable();
+          });
+          actionsLineTd.appendChild(removeLineBtn);
+
+          const syncLine = () => {
+            line.rate = rateSelect.value;
+            line.base = baseLineInput.value;
+            const normalized = normalizeBreakdownLine(line);
+            if (normalized) {
+              line.vat_amount = formatAmountInput(normalized.vat_amount);
+              line.total = formatAmountInput(normalized.total);
+              vatLineInput.value = line.vat_amount;
+              totalLineInput.value = line.total;
+            } else {
+              line.vat_amount = "";
+              line.total = "";
+              vatLineInput.value = "";
+              totalLineInput.value = "";
+            }
+            const totals = summarizeVatBreakdown(item.vatBreakdown || []);
+            if (totals) {
+              item.base = formatAmountInput(totals.base);
+              item.vatAmount = formatAmountInput(totals.vatAmount);
+              item.total = formatAmountInput(totals.total);
+              baseInput.value = item.base;
+              vatAmountInput.value = item.vatAmount;
+              totalInput.value = item.total;
+            }
+          };
+          rateSelect.addEventListener("change", syncLine);
+          baseLineInput.addEventListener("input", syncLine);
+          syncLine();
+
+          row.appendChild(rateTd);
+          row.appendChild(baseTd);
+          row.appendChild(vatTdLine);
+          row.appendChild(totalTdLine);
+          row.appendChild(actionsLineTd);
+          breakdownBody.appendChild(row);
+        });
+      }
+      breakdownTable.appendChild(breakdownBody);
+      breakdownWrapper.appendChild(breakdownTable);
+      breakdownCell.appendChild(breakdownWrapper);
+      breakdownRow.appendChild(breakdownCell);
+      incomeUploadTableBody.appendChild(breakdownRow);
+    }
+
     const initialSource =
       parseNumberInput(baseInput.value) !== null ? "base" : "total";
-    applyVatCalculation(
-      item,
-      {
-        base: baseInput,
-        vat: vatSelect,
-        vatAmount: vatAmountInput,
-        total: totalInput,
-      },
-      initialSource
-    );
+    if (breakdownActive) {
+      const totals = summarizeVatBreakdown(item.vatBreakdown || []);
+      if (totals) {
+        item.base = formatAmountInput(totals.base);
+        item.vatAmount = formatAmountInput(totals.vatAmount);
+        item.total = formatAmountInput(totals.total);
+        baseInput.value = item.base;
+        vatAmountInput.value = item.vatAmount;
+        totalInput.value = item.total;
+      }
+    } else {
+      applyVatCalculation(
+        item,
+        {
+          base: baseInput,
+          vat: vatSelect,
+          vatAmount: vatAmountInput,
+          total: totalInput,
+        },
+        initialSource
+      );
+    }
 
     if (item.analysisPending || item.analysisError) {
       const statusRow = document.createElement("tr");
@@ -1802,6 +2370,10 @@ function uploadIncomePending() {
     companyId: getSelectedCompanyId(),
     entries: pendingIncomeFiles.map((item) => {
       const normalized = normalizeInvoiceAmounts(item);
+      const breakdownPayload = buildVatBreakdownPayload(item.vatBreakdown || []);
+      const breakdownTotals = breakdownPayload.length
+        ? summarizeVatBreakdown(item.vatBreakdown || [])
+        : null;
       return {
         storedFilename: item.storedFilename,
         originalFilename: item.originalFilename,
@@ -1810,10 +2382,13 @@ function uploadIncomePending() {
         paymentDates: item.paymentDates || [],
         analysisStatus: item.analysisStatus || "ok",
         client: item.client.trim(),
-        base: normalized.base || item.base,
-        vat: resolveVatRateValue(item.vat),
-        vatAmount: normalized.vatAmount || item.vatAmount,
-        total: normalized.total || item.total,
+        base: breakdownTotals ? breakdownTotals.base : normalized.base || item.base,
+        vat: breakdownPayload.length
+          ? getPrimaryVatRateFromBreakdown(breakdownPayload)
+          : resolveVatRateValue(item.vat),
+        vatAmount: breakdownTotals ? breakdownTotals.vatAmount : normalized.vatAmount || item.vatAmount,
+        total: breakdownTotals ? breakdownTotals.total : normalized.total || item.total,
+        vatBreakdown: breakdownPayload,
         analysisText: item.analysisText,
         companyId: getSelectedCompanyId(),
       };
@@ -2010,6 +2585,10 @@ function uploadPending() {
     companyId: getSelectedCompanyId(),
     entries: pendingFiles.map((item) => {
       const normalized = normalizeInvoiceAmounts(item);
+      const breakdownPayload = buildVatBreakdownPayload(item.vatBreakdown || []);
+      const breakdownTotals = breakdownPayload.length
+        ? summarizeVatBreakdown(item.vatBreakdown || [])
+        : null;
       return {
         storedFilename: item.storedFilename,
         originalFilename: item.originalFilename,
@@ -2019,10 +2598,13 @@ function uploadPending() {
         analysisStatus: item.analysisStatus || "ok",
         companyId: getSelectedCompanyId(),
         supplier: item.supplier.trim(),
-        base: normalized.base || item.base,
-        vat: resolveVatRateValue(item.vat),
-        vatAmount: normalized.vatAmount || item.vatAmount,
-        total: normalized.total || item.total,
+        base: breakdownTotals ? breakdownTotals.base : normalized.base || item.base,
+        vat: breakdownPayload.length
+          ? getPrimaryVatRateFromBreakdown(breakdownPayload)
+          : resolveVatRateValue(item.vat),
+        vatAmount: breakdownTotals ? breakdownTotals.vatAmount : normalized.vatAmount || item.vatAmount,
+        total: breakdownTotals ? breakdownTotals.total : normalized.total || item.total,
+        vatBreakdown: breakdownPayload,
         analysisText: item.analysisText,
       };
     }),
@@ -3025,7 +3607,11 @@ function renderInvoices(invoices) {
     baseTd.textContent = formatCurrency(invoice.base_amount);
 
     const vatTd = document.createElement("td");
-    vatTd.textContent = `${invoice.vat_rate}%`;
+    const vatDisplay = getVatDisplayFromInvoice(invoice);
+    vatTd.textContent = vatDisplay.label;
+    if (vatDisplay.title) {
+      vatTd.title = vatDisplay.title;
+    }
 
     const vatAmountTd = document.createElement("td");
     vatAmountTd.textContent = formatCurrency(invoice.vat_amount || 0);
@@ -3130,7 +3716,11 @@ function renderIncomeInvoices(invoices) {
     baseTd.textContent = formatCurrency(invoice.base_amount);
 
     const vatTd = document.createElement("td");
-    vatTd.textContent = `${invoice.vat_rate}%`;
+    const vatDisplay = getVatDisplayFromInvoice(invoice);
+    vatTd.textContent = vatDisplay.label;
+    if (vatDisplay.title) {
+      vatTd.title = vatDisplay.title;
+    }
 
     const vatAmountTd = document.createElement("td");
     vatAmountTd.textContent = formatCurrency(invoice.vat_amount || 0);
@@ -3975,27 +4565,58 @@ function updateTaxSummary() {
 function updatePnlSummary() {
   const incomeTotal = billingBaseTotal;
   const expensesTotal = currentDeductibleExpenses;
-  const preTax = incomeTotal - expensesTotal;
-  const companyType = getSelectedCompanyType();
-  const taxRate =
-    companyType === "company" ? 0.25 : companyType === "individual" ? 0.15 : 0;
-  const taxes = preTax > 0 ? preTax * taxRate : 0;
-  const netResult = preTax - taxes;
-
-  const incomeEl = document.getElementById("pnlIncome");
-  const expensesEl = document.getElementById("pnlExpenses");
+  const operatingResultEl = document.getElementById("pnlOperatingResult");
+  const financialResultEl = document.getElementById("pnlFinancialResult");
   const preTaxEl = document.getElementById("pnlPreTax");
-  const taxesEl = document.getElementById("pnlTaxes");
   const netEl = document.getElementById("pnlNet");
-
-  if (!incomeEl) {
+  if (!operatingResultEl || !financialResultEl || !preTaxEl || !netEl) {
     return;
   }
 
-  incomeEl.textContent = formatCurrency(incomeTotal);
-  expensesEl.textContent = formatCurrency(expensesTotal);
+  setPnlInputValue("pnlLine1", incomeTotal, true);
+  setPnlInputValue("pnlLine4", expensesTotal, true);
+
+  const opIncome =
+    getPnlInputValue("pnlLine1") +
+    getPnlInputValue("pnlLine2") +
+    getPnlInputValue("pnlLine3") +
+    getPnlInputValue("pnlLine5") +
+    getPnlInputValue("pnlLine9") +
+    getPnlInputValue("pnlLine10") +
+    getPnlInputValue("pnlLine11") +
+    getPnlInputValue("pnlLine12");
+  const opExpenses =
+    getPnlInputValue("pnlLine4") +
+    getPnlInputValue("pnlLine6") +
+    getPnlInputValue("pnlLine7") +
+    getPnlInputValue("pnlLine8");
+  const operatingResult = opIncome - opExpenses;
+
+  const financialIncome =
+    getPnlInputValue("pnlLine13a") +
+    getPnlInputValue("pnlLine13b") +
+    getPnlInputValue("pnlLine18a") +
+    getPnlInputValue("pnlLine18b") +
+    getPnlInputValue("pnlLine18c");
+  const financialExpenses =
+    getPnlInputValue("pnlLine14") +
+    getPnlInputValue("pnlLine15") +
+    getPnlInputValue("pnlLine16") +
+    getPnlInputValue("pnlLine17");
+  const financialResult = financialIncome - financialExpenses;
+  const preTax = operatingResult + financialResult;
+
+  const companyType = getSelectedCompanyType();
+  const taxRate =
+    companyType === "company" ? 0.25 : companyType === "individual" ? 0.15 : 0;
+  const defaultTaxes = preTax > 0 ? preTax * taxRate : 0;
+  setPnlInputValue("pnlLine19", defaultTaxes, true);
+  const taxes = getPnlInputValue("pnlLine19");
+  const netResult = preTax - taxes;
+
+  operatingResultEl.textContent = formatCurrency(operatingResult);
+  financialResultEl.textContent = formatCurrency(financialResult);
   preTaxEl.textContent = formatCurrency(preTax);
-  taxesEl.textContent = formatCurrency(taxes);
   netEl.textContent = formatCurrency(netResult);
 }
 
@@ -4010,10 +4631,10 @@ function exportPnlPdf() {
   const taxIdValue = pnlTaxId.value.trim();
   const periodLabel = getPeriodLabel();
 
-  const incomeValue = document.getElementById("pnlIncome").textContent;
-  const expensesValue = document.getElementById("pnlExpenses").textContent;
+  const incomeValue = formatCurrency(getPnlInputValue("pnlLine1"));
+  const expensesValue = formatCurrency(getPnlInputValue("pnlLine4"));
   const preTaxValue = document.getElementById("pnlPreTax").textContent;
-  const taxesValue = document.getElementById("pnlTaxes").textContent;
+  const taxesValue = formatCurrency(getPnlInputValue("pnlLine19"));
   const netValue = document.getElementById("pnlNet").textContent;
 
   const doc = new jsPDF({ unit: "pt", format: "a4" });
@@ -4050,14 +4671,32 @@ function exportPnlPdf() {
 
   doc.setFont("helvetica", "normal");
   const rows = [
-    ["Cifra de negocios", incomeValue],
-    [
-      "Aprovisionamientos, gastos de personal, otros gastos de explotación y amortización del inmovilizado",
-      expensesValue,
-    ],
-    ["Resultado de explotación (resultado antes de impuestos)", preTaxValue],
-    ["Impuesto sobre beneficios (estimado)", taxesValue],
-    ["Resultado del ejercicio", netValue],
+    ["1. Importe neto de la cifra de negocios", incomeValue],
+    ["2. Variación de existencias de productos terminados y en curso", formatCurrency(getPnlInputValue("pnlLine2"))],
+    ["3. Trabajos realizados por la empresa para su activo", formatCurrency(getPnlInputValue("pnlLine3"))],
+    ["4. Aprovisionamientos", expensesValue],
+    ["5. Otros ingresos de explotación", formatCurrency(getPnlInputValue("pnlLine5"))],
+    ["6. Gastos de personal", formatCurrency(getPnlInputValue("pnlLine6"))],
+    ["7. Otros gastos de explotación", formatCurrency(getPnlInputValue("pnlLine7"))],
+    ["8. Amortización del inmovilizado", formatCurrency(getPnlInputValue("pnlLine8"))],
+    ["9. Imputación de subvenciones de inmovilizado no financiero y otras", formatCurrency(getPnlInputValue("pnlLine9"))],
+    ["10. Excesos de provisiones", formatCurrency(getPnlInputValue("pnlLine10"))],
+    ["11. Deterioro y resultado por enajenación del inmovilizado", formatCurrency(getPnlInputValue("pnlLine11"))],
+    ["12. Otros resultados", formatCurrency(getPnlInputValue("pnlLine12"))],
+    ["A) RESULTADO DE EXPLOTACIÓN", document.getElementById("pnlOperatingResult").textContent],
+    ["13.a Imputación de subvenciones, donaciones y legados de carácter financiero", formatCurrency(getPnlInputValue("pnlLine13a"))],
+    ["13.b Otros ingresos financieros", formatCurrency(getPnlInputValue("pnlLine13b"))],
+    ["14. Gastos financieros", formatCurrency(getPnlInputValue("pnlLine14"))],
+    ["15. Variación de valor razonable en instrumentos financieros", formatCurrency(getPnlInputValue("pnlLine15"))],
+    ["16. Diferencias de cambio", formatCurrency(getPnlInputValue("pnlLine16"))],
+    ["17. Deterioro y resultado por enajenación de instrumentos financieros", formatCurrency(getPnlInputValue("pnlLine17"))],
+    ["18.a Incorporación al activo de gastos financieros", formatCurrency(getPnlInputValue("pnlLine18a"))],
+    ["18.b Ingresos financieros derivados de convenios de acreedores", formatCurrency(getPnlInputValue("pnlLine18b"))],
+    ["18.c Resto de ingresos y gastos", formatCurrency(getPnlInputValue("pnlLine18c"))],
+    ["B) RESULTADO FINANCIERO", document.getElementById("pnlFinancialResult").textContent],
+    ["C) RESULTADO ANTES DE IMPUESTOS", preTaxValue],
+    ["19. Impuestos sobre beneficios", taxesValue],
+    ["D) RESULTADO DEL EJERCICIO", netValue],
   ];
 
   rows.forEach(([label, value]) => {
@@ -4442,6 +5081,7 @@ function bindEvents() {
   if (reportEmailBtn) {
     reportEmailBtn.addEventListener("click", sendQuarterlyReportEmail);
   }
+  bindPnlInputs();
 }
 
 function init() {
