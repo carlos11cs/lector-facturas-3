@@ -401,7 +401,7 @@ def _extract_supplier_candidates(text: str, company_names=None) -> List[Tuple[st
         "emisor",
         "proveedor",
         "facturado por",
-        "vendedor",
+        "en nombre de",
         "issued by",
         "seller",
     ]
@@ -473,7 +473,7 @@ def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
         "emisor",
         "proveedor",
         "facturado por",
-        "vendedor",
+        "en nombre de",
         "issued by",
         "seller",
     ]
@@ -488,10 +488,20 @@ def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
     ]
     anchor_keywords = [
         "titular",
+        "en nombre de",
         "iban",
         "datos bancarios",
         "datos fiscales",
     ]
+
+    for line in lines:
+        lowered = line.lower()
+        if "en nombre de" in lowered:
+            match = re.split(r"en nombre de", line, flags=re.IGNORECASE)
+            if len(match) > 1:
+                candidate = match[1].strip(" :-")
+                if _is_valid_supplier(candidate, company_names, text, require_tax_id=False):
+                    return candidate
 
     for idx, line in enumerate(lines):
         lowered = line.lower()
@@ -1009,7 +1019,7 @@ def analyze_invoice(
             )
             if learned_supplier:
                 provider_name = learned_supplier
-        if provider_name is None and analysis_status == "ok" and pdf_kind != "original":
+        if provider_name is None and analysis_status == "ok":
             heuristic_supplier = _extract_supplier_from_text(
                 supplier_source_text,
                 company_names,
