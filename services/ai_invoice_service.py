@@ -21,6 +21,7 @@ PDF_TEXT_THRESHOLD = int(os.getenv("PDF_TEXT_THRESHOLD", "100"))
 PDF_OCR_ZOOM = float(os.getenv("PDF_OCR_ZOOM", "2.0"))
 OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", "5"))
 OCR_MAX_SECONDS = int(os.getenv("OCR_MAX_SECONDS", "7"))
+OCR_MAX_DIM = int(os.getenv("OCR_MAX_DIM", "1600"))
 _client: Optional[OpenAI] = None
 _ocr_reader = None
 
@@ -860,10 +861,22 @@ def _extract_pdf_text_ocr(file_path: str) -> str:
         return ""
 
     parts = []
-    matrix = fitz.Matrix(PDF_OCR_ZOOM, PDF_OCR_ZOOM)
+    runtime_env = os.getenv("ENV", "").strip().lower()
+    max_pages = OCR_MAX_PAGES
+    if runtime_env == "production" and OCR_MAX_PAGES > 2 and "OCR_MAX_PAGES" not in os.environ:
+        max_pages = 2
     with fitz.open(file_path) as doc:
-        for page in doc:
-            pix = page.get_pixmap(matrix=matrix)
+        for idx, page in enumerate(doc):
+            if idx >= max_pages:
+                break
+            base_scale = PDF_OCR_ZOOM
+            if runtime_env == "production" and base_scale > 1.4 and "PDF_OCR_ZOOM" not in os.environ:
+                base_scale = 1.4
+            max_dim = max(page.rect.width, page.rect.height, 1)
+            if max_dim * base_scale > OCR_MAX_DIM:
+                base_scale = OCR_MAX_DIM / max_dim
+            matrix = fitz.Matrix(base_scale, base_scale)
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
             image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
                 pix.height, pix.width, pix.n
             )
@@ -872,6 +885,8 @@ def _extract_pdf_text_ocr(file_path: str) -> str:
             lines = reader.readtext(image, detail=0)
             if lines:
                 parts.append("\n".join(lines))
+            del image, pix
+            gc.collect()
     return "\n".join(parts).strip()
 
 
@@ -886,15 +901,25 @@ def _extract_pdf_text_ocr_from_bytes(data: bytes) -> str:
         return ""
 
     parts = []
-    matrix = fitz.Matrix(PDF_OCR_ZOOM, PDF_OCR_ZOOM)
     start_time = time.time()
+    runtime_env = os.getenv("ENV", "").strip().lower()
+    max_pages = OCR_MAX_PAGES
+    if runtime_env == "production" and OCR_MAX_PAGES > 2 and "OCR_MAX_PAGES" not in os.environ:
+        max_pages = 2
     with fitz.open(stream=data, filetype="pdf") as doc:
         for idx, page in enumerate(doc):
-            if idx >= OCR_MAX_PAGES:
+            if idx >= max_pages:
                 break
             if time.time() - start_time > OCR_MAX_SECONDS:
                 break
-            pix = page.get_pixmap(matrix=matrix)
+            base_scale = PDF_OCR_ZOOM
+            if runtime_env == "production" and base_scale > 1.4 and "PDF_OCR_ZOOM" not in os.environ:
+                base_scale = 1.4
+            max_dim = max(page.rect.width, page.rect.height, 1)
+            if max_dim * base_scale > OCR_MAX_DIM:
+                base_scale = OCR_MAX_DIM / max_dim
+            matrix = fitz.Matrix(base_scale, base_scale)
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
             image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
                 pix.height, pix.width, pix.n
             )
@@ -903,6 +928,12 @@ def _extract_pdf_text_ocr_from_bytes(data: bytes) -> str:
             lines = reader.readtext(image, detail=0)
             if lines:
                 parts.append("\n".join(lines))
+            if idx == 0:
+                preview_text = "\n".join(parts).strip()
+                if _is_low_quality_ocr(preview_text) and not _has_amount_hints(preview_text):
+                    del image, pix
+                    gc.collect()
+                    return preview_text
             del image, pix
             gc.collect()
     return "\n".join(parts).strip()
@@ -933,6 +964,13 @@ def _extract_image_text_ocr_from_bytes(data: bytes) -> str:
     image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
     if image is None:
         return ""
+    height, width = image.shape[:2]
+    max_dim = max(width, height, 1)
+    if max_dim > OCR_MAX_DIM:
+        scale = OCR_MAX_DIM / max_dim
+        image = cv2.resize(
+            image, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA
+        )
     lines = reader.readtext(image, detail=0)
     if not lines:
         return ""
