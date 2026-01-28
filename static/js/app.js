@@ -2245,6 +2245,13 @@ function analyzeIncomeForItem(item) {
       item.storedFilename = data.storedFilename || "";
       item.analysisText = extracted.analysis_text || "";
       item.analysisStatus = extracted.analysis_status || "ok";
+      const extractedBreakdown = parseVatBreakdown(
+        extracted.vat_breakdown || extracted.vatBreakdown
+      );
+      if (extractedBreakdown.length) {
+        item.vatBreakdown = extractedBreakdown;
+        item.vatBreakdownOpen = extractedBreakdown.length > 1;
+      }
       if (extracted.analysis_status === "low_quality_scan") {
         item.analysisPending = false;
         item.analysisError = true;
@@ -2478,6 +2485,13 @@ function analyzeInvoiceForItem(item) {
       item.storedFilename = data.storedFilename || "";
       item.analysisText = extracted.analysis_text || "";
       item.analysisStatus = extracted.analysis_status || "ok";
+      const extractedBreakdown = parseVatBreakdown(
+        extracted.vat_breakdown || extracted.vatBreakdown
+      );
+      if (extractedBreakdown.length) {
+        item.vatBreakdown = extractedBreakdown;
+        item.vatBreakdownOpen = extractedBreakdown.length > 1;
+      }
       if (extracted.analysis_status === "low_quality_scan") {
         item.analysisPending = false;
         item.analysisError = true;
@@ -2548,6 +2562,7 @@ function analyzeInvoiceForItem(item) {
         extracted.vat_rate,
         extracted.vat_amount,
         extracted.total_amount,
+        extracted.vat_breakdown,
       ].some((value) => value !== null && value !== undefined && value !== "");
       item.analysisError = !hasExtractedValue && !item.analysisText;
       item.analysisErrorMessage = item.analysisError ? ANALYSIS_ERROR_MESSAGE : "";

@@ -210,6 +210,139 @@ def _normalize_amount(value: Any) -> Optional[float]:
         return None
 
 
+def _normalize_vat_breakdown(raw_value: Any) -> List[Dict[str, Any]]:
+    if not raw_value:
+        return []
+    value = raw_value
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+
+    lines: List[Dict[str, Any]] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        rate = _normalize_rate(
+            entry.get("rate")
+            or entry.get("vat_rate")
+            or entry.get("vat")
+            or entry.get("iva_rate")
+            or entry.get("iva")
+        )
+        if rate is None or rate not in {0, 4, 10, 21}:
+            continue
+        base_amount = _normalize_amount(entry.get("base") or entry.get("base_amount"))
+        vat_amount = _normalize_amount(entry.get("vat_amount") or entry.get("iva_amount"))
+        total_amount = _normalize_amount(entry.get("total") or entry.get("total_amount"))
+        if base_amount is None and total_amount is None:
+            continue
+        if base_amount is None and total_amount is not None:
+            base_amount = round(total_amount / (1 + rate / 100), 2)
+        if base_amount is not None and vat_amount is None:
+            vat_amount = round(base_amount * (rate / 100), 2)
+        if base_amount is not None and total_amount is None and vat_amount is not None:
+            total_amount = round(base_amount + vat_amount, 2)
+        lines.append(
+            {
+                "rate": float(rate),
+                "base": _round_amount(base_amount),
+                "vat_amount": _round_amount(vat_amount),
+                "total": _round_amount(total_amount),
+            }
+        )
+    return lines
+
+
+def _summarize_vat_breakdown(lines: List[Dict[str, Any]]) -> Optional[Tuple[float, float, float]]:
+    if not lines:
+        return None
+    base_total = 0.0
+    vat_total = 0.0
+    total_total = 0.0
+    for line in lines:
+        base_total += float(line.get("base") or 0)
+        vat_total += float(line.get("vat_amount") or 0)
+        total_total += float(line.get("total") or 0)
+    return (_round_amount(base_total), _round_amount(vat_total), _round_amount(total_total))
+
+
+def _extract_vat_breakdown_from_text(text: str) -> List[Dict[str, Any]]:
+    if not text:
+        return []
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return []
+    breakdown: List[Dict[str, Any]] = []
+    context_indices = set()
+    keywords = [
+        "base iva",
+        "base i.v.a",
+        "base i.v.a.",
+        "iva",
+        "i.v.a",
+        "i.v.a.",
+        "%iva",
+        "% iva",
+    ]
+    for idx, line in enumerate(lines):
+        lowered = line.lower()
+        if any(keyword in lowered for keyword in keywords):
+            context_indices.update({idx, idx + 1, idx + 2})
+    if not context_indices:
+        context_indices = set(range(min(6, len(lines))))
+
+    number_pattern = re.compile(r"\d{1,6}[\\.,]\\d{2}")
+    rate_pattern = re.compile(r"\b(\d{1,2}(?:[\\.,]\d{1,2})?)\s*%?")
+
+    for idx, line in enumerate(lines):
+        if idx not in context_indices:
+            continue
+        if "cliente" in line.lower() or "facturado a" in line.lower():
+            continue
+        numbers = number_pattern.findall(line)
+        if len(numbers) < 2:
+            continue
+        floats = [_normalize_amount(value) for value in numbers]
+        floats = [value for value in floats if value is not None]
+        if len(floats) < 2:
+            continue
+        rates = []
+        for match in rate_pattern.findall(line):
+            rate_value = _normalize_rate(match)
+            if rate_value is not None and rate_value in {0, 4, 10, 21}:
+                rates.append(rate_value)
+        rate = rates[0] if rates else None
+        if rate is None:
+            for value in floats:
+                if value in {0, 4, 10, 21}:
+                    rate = value
+                    break
+        if rate is None:
+            continue
+        if len(floats) >= 3:
+            base_value = floats[0]
+            vat_value = floats[2] if floats[1] == rate else floats[1]
+        else:
+            base_value = floats[0]
+            vat_value = round(base_value * (rate / 100), 2)
+        total_value = round(base_value + vat_value, 2)
+        breakdown.append(
+            {
+                "rate": float(rate),
+                "base": _round_amount(base_value),
+                "vat_amount": _round_amount(vat_value),
+                "total": _round_amount(total_value),
+            }
+        )
+    return breakdown
+
+
 def _normalize_entity_name(value: Optional[str]) -> str:
     if not value:
         return ""
@@ -907,7 +1040,8 @@ def analyze_invoice(
         prompt = (
             "Analiza el siguiente texto extraido de una factura emitida (ingreso). "
             "Devuelve SOLO JSON valido con estas claves: "
-            "client, invoice_date, payment_dates, base_amount, vat_rate, vat_amount, total_amount. "
+            "client, invoice_date, payment_dates, base_amount, vat_rate, vat_amount, total_amount, vat_breakdown. "
+            "vat_breakdown es una lista opcional de lineas IVA con {rate, base, vat_amount, total}. "
             "payment_dates debe ser una lista de fechas (YYYY-MM-DD) y puede estar vacia. "
             "Usa null si no puedes inferir un dato con seguridad. "
             "No incluyas texto adicional fuera del JSON.\n\n"
@@ -917,7 +1051,8 @@ def analyze_invoice(
         prompt = (
             "Analiza el siguiente texto extraido de una factura recibida (gasto). "
             "Devuelve SOLO JSON valido con estas claves: "
-            "supplier, invoice_date, payment_dates, base_amount, vat_rate, vat_amount, total_amount. "
+            "supplier, invoice_date, payment_dates, base_amount, vat_rate, vat_amount, total_amount, vat_breakdown. "
+            "vat_breakdown es una lista opcional de lineas IVA con {rate, base, vat_amount, total}. "
             "El supplier debe ser la razon social del emisor (forma juridica si aparece) "
             "y no debe ser el cliente/receptor. "
             "payment_dates debe ser una lista de fechas (YYYY-MM-DD) y puede estar vacia. "
@@ -1002,6 +1137,20 @@ def analyze_invoice(
     total_amount = _normalize_amount(
         data.get("total_amount") or data.get("total_factura") or data.get("total")
     )
+    vat_breakdown = _normalize_vat_breakdown(
+        data.get("vat_breakdown")
+        or data.get("iva_breakdown")
+        or data.get("vat_lines")
+        or data.get("iva_lines")
+    )
+    if not vat_breakdown:
+        vat_breakdown = _extract_vat_breakdown_from_text(extracted_text)
+    breakdown_summary = _summarize_vat_breakdown(vat_breakdown)
+    if breakdown_summary:
+        base_amount, vat_amount, total_amount = breakdown_summary
+        if vat_rate is None:
+            if len({line.get("rate") for line in vat_breakdown if line.get("rate") is not None}) == 1:
+                vat_rate = vat_breakdown[0].get("rate")
 
     if company_names is None:
         company_names = []
@@ -1087,6 +1236,7 @@ def analyze_invoice(
         "vat_rate": vat_rate,
         "vat_amount": vat_amount,
         "total_amount": total_amount,
+        "vat_breakdown": vat_breakdown,
         "analysis_text": raw_text[:500],
         "validation": validation,
     }
