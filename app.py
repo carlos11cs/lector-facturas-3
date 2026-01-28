@@ -723,6 +723,12 @@ def parse_payment_dates(raw_value):
     return sorted(set(normalized))
 
 
+def vat_rate_to_str(value):
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
 def parse_vat_breakdown(raw_value):
     if not raw_value:
         return []
@@ -1829,7 +1835,7 @@ def upload_invoices():
                         continue
                 supplier = (entry.get("supplier") or "").strip()
                 base_amount = parse_amount(str(entry.get("base") or ""))
-                vat_rate_raw = str(entry.get("vat") or "").strip()
+                vat_rate_raw = vat_rate_to_str(entry.get("vat"))
                 vat_amount = parse_amount(str(entry.get("vatAmount") or ""))
                 total_amount = parse_amount(str(entry.get("total") or ""))
                 vat_breakdown = parse_vat_breakdown(
@@ -2129,7 +2135,7 @@ def create_billing():
     month = int(payload.get("month") or 0)
     year = int(payload.get("year") or 0)
     base_amount = parse_amount(str(payload.get("base") or ""))
-    vat_rate_raw = str(payload.get("vat") or "").strip()
+    vat_rate_raw = vat_rate_to_str(payload.get("vat"))
     concept = (payload.get("concept") or "").strip()
     invoice_date = payload.get("invoice_date") or payload.get("date") or ""
 
@@ -2636,7 +2642,7 @@ def update_invoice(invoice_id):
     )
     supplier = (payload.get("supplier") or "").strip()
     base_amount = parse_amount(str(payload.get("base_amount") or ""))
-    vat_rate_raw = str(payload.get("vat_rate") or "").strip()
+    vat_rate_raw = vat_rate_to_str(payload.get("vat_rate"))
     vat_amount = parse_amount(str(payload.get("vat_amount") or ""))
     total_amount = parse_amount(str(payload.get("total_amount") or ""))
     vat_breakdown = parse_vat_breakdown(
@@ -2833,7 +2839,7 @@ def create_income_invoices():
             invoice_date = entry.get("date") or entry.get("invoice_date") or date.today().isoformat()
             client = (entry.get("client") or "").strip()
             base_amount = parse_amount(str(entry.get("base") or ""))
-            vat_rate_raw = str(entry.get("vat") or "").strip()
+            vat_rate_raw = vat_rate_to_str(entry.get("vat"))
             vat_amount = parse_amount(str(entry.get("vatAmount") or ""))
             total_amount = parse_amount(str(entry.get("total") or ""))
             vat_breakdown = parse_vat_breakdown(
@@ -2937,7 +2943,7 @@ def update_income_invoice(invoice_id):
     )
     client = (payload.get("client") or "").strip()
     base_amount = parse_amount(str(payload.get("base_amount") or ""))
-    vat_rate_raw = str(payload.get("vat_rate") or "").strip()
+    vat_rate_raw = vat_rate_to_str(payload.get("vat_rate"))
     vat_amount = parse_amount(str(payload.get("vat_amount") or ""))
     total_amount = parse_amount(str(payload.get("total_amount") or ""))
     vat_breakdown = parse_vat_breakdown(
@@ -3273,7 +3279,7 @@ def update_billing(billing_id):
     payload = request.get_json(silent=True) or request.form
 
     base_amount = parse_amount(str(payload.get("base") or ""))
-    vat_rate_raw = str(payload.get("vat") or "").strip()
+    vat_rate_raw = vat_rate_to_str(payload.get("vat"))
 
     errors = []
     if base_amount is None or base_amount < 0:
