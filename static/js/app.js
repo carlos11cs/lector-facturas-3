@@ -3211,6 +3211,35 @@ function updatePaymentDateFromCalendar(item, newDate) {
     alert("Selecciona una fecha válida.");
     return Promise.resolve();
   }
+  if (item.type === "no_invoice") {
+    const payload = {
+      expense_date: newDate,
+      concept: item.concept || "Gasto sin factura",
+      amount: item.total_amount ?? item.amount ?? 0,
+      expense_type: item.expense_type || "otro",
+      deductible: item.deductible !== undefined ? item.deductible : true,
+      company_id: getSelectedCompanyId(),
+    };
+    const url = withCompanyParam(`/api/expenses/no-invoice/${item.id}`);
+    return fetch(url, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (!data.ok) {
+          alert((data.errors || ["Error al actualizar."]).join("\n"));
+          return;
+        }
+        refreshPayments();
+      })
+      .catch(() => {
+        alert("No se pudo actualizar la fecha de vencimiento.");
+      });
+  }
   const existingDates = Array.isArray(item.payment_dates) && item.payment_dates.length
     ? item.payment_dates.slice()
     : item.payment_date
@@ -3285,14 +3314,25 @@ function renderPaymentDayDetails(day) {
     const row = document.createElement("div");
     row.className = "payment-day-item";
     const supplier = document.createElement("span");
-    const label = item.type === "income" ? "Cliente" : "Proveedor";
+    let label = "Proveedor";
+    if (item.type === "income") {
+      label = "Cliente";
+    } else if (item.type === "no_invoice") {
+      label = "Concepto";
+    }
     supplier.textContent = `${label}: ${item.counterparty || "-"}`;
     const concept = document.createElement("span");
     concept.textContent = item.concept || "Factura";
     const dateLabel = document.createElement("span");
     dateLabel.textContent = item.payment_date;
     const amount = document.createElement("span");
-    amount.textContent = `${formatCurrency(item.amount)} (${item.type === "income" ? "Ingreso" : "Gasto"})`;
+    const amountLabel =
+      item.type === "income"
+        ? "Ingreso"
+        : item.type === "no_invoice"
+        ? "Gasto sin factura"
+        : "Gasto";
+    amount.textContent = `${formatCurrency(item.amount)} (${amountLabel})`;
     const editBtn = document.createElement("button");
     editBtn.type = "button";
     editBtn.className = "button ghost small";

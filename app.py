@@ -2358,6 +2358,21 @@ def list_payments():
             .order_by(invoices_table.c.invoice_date.desc(), invoices_table.c.id.desc())
         ).mappings().all()
 
+        no_invoice_rows = conn.execute(
+            select(
+                no_invoice_table.c.id,
+                no_invoice_table.c.expense_date,
+                no_invoice_table.c.concept,
+                no_invoice_table.c.amount,
+                no_invoice_table.c.expense_type,
+                no_invoice_table.c.deductible,
+            )
+            .where(no_invoice_table.c.user_id == data_owner_id)
+            .where(no_invoice_table.c.company_id == company_id)
+            .where(no_invoice_table.c.expense_date.between(buffer_start, year_end_iso))
+            .order_by(no_invoice_table.c.expense_date.desc(), no_invoice_table.c.id.desc())
+        ).mappings().all()
+
         income_rows = conn.execute(
             select(
                 income_invoices_table.c.id,
@@ -2430,6 +2445,39 @@ def list_payments():
                     "type": "expense",
                 }
             )
+
+    for row in no_invoice_rows:
+        expense_date = row.get("expense_date")
+        if not expense_date:
+            continue
+        try:
+            payment_dt = date.fromisoformat(expense_date)
+        except ValueError:
+            continue
+        if payment_dt < start or payment_dt > end:
+            continue
+        day = payment_dt.day
+        amount = float(row.get("amount") or 0)
+        day_totals[day] = round(day_totals.get(day, 0.0) + amount, 2)
+        items.append(
+            {
+                "id": row["id"],
+                "counterparty": row.get("concept"),
+                "concept": row.get("concept"),
+                "payment_date": expense_date,
+                "payment_dates": [expense_date],
+                "invoice_date": expense_date,
+                "base_amount": amount,
+                "vat_rate": 0,
+                "vat_amount": 0,
+                "total_amount": amount,
+                "expense_category": "without_invoice",
+                "expense_type": row.get("expense_type"),
+                "deductible": bool(row.get("deductible")),
+                "amount": amount,
+                "type": "no_invoice",
+            }
+        )
 
     for row in income_rows:
         payment_dates = parse_payment_dates(row.get("payment_dates"))
