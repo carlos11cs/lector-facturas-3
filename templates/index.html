@@ -100,29 +100,32 @@
       <section class="page-section active" data-section="dashboard">
         <section class="panel summary-panel">
           <div class="summary-item highlight">
-            <h3>Total gastado</h3>
-            <p id="totalSpent">0,00 €</p>
+            <h3>Gastos totales</h3>
+            <p id="expenseTotalGross">0,00 €</p>
           </div>
           <div class="summary-item">
-            <h3>IVA 0%</h3>
-            <p id="vat0">0,00 €</p>
-          </div>
-          <div class="summary-item">
-            <h3>IVA 4%</h3>
-            <p id="vat4">0,00 €</p>
-          </div>
-          <div class="summary-item">
-            <h3>IVA 10%</h3>
-            <p id="vat10">0,00 €</p>
-          </div>
-          <div class="summary-item">
-            <h3>IVA 21%</h3>
-            <p id="vat21">0,00 €</p>
+            <h3>IVA soportado</h3>
+            <p id="expenseVatSupported">0,00 €</p>
           </div>
           <div class="summary-item total">
-            <h3>Total IVA deducible</h3>
-            <p id="vatTotal">0,00 €</p>
+            <h3>IVA deducible</h3>
+            <p id="expenseVatDeductible">0,00 €</p>
           </div>
+          <div class="summary-item highlight">
+            <h3>Ingresos brutos</h3>
+            <p id="incomeTotalGross">0,00 €</p>
+          </div>
+          <div class="summary-item">
+            <h3>IVA repercutido</h3>
+            <p id="incomeVatOutput">0,00 €</p>
+          </div>
+          <div class="summary-item total">
+            <h3 id="incomeVatResultLabel">IVA a pagar</h3>
+            <p id="incomeVatResult">0,00 €</p>
+          </div>
+          <p class="summary-note">
+            Los importes de gastos e ingresos son brutos (incluyen IVA). El IVA soportado y repercutido se calcula por separado para reflejar el resultado del impuesto.
+          </p>
           <p class="empty dashboard-empty" id="dashboardEmptyMessage">
             No hay datos para el periodo seleccionado.
           </p>
