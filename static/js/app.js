@@ -695,6 +695,26 @@ function createNoInvoiceTypeSelect(selected) {
   return select;
 }
 
+function getNoInvoiceDeductibleAmount(expense) {
+  if (!expense) {
+    return 0;
+  }
+  if (expense.expense_type === "prestamo") {
+    return Number(expense.interest_amount) || 0;
+  }
+  if (expense.vat_deductible) {
+    return (
+      Number(expense.base_amount) ||
+      Number(expense.base_amount_no_invoice) ||
+      0
+    );
+  }
+  if (!expense.deductible) {
+    return 0;
+  }
+  return Number(expense.amount) || 0;
+}
+
 function toggleLoanInterestField({
   typeValue,
   interestField,
@@ -3600,23 +3620,10 @@ function refreshAnnualTaxData() {
       return total + (Number(invoice.base_amount) || 0);
     }, 0);
 
-    const annualNoInvoice = expenses.reduce((total, expense) => {
-      if (expense.expense_type === "prestamo") {
-        return total + (Number(expense.interest_amount) || 0);
-      }
-      if (expense.vat_deductible) {
-        return (
-          total +
-          (Number(expense.base_amount) ||
-            Number(expense.base_amount_no_invoice) ||
-            0)
-        );
-      }
-      if (!expense.deductible) {
-        return total;
-      }
-      return total + (Number(expense.amount) || 0);
-    }, 0);
+    const annualNoInvoice = expenses.reduce(
+      (total, expense) => total + getNoInvoiceDeductibleAmount(expense),
+      0
+    );
 
     annualDeductibleExpenses = annualInvoices + annualNoInvoice;
     updateTaxSummary();
@@ -4334,6 +4341,13 @@ function enterNoInvoiceEditMode(row, expense) {
   const vatRateSelect = createVatSelect(
     expense.vat_deductible ? expense.vat_rate : ""
   );
+  if (!expense.vat_deductible) {
+    const emptyOption = document.createElement("option");
+    emptyOption.value = "";
+    emptyOption.textContent = "-";
+    vatRateSelect.insertBefore(emptyOption, vatRateSelect.firstChild);
+    vatRateSelect.value = "";
+  }
   const vatAmountInput = document.createElement("input");
   vatAmountInput.type = "number";
   vatAmountInput.step = "0.01";
@@ -4786,23 +4800,10 @@ function updateTaxSummary() {
     return total + (Number(invoice.base_amount) || 0);
   }, 0);
 
-  const deductibleNoInvoice = currentNoInvoiceExpenses.reduce((total, expense) => {
-    if (expense.expense_type === "prestamo") {
-      return total + (Number(expense.interest_amount) || 0);
-    }
-    if (expense.vat_deductible) {
-      return (
-        total +
-        (Number(expense.base_amount) ||
-          Number(expense.base_amount_no_invoice) ||
-          0)
-      );
-    }
-    if (!expense.deductible) {
-      return total;
-    }
-    return total + (Number(expense.amount) || 0);
-  }, 0);
+  const deductibleNoInvoice = currentNoInvoiceExpenses.reduce(
+    (total, expense) => total + getNoInvoiceDeductibleAmount(expense),
+    0
+  );
 
   const periodExpenses = deductibleInvoices + deductibleNoInvoice;
   currentDeductibleExpenses = periodExpenses;
@@ -4833,7 +4834,32 @@ function updatePnlSummary() {
     }
     return sum;
   }, 0);
-  const operatingExpenses = Math.max(0, expensesTotal - loanInterest);
+  const invoiceExpenses = currentInvoices.reduce((sum, invoice) => {
+    if (invoice.expense_category === "non_deductible") {
+      return sum;
+    }
+    return sum + (Number(invoice.base_amount) || 0);
+  }, 0);
+  const payrollExpenses = currentNoInvoiceExpenses.reduce((sum, expense) => {
+    if (expense.expense_type === "nomina" || expense.expense_type === "seguridad_social") {
+      return sum + getNoInvoiceDeductibleAmount(expense);
+    }
+    return sum;
+  }, 0);
+  const amortizationExpenses = currentNoInvoiceExpenses.reduce((sum, expense) => {
+    if (expense.expense_type === "amortizacion") {
+      return sum + getNoInvoiceDeductibleAmount(expense);
+    }
+    return sum;
+  }, 0);
+  const otherOperatingExpenses = currentNoInvoiceExpenses.reduce((sum, expense) => {
+    if (expense.expense_type === "kilometraje" || expense.expense_type === "otro") {
+      return sum + getNoInvoiceDeductibleAmount(expense);
+    }
+    return sum;
+  }, 0);
+  const operatingExpenses =
+    invoiceExpenses + payrollExpenses + amortizationExpenses + otherOperatingExpenses;
   const operatingResultEl = document.getElementById("pnlOperatingResult");
   const financialResultEl = document.getElementById("pnlFinancialResult");
   const preTaxEl = document.getElementById("pnlPreTax");
@@ -4843,7 +4869,10 @@ function updatePnlSummary() {
   }
 
   setPnlInputValue("pnlLine1", incomeTotal, true);
-  setPnlInputValue("pnlLine4", operatingExpenses, true);
+  setPnlInputValue("pnlLine4", invoiceExpenses, true);
+  setPnlInputValue("pnlLine6", payrollExpenses, true);
+  setPnlInputValue("pnlLine7", otherOperatingExpenses, true);
+  setPnlInputValue("pnlLine8", amortizationExpenses, true);
   setPnlInputValue("pnlLine14", loanInterest, true);
 
   const opIncome =

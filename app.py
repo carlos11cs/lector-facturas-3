@@ -924,7 +924,10 @@ def _build_report_totals(user_id, company_id, months, year):
                     no_invoice_table.c.base_amount,
                 )
                 .where(no_invoice_table.c.user_id == user_id)
-                .where(no_invoice_table.c.company_id == company_id)
+                .where(
+                    (no_invoice_table.c.company_id == company_id)
+                    | (no_invoice_table.c.company_id.is_(None))
+                )
                 .where(no_invoice_table.c.expense_date.like(f"{prefix}%"))
             ).mappings().all()
             for row in no_invoice_rows:
@@ -2409,7 +2412,10 @@ def list_payments():
                 no_invoice_table.c.deductible,
             )
             .where(no_invoice_table.c.user_id == data_owner_id)
-            .where(no_invoice_table.c.company_id == company_id)
+            .where(
+                (no_invoice_table.c.company_id == company_id)
+                | (no_invoice_table.c.company_id.is_(None))
+            )
             .where(no_invoice_table.c.expense_date.between(buffer_start, year_end_iso))
             .order_by(no_invoice_table.c.expense_date.desc(), no_invoice_table.c.id.desc())
         ).mappings().all()
@@ -3152,11 +3158,18 @@ def list_no_invoice_expenses():
                 no_invoice_table.c.concept,
                 no_invoice_table.c.amount,
                 no_invoice_table.c.interest_amount,
+                no_invoice_table.c.vat_deductible,
+                no_invoice_table.c.vat_rate,
+                no_invoice_table.c.vat_amount,
+                no_invoice_table.c.base_amount,
                 no_invoice_table.c.expense_type,
                 no_invoice_table.c.deductible,
             )
             .where(no_invoice_table.c.user_id == data_owner_id)
-            .where(no_invoice_table.c.company_id == company_id)
+            .where(
+                (no_invoice_table.c.company_id == company_id)
+                | (no_invoice_table.c.company_id.is_(None))
+            )
             .where(no_invoice_table.c.expense_date.between(start, end))
             .order_by(no_invoice_table.c.expense_date.desc(), no_invoice_table.c.id.desc())
         ).mappings().all()
