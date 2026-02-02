@@ -4,7 +4,12 @@ let billingLineChart;
 let pieChart;
 let netChart;
 let expenseVatTotal = 0;
+let expenseVatSupportedTotal = 0;
+let expenseVatDeductibleTotal = 0;
 let billingVatTotal = 0;
+let incomeVatOutputTotal = 0;
+let incomeGrossTotal = 0;
+let expenseGrossTotal = 0;
 let currentInvoices = [];
 let currentNoInvoiceExpenses = [];
 let billingBaseTotal = 0;
@@ -713,6 +718,17 @@ function getNoInvoiceDeductibleAmount(expense) {
     return 0;
   }
   return Number(expense.amount) || 0;
+}
+
+function getNoInvoiceVatDeductibleAmount(expense) {
+  if (!expense || !expense.vat_deductible) {
+    return 0;
+  }
+  return (
+    Number(expense.vat_amount) ||
+    Number(expense.vat_amount_no_invoice) ||
+    0
+  );
 }
 
 function toggleLoanInterestField({
@@ -2777,30 +2793,120 @@ function refreshSummary() {
 }
 
 function updateSummary(data) {
-  document.getElementById("totalSpent").textContent = formatCurrency(
-    data.totalSpent || 0
+  updateDashboardTotals();
+}
+
+function updateDashboardTotals() {
+  const expenseInvoiceTotal = (currentInvoices || []).reduce(
+    (sum, invoice) => sum + (Number(invoice.total_amount) || 0),
+    0
   );
-  document.getElementById("vat0").textContent = formatCurrency(
-    data.vatTotals["0"] || 0
+  const summaryInvoiceTotal = Number(currentSummary?.totalSpent || 0);
+  const noInvoiceTotal = (currentNoInvoiceExpenses || []).reduce(
+    (sum, expense) => sum + (Number(expense.amount) || 0),
+    0
   );
-  document.getElementById("vat4").textContent = formatCurrency(
-    data.vatTotals["4"] || 0
+  const invoiceGrossTotal =
+    expenseInvoiceTotal > 0 || !summaryInvoiceTotal
+      ? expenseInvoiceTotal
+      : summaryInvoiceTotal;
+  const expenseTotalGross = invoiceGrossTotal + noInvoiceTotal;
+
+  const invoiceVatSupported = (currentInvoices || []).reduce(
+    (sum, invoice) => sum + (Number(invoice.vat_amount) || 0),
+    0
   );
-  document.getElementById("vat10").textContent = formatCurrency(
-    data.vatTotals["10"] || 0
+  const noInvoiceVatSupported = (currentNoInvoiceExpenses || []).reduce(
+    (sum, expense) => sum + getNoInvoiceVatDeductibleAmount(expense),
+    0
   );
-  document.getElementById("vat21").textContent = formatCurrency(
-    data.vatTotals["21"] || 0
+  const summaryVatTotals = currentSummary?.vatTotals || null;
+  const summaryVatTotal =
+    summaryVatTotals
+      ? (Number(summaryVatTotals["0"]) || 0) +
+        (Number(summaryVatTotals["4"]) || 0) +
+        (Number(summaryVatTotals["10"]) || 0) +
+        (Number(summaryVatTotals["21"]) || 0)
+      : 0;
+  const invoiceVatSupportedTotal =
+    invoiceVatSupported > 0 || !summaryVatTotal
+      ? invoiceVatSupported
+      : Math.max(summaryVatTotal - noInvoiceVatSupported, 0);
+  const vatSupported = invoiceVatSupportedTotal + noInvoiceVatSupported;
+
+  const invoiceVatDeductible = (currentInvoices || []).reduce((sum, invoice) => {
+    if (invoice.expense_category === "non_deductible") {
+      return sum;
+    }
+    return sum + (Number(invoice.vat_amount) || 0);
+  }, 0);
+  const noInvoiceVatDeductible = (currentNoInvoiceExpenses || []).reduce(
+    (sum, expense) => sum + getNoInvoiceVatDeductibleAmount(expense),
+    0
   );
-  document.getElementById("vatTotal").textContent = formatCurrency(
-    data.vatTotalDeductible || 0
+  const invoiceVatDeductibleTotal =
+    invoiceVatDeductible > 0 || !summaryVatTotal
+      ? invoiceVatDeductible
+      : Math.max(summaryVatTotal - noInvoiceVatDeductible, 0);
+  const vatDeductible = invoiceVatDeductibleTotal + noInvoiceVatDeductible;
+
+  const baseTotals = currentBillingSummary?.baseTotals || {};
+  const vatTotals = currentBillingSummary?.vatTotals || {};
+  const billingBase = (Number(baseTotals["0"]) || 0) +
+    (Number(baseTotals["4"]) || 0) +
+    (Number(baseTotals["10"]) || 0) +
+    (Number(baseTotals["21"]) || 0);
+  const billingVat = (Number(vatTotals["0"]) || 0) +
+    (Number(vatTotals["4"]) || 0) +
+    (Number(vatTotals["10"]) || 0) +
+    (Number(vatTotals["21"]) || 0);
+
+  const incomeInvoicesGross = (currentIncomeInvoices || []).reduce(
+    (sum, invoice) => sum + (Number(invoice.total_amount) || 0),
+    0
+  );
+  const incomeInvoicesVat = (currentIncomeInvoices || []).reduce(
+    (sum, invoice) => sum + (Number(invoice.vat_amount) || 0),
+    0
   );
 
-  expenseVatTotal =
-    (Number(data.vatTotals["0"]) || 0) +
-    (Number(data.vatTotals["4"]) || 0) +
-    (Number(data.vatTotals["10"]) || 0) +
-    (Number(data.vatTotals["21"]) || 0);
+  expenseGrossTotal = roundAmount(expenseTotalGross);
+  expenseVatSupportedTotal = roundAmount(vatSupported);
+  expenseVatDeductibleTotal = roundAmount(vatDeductible);
+  incomeGrossTotal = roundAmount(billingBase + billingVat + incomeInvoicesGross);
+  incomeVatOutputTotal = roundAmount(billingVat + incomeInvoicesVat);
+  expenseVatTotal = expenseVatDeductibleTotal;
+
+  const expenseTotalEl = document.getElementById("expenseTotalGross");
+  if (expenseTotalEl) {
+    expenseTotalEl.textContent = formatCurrency(expenseGrossTotal);
+  }
+  const expenseVatSupportedEl = document.getElementById("expenseVatSupported");
+  if (expenseVatSupportedEl) {
+    expenseVatSupportedEl.textContent = formatCurrency(expenseVatSupportedTotal);
+  }
+  const expenseVatDeductibleEl = document.getElementById("expenseVatDeductible");
+  if (expenseVatDeductibleEl) {
+    expenseVatDeductibleEl.textContent = formatCurrency(expenseVatDeductibleTotal);
+  }
+  const incomeTotalEl = document.getElementById("incomeTotalGross");
+  if (incomeTotalEl) {
+    incomeTotalEl.textContent = formatCurrency(incomeGrossTotal);
+  }
+  const incomeVatOutputEl = document.getElementById("incomeVatOutput");
+  if (incomeVatOutputEl) {
+    incomeVatOutputEl.textContent = formatCurrency(incomeVatOutputTotal);
+  }
+  const vatResultLabelEl = document.getElementById("incomeVatResultLabel");
+  const vatResultValueEl = document.getElementById("incomeVatResult");
+  const vatResult = incomeVatOutputTotal - expenseVatDeductibleTotal;
+  if (vatResultLabelEl) {
+    vatResultLabelEl.textContent = vatResult >= 0 ? "IVA a pagar" : "IVA a devolver";
+  }
+  if (vatResultValueEl) {
+    vatResultValueEl.textContent = formatCurrency(Math.abs(vatResult));
+  }
+
   updateVatResult();
 }
 
@@ -3078,7 +3184,7 @@ function updateNetChart() {
       if (!expensesMap[month]) {
         expensesMap[month] = 0;
       }
-      expensesMap[month] += Number(expense.amount) || 0;
+      expensesMap[month] += getNoInvoiceDeductibleAmount(expense);
     });
 
     labels = months.map((month) => monthNames[month - 1]);
@@ -3244,7 +3350,7 @@ function updateBillingSummary(data) {
     (Number(baseTotals["10"]) || 0) +
     (Number(baseTotals["21"]) || 0);
   billingVatTotal = Number(data.totalVat) || 0;
-  updateVatResult();
+  updateDashboardTotals();
   updateTaxSummary();
 }
 
@@ -3559,6 +3665,7 @@ function refreshAllData() {
     refreshNoInvoiceExpenses(),
     refreshAnnualTaxData(),
   ]).then(() => {
+    updateDashboardTotals();
     updateDashboardEmptyState();
   });
 }
@@ -3685,6 +3792,7 @@ function renderInvoices(invoices) {
   if (!invoices.length) {
     invoicesEmpty.style.display = "block";
     updateTaxSummary();
+    updateDashboardTotals();
     updateSupplierSuggestions();
     return;
   }
@@ -3758,6 +3866,7 @@ function renderInvoices(invoices) {
   });
 
   updateTaxSummary();
+  updateDashboardTotals();
   updateSupplierSuggestions();
 }
 
@@ -3795,6 +3904,7 @@ function renderIncomeInvoices(invoices) {
   if (!invoices.length) {
     incomeInvoicesEmpty.style.display = "block";
     updateBillingChart();
+    updateDashboardTotals();
     return;
   }
   incomeInvoicesEmpty.style.display = "none";
@@ -4231,6 +4341,7 @@ function renderNoInvoiceExpenses(expenses) {
   if (!expenses.length) {
     noInvoiceEmpty.style.display = "block";
     updateTaxSummary();
+    updateDashboardTotals();
     return;
   }
   noInvoiceEmpty.style.display = "none";
@@ -4311,6 +4422,7 @@ function renderNoInvoiceExpenses(expenses) {
   });
 
   updateTaxSummary();
+  updateDashboardTotals();
 }
 
 function enterNoInvoiceEditMode(row, expense) {
@@ -4778,12 +4890,14 @@ function deleteBillingEntry(entryId) {
 }
 
 function updateVatResult() {
-  const result = billingVatTotal - expenseVatTotal;
+  const outputTotal = Number(incomeVatOutputTotal || billingVatTotal || 0);
+  const inputTotal = Number(expenseVatDeductibleTotal || expenseVatTotal || 0);
+  const result = outputTotal - inputTotal;
   document.getElementById("vatOutputTotal").textContent = formatCurrency(
-    billingVatTotal
+    outputTotal
   );
   document.getElementById("vatInputTotal").textContent = formatCurrency(
-    expenseVatTotal
+    inputTotal
   );
   document.getElementById("vatResultLabel").textContent =
     result >= 0 ? "IVA A PAGAR" : "IVA A DEVOLVER";
@@ -5019,6 +5133,8 @@ function populateReportMonthSelect(select) {
     option.textContent = name;
     select.appendChild(option);
   });
+
+  updateDashboardTotals();
 }
 
 function toggleReportCustomRange() {
