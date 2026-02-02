@@ -189,6 +189,10 @@ no_invoice_table = Table(
     Column("concept", String, nullable=False),
     Column("amount", Float, nullable=False),
     Column("interest_amount", Float),
+    Column("vat_deductible", Boolean),
+    Column("vat_rate", Integer),
+    Column("vat_amount", Float),
+    Column("base_amount", Float),
     Column("expense_type", String, nullable=False),
     Column("deductible", Boolean, nullable=False),
     Column("created_at", String, nullable=False),
@@ -247,12 +251,26 @@ def init_db():
     add_column_if_missing("no_invoice_expenses", "user_id", "INTEGER")
     add_column_if_missing("no_invoice_expenses", "company_id", "INTEGER")
     add_column_if_missing("no_invoice_expenses", "interest_amount", "FLOAT")
+    add_column_if_missing("no_invoice_expenses", "vat_deductible", "BOOLEAN")
+    add_column_if_missing("no_invoice_expenses", "vat_rate", "INTEGER")
+    add_column_if_missing("no_invoice_expenses", "vat_amount", "FLOAT")
+    add_column_if_missing("no_invoice_expenses", "base_amount", "FLOAT")
     if "no_invoice_expenses" in table_names:
         with engine.begin() as conn:
             conn.execute(
                 no_invoice_table.update()
                 .where(no_invoice_table.c.user_id.is_(None))
                 .values(user_id=DEFAULT_USER_ID)
+            )
+            conn.execute(
+                no_invoice_table.update()
+                .where(no_invoice_table.c.vat_deductible.is_(None))
+                .values(vat_deductible=False)
+            )
+            conn.execute(
+                no_invoice_table.update()
+                .where(no_invoice_table.c.base_amount.is_(None))
+                .values(base_amount=no_invoice_table.c.amount)
             )
 
     add_column_if_missing("income_invoices", "user_id", "INTEGER")
@@ -900,6 +918,10 @@ def _build_report_totals(user_id, company_id, months, year):
                     no_invoice_table.c.deductible,
                     no_invoice_table.c.expense_type,
                     no_invoice_table.c.interest_amount,
+                    no_invoice_table.c.vat_deductible,
+                    no_invoice_table.c.vat_rate,
+                    no_invoice_table.c.vat_amount,
+                    no_invoice_table.c.base_amount,
                 )
                 .where(no_invoice_table.c.user_id == user_id)
                 .where(no_invoice_table.c.company_id == company_id)
@@ -908,6 +930,10 @@ def _build_report_totals(user_id, company_id, months, year):
             for row in no_invoice_rows:
                 if row.get("expense_type") == "prestamo":
                     expense_base += float(row.get("interest_amount") or 0)
+                    continue
+                if row.get("vat_deductible"):
+                    expense_base += float(row.get("base_amount") or row.get("amount") or 0)
+                    expense_vat += float(row.get("vat_amount") or 0)
                     continue
                 if not row["deductible"]:
                     continue
@@ -2375,6 +2401,10 @@ def list_payments():
                 no_invoice_table.c.concept,
                 no_invoice_table.c.amount,
                 no_invoice_table.c.interest_amount,
+                no_invoice_table.c.vat_deductible,
+                no_invoice_table.c.vat_rate,
+                no_invoice_table.c.vat_amount,
+                no_invoice_table.c.base_amount,
                 no_invoice_table.c.expense_type,
                 no_invoice_table.c.deductible,
             )
@@ -2485,6 +2515,14 @@ def list_payments():
                 "expense_category": "without_invoice",
                 "expense_type": row.get("expense_type"),
                 "interest_amount": float(row.get("interest_amount") or 0),
+                "vat_deductible": bool(row.get("vat_deductible"))
+                if row.get("vat_deductible") is not None
+                else False,
+                "vat_rate_no_invoice": int(row.get("vat_rate"))
+                if row.get("vat_rate") is not None
+                else None,
+                "vat_amount_no_invoice": float(row.get("vat_amount") or 0),
+                "base_amount_no_invoice": float(row.get("base_amount") or row.get("amount") or 0),
                 "deductible": bool(row.get("deductible")),
                 "amount": amount,
                 "type": "no_invoice",
@@ -3130,6 +3168,10 @@ def list_no_invoice_expenses():
             "concept": row["concept"],
             "amount": float(row["amount"]),
             "interest_amount": float(row["interest_amount"] or 0),
+            "vat_deductible": bool(row["vat_deductible"]) if row.get("vat_deductible") is not None else False,
+            "vat_rate": int(row["vat_rate"]) if row.get("vat_rate") is not None else None,
+            "vat_amount": float(row["vat_amount"] or 0),
+            "base_amount": float(row["base_amount"] or row["amount"] or 0),
             "expense_type": row["expense_type"],
             "deductible": bool(row["deductible"]),
         }
@@ -3152,6 +3194,10 @@ def create_no_invoice_expense():
     amount = parse_amount(str(payload.get("amount") or ""))
     expense_type = payload.get("expense_type") or ""
     interest_amount = parse_amount(str(payload.get("interest_amount") or ""))
+    vat_deductible = payload.get("vat_deductible")
+    vat_rate_raw = payload.get("vat_rate")
+    vat_amount_payload = parse_amount(str(payload.get("vat_amount") or ""))
+    base_amount_payload = parse_amount(str(payload.get("base_amount") or ""))
     deductible = payload.get("deductible")
 
     errors = []
@@ -3187,6 +3233,35 @@ def create_no_invoice_expense():
     else:
         interest_amount = None
 
+    if vat_deductible in (True, "true", "True", 1, "1"):
+        vat_deductible = True
+    else:
+        vat_deductible = False
+
+    vat_rate = None
+    vat_amount = None
+    base_amount = base_amount_payload
+    if vat_deductible and expense_type != "prestamo":
+        try:
+            vat_rate = int(vat_rate_raw)
+        except (TypeError, ValueError):
+            vat_rate = None
+        if vat_rate not in {0, 4, 10, 21}:
+            errors.append("Tipo de IVA inválido.")
+        else:
+            if amount is None:
+                errors.append("Importe inválido.")
+            else:
+                base_amount = round(amount / (1 + vat_rate / 100), 2)
+                vat_amount = round(amount - base_amount, 2)
+        deductible = True
+    else:
+        vat_deductible = False
+        vat_rate = None
+        vat_amount = None
+        if base_amount is None:
+            base_amount = amount
+
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
 
@@ -3199,6 +3274,10 @@ def create_no_invoice_expense():
                 concept=concept,
                 amount=amount,
                 interest_amount=interest_amount,
+                vat_deductible=vat_deductible,
+                vat_rate=vat_rate,
+                vat_amount=vat_amount,
+                base_amount=base_amount,
                 expense_type=expense_type,
                 deductible=bool(deductible),
                 created_at=datetime.utcnow().isoformat(),
@@ -3221,6 +3300,10 @@ def update_no_invoice_expense(expense_id):
     amount = parse_amount(str(payload.get("amount") or ""))
     expense_type = payload.get("expense_type") or ""
     interest_amount = parse_amount(str(payload.get("interest_amount") or ""))
+    vat_deductible = payload.get("vat_deductible")
+    vat_rate_raw = payload.get("vat_rate")
+    vat_amount_payload = parse_amount(str(payload.get("vat_amount") or ""))
+    base_amount_payload = parse_amount(str(payload.get("base_amount") or ""))
     deductible = payload.get("deductible")
 
     errors = []
@@ -3256,6 +3339,35 @@ def update_no_invoice_expense(expense_id):
     else:
         interest_amount = None
 
+    if vat_deductible in (True, "true", "True", 1, "1"):
+        vat_deductible = True
+    else:
+        vat_deductible = False
+
+    vat_rate = None
+    vat_amount = None
+    base_amount = base_amount_payload
+    if vat_deductible and expense_type != "prestamo":
+        try:
+            vat_rate = int(vat_rate_raw)
+        except (TypeError, ValueError):
+            vat_rate = None
+        if vat_rate not in {0, 4, 10, 21}:
+            errors.append("Tipo de IVA inválido.")
+        else:
+            if amount is None:
+                errors.append("Importe inválido.")
+            else:
+                base_amount = round(amount / (1 + vat_rate / 100), 2)
+                vat_amount = round(amount - base_amount, 2)
+        deductible = True
+    else:
+        vat_deductible = False
+        vat_rate = None
+        vat_amount = None
+        if base_amount is None:
+            base_amount = amount
+
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
 
@@ -3270,6 +3382,10 @@ def update_no_invoice_expense(expense_id):
                 concept=concept,
                 amount=amount,
                 interest_amount=interest_amount,
+                vat_deductible=vat_deductible,
+                vat_rate=vat_rate,
+                vat_amount=vat_amount,
+                base_amount=base_amount,
                 expense_type=expense_type,
                 deductible=bool(deductible),
             )
@@ -3287,6 +3403,10 @@ def update_no_invoice_expense(expense_id):
                 "concept": concept,
                 "amount": amount,
                 "interest_amount": float(interest_amount or 0),
+                "vat_deductible": vat_deductible,
+                "vat_rate": vat_rate,
+                "vat_amount": float(vat_amount or 0),
+                "base_amount": float(base_amount or amount or 0),
                 "expense_type": expense_type,
                 "deductible": bool(deductible),
             },
@@ -3506,6 +3626,26 @@ def summary():
         else:
             vat_rate = int(row["vat_rate"])
             vat_totals[vat_rate] += base_amount * (vat_rate / 100)
+
+    with engine.connect() as conn:
+        no_invoice_rows = conn.execute(
+            select(
+                no_invoice_table.c.amount,
+                no_invoice_table.c.vat_deductible,
+                no_invoice_table.c.vat_rate,
+                no_invoice_table.c.vat_amount,
+            )
+            .where(no_invoice_table.c.user_id == data_owner_id)
+            .where(no_invoice_table.c.company_id == company_id)
+            .where(no_invoice_table.c.expense_date.between(start, end))
+        ).mappings().all()
+    for row in no_invoice_rows:
+        if not row.get("vat_deductible"):
+            continue
+        rate = int(row.get("vat_rate") or 0)
+        vat_value = float(row.get("vat_amount") or 0)
+        if rate in vat_totals:
+            vat_totals[rate] += vat_value
 
     cumulative = []
     running = 0.0
