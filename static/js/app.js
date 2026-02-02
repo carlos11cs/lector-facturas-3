@@ -53,6 +53,7 @@ const noInvoiceTypeLabels = {
   seguridad_social: "Seguridad Social",
   amortizacion: "Amortización",
   kilometraje: "Kilometraje",
+  prestamo: "Préstamo bancario",
   otro: "Otro",
 };
 
@@ -382,6 +383,8 @@ const taxPeriodBadge = document.getElementById("taxPeriodBadge");
 const noInvoiceDate = document.getElementById("noInvoiceDate");
 const noInvoiceConcept = document.getElementById("noInvoiceConcept");
 const noInvoiceAmount = document.getElementById("noInvoiceAmount");
+const noInvoiceInterest = document.getElementById("noInvoiceInterest");
+const noInvoiceInterestField = document.getElementById("noInvoiceInterestField");
 const noInvoiceType = document.getElementById("noInvoiceType");
 const noInvoiceDeductible = document.getElementById("noInvoiceDeductible");
 const noInvoiceSaveBtn = document.getElementById("noInvoiceSaveBtn");
@@ -683,6 +686,32 @@ function createNoInvoiceTypeSelect(selected) {
   });
   select.value = selected || "otro";
   return select;
+}
+
+function toggleLoanInterestField({
+  typeValue,
+  interestField,
+  interestInput,
+  deductibleSelect,
+}) {
+  if (!interestField || !interestInput || !deductibleSelect) {
+    return;
+  }
+  const isLoan = typeValue === "prestamo";
+  const canHide = interestField.id === "noInvoiceInterestField";
+  if (canHide) {
+    interestField.classList.toggle("is-hidden", !isLoan);
+  } else {
+    interestField.classList.remove("is-hidden");
+  }
+  interestInput.disabled = !isLoan;
+  if (isLoan) {
+    deductibleSelect.value = "false";
+    deductibleSelect.disabled = true;
+  } else {
+    interestInput.value = "";
+    deductibleSelect.disabled = false;
+  }
 }
 
 function updateSupplierSuggestions() {
@@ -3216,6 +3245,7 @@ function updatePaymentDateFromCalendar(item, newDate) {
       expense_date: newDate,
       concept: item.concept || "Gasto sin factura",
       amount: item.total_amount ?? item.amount ?? 0,
+      interest_amount: item.interest_amount ?? 0,
       expense_type: item.expense_type || "otro",
       deductible: item.deductible !== undefined ? item.deductible : true,
       company_id: getSelectedCompanyId(),
@@ -3490,6 +3520,9 @@ function refreshAnnualTaxData() {
     }, 0);
 
     const annualNoInvoice = expenses.reduce((total, expense) => {
+      if (expense.expense_type === "prestamo") {
+        return total + (Number(expense.interest_amount) || 0);
+      }
       if (!expense.deductible) {
         return total;
       }
@@ -4119,6 +4152,11 @@ function renderNoInvoiceExpenses(expenses) {
     const amountTd = document.createElement("td");
     amountTd.textContent = formatCurrency(expense.amount);
 
+    const interestTd = document.createElement("td");
+    const interestValue = Number(expense.interest_amount || 0);
+    interestTd.textContent =
+      expense.expense_type === "prestamo" ? formatCurrency(interestValue) : "-";
+
     const typeTd = document.createElement("td");
     typeTd.textContent = formatNoInvoiceType(expense.expense_type);
 
@@ -4153,6 +4191,7 @@ function renderNoInvoiceExpenses(expenses) {
     tr.appendChild(dateTd);
     tr.appendChild(conceptTd);
     tr.appendChild(amountTd);
+    tr.appendChild(interestTd);
     tr.appendChild(typeTd);
     tr.appendChild(deductibleTd);
     tr.appendChild(actionsTd);
@@ -4166,9 +4205,10 @@ function enterNoInvoiceEditMode(row, expense) {
   const dateTd = row.children[0];
   const conceptTd = row.children[1];
   const amountTd = row.children[2];
-  const typeTd = row.children[3];
-  const deductibleTd = row.children[4];
-  const actionsTd = row.children[5];
+  const interestTd = row.children[3];
+  const typeTd = row.children[4];
+  const deductibleTd = row.children[5];
+  const actionsTd = row.children[6];
 
   const dateInput = document.createElement("input");
   dateInput.type = "date";
@@ -4184,6 +4224,13 @@ function enterNoInvoiceEditMode(row, expense) {
   amountInput.min = "0";
   amountInput.value = expense.amount;
 
+  const interestInput = document.createElement("input");
+  interestInput.type = "number";
+  interestInput.step = "0.01";
+  interestInput.min = "0";
+  interestInput.value =
+    expense.expense_type === "prestamo" ? Number(expense.interest_amount || 0) : "";
+
   const typeSelect = createNoInvoiceTypeSelect(expense.expense_type);
   const deductibleSelect = createDeductibleSelect(expense.deductible);
 
@@ -4193,10 +4240,27 @@ function enterNoInvoiceEditMode(row, expense) {
   conceptTd.appendChild(conceptInput);
   amountTd.textContent = "";
   amountTd.appendChild(amountInput);
+  interestTd.textContent = "";
+  interestTd.appendChild(interestInput);
   typeTd.textContent = "";
   typeTd.appendChild(typeSelect);
   deductibleTd.textContent = "";
   deductibleTd.appendChild(deductibleSelect);
+
+  toggleLoanInterestField({
+    typeValue: typeSelect.value,
+    interestField: interestTd,
+    interestInput,
+    deductibleSelect,
+  });
+  typeSelect.addEventListener("change", () => {
+    toggleLoanInterestField({
+      typeValue: typeSelect.value,
+      interestField: interestTd,
+      interestInput,
+      deductibleSelect,
+    });
+  });
 
   actionsTd.innerHTML = "";
   const saveBtn = document.createElement("button");
@@ -4208,6 +4272,7 @@ function enterNoInvoiceEditMode(row, expense) {
       expense_date: dateInput.value,
       concept: conceptInput.value,
       amount: amountInput.value,
+      interest_amount: interestInput.value,
       expense_type: typeSelect.value,
       deductible: deductibleSelect.value === "true",
     });
@@ -4235,6 +4300,7 @@ function saveNoInvoiceExpense() {
   const amountValue = noInvoiceAmount.value;
   const typeValue = noInvoiceType.value;
   const deductibleValue = noInvoiceDeductible.value === "true";
+  const interestValue = noInvoiceInterest ? noInvoiceInterest.value : "";
 
   if (!dateValue) {
     alert("Fecha obligatoria.");
@@ -4248,6 +4314,18 @@ function saveNoInvoiceExpense() {
     alert("Importe inválido.");
     return;
   }
+  if (typeValue === "prestamo") {
+    const amountNumeric = parseNumberInput(amountValue);
+    const interestNumeric = parseNumberInput(interestValue) || 0;
+    if (interestNumeric < 0) {
+      alert("Interés inválido.");
+      return;
+    }
+    if (amountNumeric !== null && interestNumeric > amountNumeric) {
+      alert("El interés no puede superar el importe.");
+      return;
+    }
+  }
 
   noInvoiceSaveBtn.disabled = true;
   fetch("/api/expenses/no-invoice", {
@@ -4260,6 +4338,7 @@ function saveNoInvoiceExpense() {
       expense_date: dateValue,
       concept: conceptValue,
       amount: amountValue,
+      interest_amount: interestValue,
       expense_type: typeValue,
       deductible: deductibleValue,
     }),
@@ -4272,6 +4351,9 @@ function saveNoInvoiceExpense() {
       }
       noInvoiceConcept.value = "";
       noInvoiceAmount.value = "";
+      if (noInvoiceInterest) {
+        noInvoiceInterest.value = "";
+      }
       refreshNoInvoiceExpenses();
     })
     .catch(() => {
@@ -4504,6 +4586,9 @@ function updateTaxSummary() {
   }, 0);
 
   const deductibleNoInvoice = currentNoInvoiceExpenses.reduce((total, expense) => {
+    if (expense.expense_type === "prestamo") {
+      return total + (Number(expense.interest_amount) || 0);
+    }
     if (!expense.deductible) {
       return total;
     }
@@ -5072,6 +5157,22 @@ function bindEvents() {
   }
   if (billingSaveBtn) {
     billingSaveBtn.addEventListener("click", saveBillingEntry);
+  }
+  if (noInvoiceType && noInvoiceDeductible && noInvoiceInterestField && noInvoiceInterest) {
+    noInvoiceType.addEventListener("change", () => {
+      toggleLoanInterestField({
+        typeValue: noInvoiceType.value,
+        interestField: noInvoiceInterestField,
+        interestInput: noInvoiceInterest,
+        deductibleSelect: noInvoiceDeductible,
+      });
+    });
+    toggleLoanInterestField({
+      typeValue: noInvoiceType.value,
+      interestField: noInvoiceInterestField,
+      interestInput: noInvoiceInterest,
+      deductibleSelect: noInvoiceDeductible,
+    });
   }
   if (noInvoiceSaveBtn) {
     noInvoiceSaveBtn.addEventListener("click", saveNoInvoiceExpense);

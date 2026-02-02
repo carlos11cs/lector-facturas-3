@@ -188,6 +188,7 @@ no_invoice_table = Table(
     Column("expense_date", String, nullable=False),
     Column("concept", String, nullable=False),
     Column("amount", Float, nullable=False),
+    Column("interest_amount", Float),
     Column("expense_type", String, nullable=False),
     Column("deductible", Boolean, nullable=False),
     Column("created_at", String, nullable=False),
@@ -245,6 +246,7 @@ def init_db():
 
     add_column_if_missing("no_invoice_expenses", "user_id", "INTEGER")
     add_column_if_missing("no_invoice_expenses", "company_id", "INTEGER")
+    add_column_if_missing("no_invoice_expenses", "interest_amount", "FLOAT")
     if "no_invoice_expenses" in table_names:
         with engine.begin() as conn:
             conn.execute(
@@ -893,12 +895,20 @@ def _build_report_totals(user_id, company_id, months, year):
                 expense_vat += float(row["vat_amount"] or 0)
 
             no_invoice_rows = conn.execute(
-                select(no_invoice_table.c.amount, no_invoice_table.c.deductible)
+                select(
+                    no_invoice_table.c.amount,
+                    no_invoice_table.c.deductible,
+                    no_invoice_table.c.expense_type,
+                    no_invoice_table.c.interest_amount,
+                )
                 .where(no_invoice_table.c.user_id == user_id)
                 .where(no_invoice_table.c.company_id == company_id)
                 .where(no_invoice_table.c.expense_date.like(f"{prefix}%"))
             ).mappings().all()
             for row in no_invoice_rows:
+                if row.get("expense_type") == "prestamo":
+                    expense_base += float(row.get("interest_amount") or 0)
+                    continue
                 if not row["deductible"]:
                     continue
                 expense_base += float(row["amount"] or 0)
@@ -2364,6 +2374,7 @@ def list_payments():
                 no_invoice_table.c.expense_date,
                 no_invoice_table.c.concept,
                 no_invoice_table.c.amount,
+                no_invoice_table.c.interest_amount,
                 no_invoice_table.c.expense_type,
                 no_invoice_table.c.deductible,
             )
@@ -2473,6 +2484,7 @@ def list_payments():
                 "total_amount": amount,
                 "expense_category": "without_invoice",
                 "expense_type": row.get("expense_type"),
+                "interest_amount": float(row.get("interest_amount") or 0),
                 "deductible": bool(row.get("deductible")),
                 "amount": amount,
                 "type": "no_invoice",
@@ -3101,6 +3113,7 @@ def list_no_invoice_expenses():
                 no_invoice_table.c.expense_date,
                 no_invoice_table.c.concept,
                 no_invoice_table.c.amount,
+                no_invoice_table.c.interest_amount,
                 no_invoice_table.c.expense_type,
                 no_invoice_table.c.deductible,
             )
@@ -3116,6 +3129,7 @@ def list_no_invoice_expenses():
             "expense_date": row["expense_date"],
             "concept": row["concept"],
             "amount": float(row["amount"]),
+            "interest_amount": float(row["interest_amount"] or 0),
             "expense_type": row["expense_type"],
             "deductible": bool(row["deductible"]),
         }
@@ -3137,6 +3151,7 @@ def create_no_invoice_expense():
     concept = (payload.get("concept") or "").strip()
     amount = parse_amount(str(payload.get("amount") or ""))
     expense_type = payload.get("expense_type") or ""
+    interest_amount = parse_amount(str(payload.get("interest_amount") or ""))
     deductible = payload.get("deductible")
 
     errors = []
@@ -3151,11 +3166,26 @@ def create_no_invoice_expense():
         "seguridad_social",
         "amortizacion",
         "kilometraje",
+        "prestamo",
         "otro",
     }:
         errors.append("Tipo de gasto inválido.")
     if deductible is None:
         deductible = True
+
+    if errors:
+        return jsonify({"ok": False, "errors": errors}), 400
+
+    if expense_type == "prestamo":
+        if interest_amount is None:
+            interest_amount = 0.0
+        if interest_amount < 0:
+            errors.append("Interés inválido.")
+        if amount is not None and interest_amount > amount:
+            errors.append("El interés no puede superar el importe.")
+        deductible = False
+    else:
+        interest_amount = None
 
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
@@ -3168,6 +3198,7 @@ def create_no_invoice_expense():
                 expense_date=expense_date,
                 concept=concept,
                 amount=amount,
+                interest_amount=interest_amount,
                 expense_type=expense_type,
                 deductible=bool(deductible),
                 created_at=datetime.utcnow().isoformat(),
@@ -3189,6 +3220,7 @@ def update_no_invoice_expense(expense_id):
     concept = (payload.get("concept") or "").strip()
     amount = parse_amount(str(payload.get("amount") or ""))
     expense_type = payload.get("expense_type") or ""
+    interest_amount = parse_amount(str(payload.get("interest_amount") or ""))
     deductible = payload.get("deductible")
 
     errors = []
@@ -3203,11 +3235,26 @@ def update_no_invoice_expense(expense_id):
         "seguridad_social",
         "amortizacion",
         "kilometraje",
+        "prestamo",
         "otro",
     }:
         errors.append("Tipo de gasto inválido.")
     if deductible is None:
         deductible = True
+
+    if errors:
+        return jsonify({"ok": False, "errors": errors}), 400
+
+    if expense_type == "prestamo":
+        if interest_amount is None:
+            interest_amount = 0.0
+        if interest_amount < 0:
+            errors.append("Interés inválido.")
+        if amount is not None and interest_amount > amount:
+            errors.append("El interés no puede superar el importe.")
+        deductible = False
+    else:
+        interest_amount = None
 
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
@@ -3222,6 +3269,7 @@ def update_no_invoice_expense(expense_id):
                 expense_date=expense_date,
                 concept=concept,
                 amount=amount,
+                interest_amount=interest_amount,
                 expense_type=expense_type,
                 deductible=bool(deductible),
             )
@@ -3238,6 +3286,7 @@ def update_no_invoice_expense(expense_id):
                 "expense_date": expense_date,
                 "concept": concept,
                 "amount": amount,
+                "interest_amount": float(interest_amount or 0),
                 "expense_type": expense_type,
                 "deductible": bool(deductible),
             },

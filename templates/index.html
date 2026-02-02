@@ -363,6 +363,10 @@
               <label for="noInvoiceAmount">Importe (€)</label>
               <input type="number" id="noInvoiceAmount" min="0" step="0.01" placeholder="0,00" />
             </div>
+            <div class="field is-hidden" id="noInvoiceInterestField">
+              <label for="noInvoiceInterest">Interés (€)</label>
+              <input type="number" id="noInvoiceInterest" min="0" step="0.01" placeholder="0,00" />
+            </div>
             <div class="field">
               <label for="noInvoiceType">Tipo</label>
               <select id="noInvoiceType">
@@ -370,6 +374,7 @@
                 <option value="seguridad_social">Seguridad Social</option>
                 <option value="amortizacion">Amortización</option>
                 <option value="kilometraje">Kilometraje</option>
+                <option value="prestamo">Préstamo bancario</option>
                 <option value="otro">Otro</option>
               </select>
             </div>
@@ -391,6 +396,7 @@
                     <th>Fecha</th>
                     <th>Concepto</th>
                     <th>Importe (€)</th>
+                    <th>Interés (€)</th>
                     <th>Tipo</th>
                     <th>Deducible</th>
                     <th>Acciones</th>

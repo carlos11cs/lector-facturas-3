@@ -996,6 +996,24 @@ h1 {
   padding-top: 0;
 }
 
+.vat-breakdown-inline-row td {
+  padding-top: 4px;
+  padding-bottom: 10px;
+  border-bottom: 1px dashed var(--border);
+}
+
+.vat-breakdown-inline-row td:first-child,
+.vat-breakdown-inline-row td:nth-child(2),
+.vat-breakdown-inline-row td:nth-child(3) {
+  border-bottom: none;
+  background: transparent;
+}
+
+.vat-breakdown-inline-row input,
+.vat-breakdown-inline-row select {
+  background: #ffffff;
+}
+
 .vat-breakdown {
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -1478,4 +1496,8 @@ body.period-quarterly #billingEntriesTable td.period-month {
   .filters {
     flex-direction: column;
   }
+}
+
+.is-hidden {
+  display: none !important;
 }
