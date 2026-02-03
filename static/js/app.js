@@ -19,6 +19,7 @@ let currentBillingEntries = [];
 let currentDeductibleExpenses = 0;
 let annualBillingBaseTotal = 0;
 let annualDeductibleExpenses = 0;
+let annualLoanInterestTotal = 0;
 let currentPayments = null;
 let selectedPaymentDay = null;
 let calendarMonth = null;
@@ -3163,8 +3164,10 @@ function updateNetChart() {
   if (period === "quarterly") {
     const months = getPeriodMonths();
     const expensesMap = {};
+    const incomeMap = {};
     months.forEach((month) => {
       expensesMap[month] = 0;
+      incomeMap[month] = 0;
     });
     currentInvoices.forEach((invoice) => {
       if (invoice.expense_category === "non_deductible") {
@@ -3186,17 +3189,29 @@ function updateNetChart() {
       }
       expensesMap[month] += getNoInvoiceDeductibleAmount(expense);
     });
+    currentIncomeInvoices.forEach((invoice) => {
+      const month = Number(String(invoice.invoice_date || "").slice(5, 7));
+      if (!incomeMap[month]) {
+        incomeMap[month] = 0;
+      }
+      incomeMap[month] += Number(invoice.base_amount) || 0;
+    });
 
     labels = months.map((month) => monthNames[month - 1]);
     values = months.map((month) => {
       const income = currentBillingSummary.monthlyTotals.find(
         (entry) => entry.month === month
       )?.total || 0;
+      const incomeTotal = income + (incomeMap[month] || 0);
       const expenses = expensesMap[month] || 0;
-      return income - expenses;
+      return incomeTotal - expenses;
     });
   } else {
-    const netValue = billingBaseTotal - currentDeductibleExpenses;
+    const incomeInvoicesBase = currentIncomeInvoices.reduce(
+      (sum, invoice) => sum + (Number(invoice.base_amount) || 0),
+      0
+    );
+    const netValue = billingBaseTotal + incomeInvoicesBase - currentDeductibleExpenses;
     const { month } = getSelectedMonthYear();
     labels = month ? [monthNames[month - 1]] : [];
     values = [netValue];
@@ -3709,16 +3724,24 @@ function refreshAnnualTaxData() {
     Promise.all(months.map((targetMonth) => fetchNoInvoiceExpenses(targetMonth, year))).then(
       (expensesByMonth) => expensesByMonth.flat()
     ),
+    Promise.all(months.map((targetMonth) => fetchIncomeInvoices(targetMonth, year))).then(
+      (invoicesByMonth) => invoicesByMonth.flat()
+    ),
     Promise.all(months.map((targetMonth) => fetchBillingSummary(targetMonth, year))).then(
       (summaries) => mergeBillingSummaries(summaries, months)
     ),
-  ]).then(([invoices, expenses, billingSummary]) => {
+  ]).then(([invoices, expenses, incomeInvoices, billingSummary]) => {
     const baseTotals = billingSummary.baseTotals || {};
     annualBillingBaseTotal =
       (Number(baseTotals["0"]) || 0) +
       (Number(baseTotals["4"]) || 0) +
       (Number(baseTotals["10"]) || 0) +
       (Number(baseTotals["21"]) || 0);
+    const annualIncomeInvoicesBase = incomeInvoices.reduce(
+      (total, invoice) => total + (Number(invoice.base_amount) || 0),
+      0
+    );
+    annualBillingBaseTotal += annualIncomeInvoicesBase;
 
     const annualInvoices = invoices.reduce((total, invoice) => {
       if (invoice.expense_category === "non_deductible") {
@@ -3733,6 +3756,12 @@ function refreshAnnualTaxData() {
     );
 
     annualDeductibleExpenses = annualInvoices + annualNoInvoice;
+    annualLoanInterestTotal = expenses.reduce((total, expense) => {
+      if (expense.expense_type === "prestamo") {
+        return total + (Number(expense.interest_amount) || 0);
+      }
+      return total;
+    }, 0);
     updateTaxSummary();
   });
 }
@@ -4924,23 +4953,35 @@ function updateTaxSummary() {
 
   const annualIncome = annualBillingBaseTotal;
   const annualExpenses = annualDeductibleExpenses;
+  const annualOperatingExpenses = annualExpenses - annualLoanInterestTotal;
+  const annualOperatingResult = annualIncome - annualOperatingExpenses;
   const annualNet = annualIncome - annualExpenses;
+  const companyType = getSelectedCompanyType();
+  const taxRate =
+    companyType === "company" ? 0.25 : companyType === "individual" ? 0.15 : 0;
+  const annualTaxEstimate = annualNet > 0 ? annualNet * taxRate : 0;
 
   document.getElementById("irpfIncome").textContent = formatCurrency(annualIncome);
   document.getElementById("irpfExpenses").textContent = formatCurrency(annualExpenses);
   document.getElementById("irpfNet").textContent = formatCurrency(annualNet);
 
   document.getElementById("isIncome").textContent = formatCurrency(annualIncome);
-  document.getElementById("isExpenses").textContent = formatCurrency(annualExpenses);
+  document.getElementById("isExpenses").textContent = formatCurrency(
+    annualOperatingResult
+  );
   document.getElementById("isResult").textContent = formatCurrency(annualNet);
-  document.getElementById("isBase").textContent = formatCurrency(annualNet);
+  document.getElementById("isBase").textContent = formatCurrency(annualTaxEstimate);
 
   updatePnlSummary();
   updateNetChart();
 }
 
 function updatePnlSummary() {
-  const incomeTotal = billingBaseTotal;
+  const incomeInvoicesBase = currentIncomeInvoices.reduce(
+    (sum, invoice) => sum + (Number(invoice.base_amount) || 0),
+    0
+  );
+  const incomeTotal = billingBaseTotal + incomeInvoicesBase;
   const expensesTotal = currentDeductibleExpenses;
   const loanInterest = currentNoInvoiceExpenses.reduce((sum, expense) => {
     if (expense.expense_type === "prestamo") {
@@ -5051,38 +5092,61 @@ function exportPnlPdf() {
   const netValue = document.getElementById("pnlNet").textContent;
 
   const doc = new jsPDF({ unit: "pt", format: "a4" });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
   const margin = 48;
+  const contentWidth = pageWidth - margin * 2;
   let y = margin;
 
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(18);
-  doc.text("Cuenta de pérdidas y ganancias (estimada)", margin, y);
+  const brandColor = [34, 124, 101];
+  const mutedColor = [93, 106, 99];
+  const borderColor = [221, 229, 223];
+  const rowAlt = [249, 251, 247];
 
+  doc.setFillColor(242, 245, 242);
+  doc.rect(0, 0, pageWidth, 84, "F");
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(16);
+  doc.setTextColor(...brandColor);
+  doc.text("Ledged", margin, 40);
+  doc.setFontSize(18);
+  doc.setTextColor(28, 32, 36);
+  doc.text("Cuenta de pérdidas y ganancias (estimada)", margin, 64);
+
+  y = 104;
   doc.setFont("helvetica", "normal");
   doc.setFontSize(11);
-  y += 24;
-  if (nameValue) {
-    doc.text(`Nombre: ${nameValue}`, margin, y);
-    y += 16;
-  }
-  if (taxIdValue) {
-    doc.text(`CIF/NIF: ${taxIdValue}`, margin, y);
-    y += 16;
-  }
-  if (periodLabel) {
-    doc.text(`Periodo: ${periodLabel}`, margin, y);
-    y += 16;
-  }
-
+  doc.setTextColor(40, 44, 48);
   const dateLabel = new Date().toLocaleDateString("es-ES");
-  doc.text(`Fecha de generación: ${dateLabel}`, margin, y);
-  y += 24;
+  const meta = [];
+  if (nameValue) meta.push(`Nombre: ${nameValue}`);
+  if (taxIdValue) meta.push(`CIF/NIF: ${taxIdValue}`);
+  if (periodLabel) meta.push(`Periodo: ${periodLabel}`);
+  meta.push(`Fecha de generación: ${dateLabel}`);
+
+  meta.forEach((line) => {
+    doc.text(line, margin, y);
+    y += 16;
+  });
+
+  y += 8;
+  doc.setDrawColor(...borderColor);
+  doc.line(margin, y, pageWidth - margin, y);
+  y += 18;
 
   doc.setFont("helvetica", "bold");
-  doc.text("Resumen", margin, y);
-  y += 16;
+  doc.setTextColor(...mutedColor);
+  doc.setFontSize(10);
+  doc.text("CONCEPTO", margin, y);
+  doc.text("IMPORTE (€)", pageWidth - margin, y, { align: "right" });
+  y += 10;
+  doc.setDrawColor(...borderColor);
+  doc.line(margin, y, pageWidth - margin, y);
+  y += 12;
 
   doc.setFont("helvetica", "normal");
+  doc.setFontSize(10.5);
+  doc.setTextColor(36, 40, 44);
   const rows = [
     ["1. Importe neto de la cifra de negocios", incomeValue],
     ["2. Variación de existencias de productos terminados y en curso", formatCurrency(getPnlInputValue("pnlLine2"))],
@@ -5111,12 +5175,70 @@ function exportPnlPdf() {
     ["19. Impuestos sobre beneficios", taxesValue],
     ["D) RESULTADO DEL EJERCICIO", netValue],
   ];
+  const amountColWidth = 110;
+  const labelColWidth = contentWidth - amountColWidth - 12;
 
-  rows.forEach(([label, value]) => {
-    doc.text(label, margin, y);
-    doc.text(value, margin + 320, y, { align: "right" });
-    y += 18;
+  const isSectionRow = (label) =>
+    label.startsWith("A)") ||
+    label.startsWith("B)") ||
+    label.startsWith("C)") ||
+    label.startsWith("D)");
+
+  const ensureSpace = (height) => {
+    if (y + height <= pageHeight - margin) {
+      return;
+    }
+    doc.addPage();
+    y = margin;
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.setTextColor(...mutedColor);
+    doc.text("CONCEPTO", margin, y);
+    doc.text("IMPORTE (€)", pageWidth - margin, y, { align: "right" });
+    y += 10;
+    doc.setDrawColor(...borderColor);
+    doc.line(margin, y, pageWidth - margin, y);
+    y += 12;
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(10.5);
+    doc.setTextColor(36, 40, 44);
+  };
+
+  rows.forEach(([label, value], index) => {
+    const section = isSectionRow(label);
+    const labelLines = doc.splitTextToSize(label, labelColWidth);
+    const rowHeight = Math.max(labelLines.length, 1) * 14 + 6;
+    ensureSpace(rowHeight);
+
+    if (index % 2 === 0) {
+      doc.setFillColor(...rowAlt);
+      doc.rect(margin, y - 10, contentWidth, rowHeight, "F");
+    }
+
+    if (section) {
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(...brandColor);
+    } else {
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(36, 40, 44);
+    }
+
+    doc.text(labelLines, margin, y);
+    doc.setFont(section ? "helvetica" : "helvetica", section ? "bold" : "normal");
+    doc.setTextColor(section ? brandColor[0] : 36, section ? brandColor[1] : 40, section ? brandColor[2] : 44);
+    doc.text(value, pageWidth - margin, y, { align: "right" });
+    y += rowHeight;
   });
+
+  y += 12;
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.setTextColor(...mutedColor);
+  const footer =
+    "Estructura basada en el Plan General Contable PYMES. Importes estimados automáticamente y no sustitutivos del asesoramiento fiscal profesional.";
+  const footerLines = doc.splitTextToSize(footer, contentWidth);
+  ensureSpace(footerLines.length * 12);
+  doc.text(footerLines, margin, y);
 
   const filename = `pnl_${periodLabel || "periodo"}.pdf`.replace(/\s+/g, "_");
   doc.save(filename);
