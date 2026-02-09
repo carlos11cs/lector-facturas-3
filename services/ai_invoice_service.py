@@ -260,6 +260,76 @@ def _normalize_vat_breakdown(raw_value: Any) -> List[Dict[str, Any]]:
     return lines
 
 
+def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
+    if not text:
+        return {"base": None, "vat": None, "total": None}
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    def find_amount_for_keywords(keywords: List[str]) -> Optional[float]:
+        for idx, line in enumerate(lines):
+            upper = line.upper()
+            if any(keyword in upper for keyword in keywords):
+                amount = None
+                numbers = re.findall(r"\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+[.,]\d{2}", line)
+                if numbers:
+                    amount = _normalize_amount(numbers[-1])
+                if amount is None and idx + 1 < len(lines):
+                    numbers = re.findall(
+                        r"\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+[.,]\d{2}",
+                        lines[idx + 1],
+                    )
+                    if numbers:
+                        amount = _normalize_amount(numbers[0])
+                if amount is not None:
+                    return amount
+        return None
+
+    base_amount = find_amount_for_keywords(["BASE IMPONIBLE", "BASE IVA", "BASE"])
+    total_amount = find_amount_for_keywords(
+        ["TOTAL FACTURA", "TOTAL EUR", "TOTAL BRUTO", "TOTAL IVA INCLUIDO", "TOTAL"]
+    )
+    vat_amount = find_amount_for_keywords(["I.V.A", "IVA"])
+    return {"base": base_amount, "vat": vat_amount, "total": total_amount}
+
+
+def _maybe_override_amounts_from_text(
+    text: str,
+    base_amount: Optional[float],
+    vat_amount: Optional[float],
+    total_amount: Optional[float],
+    vat_rate: Optional[float],
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    extracted = _extract_amounts_from_text(text)
+    text_base = extracted.get("base")
+    text_total = extracted.get("total")
+
+    def is_significantly_different(a: Optional[float], b: Optional[float]) -> bool:
+        if a is None or b is None:
+            return False
+        tolerance = max(0.05, b * 0.01)
+        return abs(a - b) > tolerance
+
+    math_ok = _validate_math(base_amount, vat_amount, total_amount)
+
+    if text_base is not None and (base_amount is None or is_significantly_different(base_amount, text_base)):
+        base_amount = text_base
+        if vat_rate is not None:
+            vat_amount = round(base_amount * (vat_rate / 100), 2)
+            total_amount = round(base_amount + vat_amount, 2)
+
+    if text_total is not None and (total_amount is None or is_significantly_different(total_amount, text_total)):
+        total_amount = text_total
+        if base_amount is not None and vat_amount is None:
+            vat_amount = round(total_amount - base_amount, 2)
+
+    if not math_ok and base_amount is not None and vat_amount is not None and total_amount is not None:
+        difference = round((base_amount + vat_amount) - total_amount, 2)
+        if abs(difference) > 0.05:
+            total_amount = round(base_amount + vat_amount, 2)
+
+    return base_amount, vat_amount, total_amount
+
+
 def _summarize_vat_breakdown(lines: List[Dict[str, Any]]) -> Optional[Tuple[float, float, float]]:
     if not lines:
         return None
@@ -1221,6 +1291,10 @@ def analyze_invoice(
         payment_dates = _find_payment_dates_by_keywords(extracted_text, invoice_date)
     payment_dates = sorted({d for d in payment_dates if d})
     payment_date = payment_dates[0] if payment_dates else None
+
+    base_amount, vat_amount, total_amount = _maybe_override_amounts_from_text(
+        extracted_text, base_amount, vat_amount, total_amount, vat_rate
+    )
 
     assumed_vat = False
     if vat_rate is None and not _has_vat_exemption_indicators(extracted_text):
