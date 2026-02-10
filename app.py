@@ -36,6 +36,7 @@ from services.ai_invoice_service import (
     analyze_invoice,
     _extract_pdf_text_from_bytes,
     _extract_pdf_text_ocr_from_bytes,
+    _extract_image_text_ocr_from_bytes,
     extract_loan_schedule,
 )
 from services.storage_service import get_public_url, upload_bytes
@@ -211,6 +212,7 @@ loan_installments_table = Table(
     Column("id", Integer, primary_key=True),
     Column("user_id", Integer, nullable=False, server_default=str(DEFAULT_USER_ID)),
     Column("company_id", Integer, nullable=False),
+    Column("bank_name", String),
     Column("concept", String, nullable=False),
     Column("payment_date", String, nullable=False),
     Column("total_amount", Float, nullable=False),
@@ -276,6 +278,7 @@ def init_db():
     add_column_if_missing("no_invoice_expenses", "vat_rate", "INTEGER")
     add_column_if_missing("no_invoice_expenses", "vat_amount", "FLOAT")
     add_column_if_missing("no_invoice_expenses", "base_amount", "FLOAT")
+    add_column_if_missing("loan_installments", "bank_name", "VARCHAR")
     if "no_invoice_expenses" in table_names:
         with engine.begin() as conn:
             conn.execute(
@@ -837,6 +840,15 @@ def parse_loan_installments_from_text(text):
     installments = []
     if not text:
         return installments
+    bank_name = None
+    for line in text.splitlines():
+        lowered = line.lower()
+        if any(keyword in lowered for keyword in ["banco", "entidad", "bank"]):
+            cleaned = re.sub(r"^(banco|entidad|bank)\s*[:\-]\s*", "", line, flags=re.I)
+            cleaned = cleaned.strip()
+            if cleaned and len(cleaned) > 2:
+                bank_name = cleaned
+                break
     for line in text.splitlines():
         date_value = parse_loan_date(line)
         if not date_value:
@@ -850,6 +862,7 @@ def parse_loan_installments_from_text(text):
         installments.append(
             {
                 "payment_date": date_value,
+                "bank_name": bank_name,
                 "total_amount": round(total, 2),
                 "interest_amount": round(interest, 2),
                 "principal_amount": round(principal, 2),
@@ -870,6 +883,7 @@ def parse_loan_installments_from_excel(file_bytes):
     total_idx = None
     interest_idx = None
     principal_idx = None
+    bank_idx = None
     for idx, header in enumerate(headers):
         if "fecha" in header:
             date_idx = idx
@@ -879,6 +893,8 @@ def parse_loan_installments_from_excel(file_bytes):
             total_idx = idx
         if "principal" in header or "amort" in header:
             principal_idx = idx
+        if "banco" in header or "entidad" in header or "bank" in header:
+            bank_idx = idx
 
     data_rows = rows[1:] if any(headers) else rows
     for row in data_rows:
@@ -908,9 +924,15 @@ def parse_loan_installments_from_excel(file_bytes):
             continue
         if interest_amount < 0 or total_amount < 0:
             continue
+        bank_name = None
+        if bank_idx is not None and bank_idx < len(row):
+            raw_bank = row[bank_idx]
+            if raw_bank:
+                bank_name = str(raw_bank).strip()
         installments.append(
             {
                 "payment_date": payment_date,
+                "bank_name": bank_name,
                 "total_amount": round(total_amount, 2),
                 "interest_amount": round(interest_amount, 2),
                 "principal_amount": round(principal_amount, 2),
@@ -2620,6 +2642,7 @@ def list_payments():
             select(
                 loan_installments_table.c.id,
                 loan_installments_table.c.payment_date,
+                loan_installments_table.c.bank_name,
                 loan_installments_table.c.concept,
                 loan_installments_table.c.total_amount,
                 loan_installments_table.c.interest_amount,
@@ -2767,8 +2790,9 @@ def list_payments():
         items.append(
             {
                 "id": row["id"],
-                "counterparty": row.get("concept"),
+                "counterparty": row.get("bank_name") or row.get("concept"),
                 "concept": row.get("concept"),
+                "bank_name": row.get("bank_name"),
                 "payment_date": payment_date,
                 "payment_dates": [payment_date],
                 "invoice_date": payment_date,
@@ -3716,6 +3740,7 @@ def list_loan_installments():
             select(
                 loan_installments_table.c.id,
                 loan_installments_table.c.payment_date,
+                loan_installments_table.c.bank_name,
                 loan_installments_table.c.concept,
                 loan_installments_table.c.total_amount,
                 loan_installments_table.c.interest_amount,
@@ -3734,6 +3759,7 @@ def list_loan_installments():
         {
             "id": row["id"],
             "payment_date": row["payment_date"],
+            "bank_name": row.get("bank_name"),
             "concept": row["concept"],
             "total_amount": float(row["total_amount"] or 0),
             "interest_amount": float(row["interest_amount"] or 0),
@@ -3754,6 +3780,7 @@ def create_loan_installment():
     payload = request.get_json(silent=True) or {}
     payment_date = payload.get("payment_date")
     concept = (payload.get("concept") or "").strip()
+    bank_name = (payload.get("bank_name") or "").strip()
     total_amount = payload.get("total_amount")
     interest_amount = payload.get("interest_amount")
 
@@ -3789,6 +3816,7 @@ def create_loan_installment():
             loan_installments_table.insert().values(
                 user_id=data_owner_id,
                 company_id=company_id,
+                bank_name=bank_name or None,
                 concept=concept,
                 payment_date=payment_date,
                 total_amount=total_amount,
@@ -3849,6 +3877,7 @@ def update_loan_installment(installment_id):
             .where(loan_installments_table.c.company_id == company_id)
             .values(
                 payment_date=payment_date,
+                bank_name=bank_name or None,
                 concept=concept,
                 total_amount=total_amount,
                 interest_amount=interest_amount,
@@ -3911,6 +3940,11 @@ def import_loan_installments():
             installments = parse_loan_installments_from_text(text)
             if not installments and text and len(text.strip()) >= 50:
                 installments = extract_loan_schedule(text)
+        elif extension in {".jpg", ".jpeg", ".png"}:
+            text = _extract_image_text_ocr_from_bytes(file_bytes)
+            installments = parse_loan_installments_from_text(text)
+            if not installments and text and len(text.strip()) >= 50:
+                installments = extract_loan_schedule(text)
         else:
             return jsonify({"ok": False, "errors": ["Formato no soportado."]}), 400
     except Exception:
@@ -3923,6 +3957,7 @@ def import_loan_installments():
         preview_items = [
             {
                 "payment_date": item["payment_date"],
+                "bank_name": item.get("bank_name"),
                 "concept": concept,
                 "total_amount": item["total_amount"],
                 "interest_amount": item["interest_amount"],
@@ -3939,6 +3974,7 @@ def import_loan_installments():
                 loan_installments_table.insert().values(
                     user_id=data_owner_id,
                     company_id=company_id,
+                    bank_name=item.get("bank_name"),
                     concept=concept,
                     payment_date=item["payment_date"],
                     total_amount=item["total_amount"],
@@ -3970,6 +4006,7 @@ def create_loan_installments_batch():
         if not isinstance(item, dict):
             continue
         payment_date = (item.get("payment_date") or "").strip()
+        bank_name = (item.get("bank_name") or "").strip()
         if not payment_date:
             errors.append("Fecha de pago inválida.")
             continue
@@ -3996,6 +4033,7 @@ def create_loan_installments_batch():
             {
                 "payment_date": payment_date,
                 "concept": concept,
+                "bank_name": bank_name or None,
                 "total_amount": round(total_amount, 2),
                 "interest_amount": round(interest_amount, 2),
                 "principal_amount": round(principal_amount, 2),
@@ -4011,6 +4049,7 @@ def create_loan_installments_batch():
                 loan_installments_table.insert().values(
                     user_id=data_owner_id,
                     company_id=company_id,
+                    bank_name=item.get("bank_name"),
                     concept=item["concept"],
                     payment_date=item["payment_date"],
                     total_amount=item["total_amount"],

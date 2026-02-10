@@ -944,6 +944,10 @@ h1 {
   margin-top: 12px;
 }
 
+.loan-actions {
+  margin: 12px 0 4px;
+}
+
 .billing-entries h3 {
   margin: 0 0 10px;
   font-size: 1rem;

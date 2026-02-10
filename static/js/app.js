@@ -4590,6 +4590,9 @@ function renderLoanInstallments(installments) {
     const dateTd = document.createElement("td");
     dateTd.textContent = installment.payment_date;
 
+    const bankTd = document.createElement("td");
+    bankTd.textContent = installment.bank_name || "-";
+
     const conceptTd = document.createElement("td");
     conceptTd.textContent = installment.concept;
 
@@ -4628,6 +4631,7 @@ function renderLoanInstallments(installments) {
     actionsTd.appendChild(deleteBtn);
 
     tr.appendChild(dateTd);
+    tr.appendChild(bankTd);
     tr.appendChild(conceptTd);
     tr.appendChild(totalTd);
     tr.appendChild(interestTd);
@@ -4648,6 +4652,12 @@ function enterLoanEditMode(row, installment) {
   dateInput.type = "date";
   dateInput.value = installment.payment_date;
   dateTd.appendChild(dateInput);
+
+  const bankTd = document.createElement("td");
+  const bankInput = document.createElement("input");
+  bankInput.type = "text";
+  bankInput.value = installment.bank_name || "";
+  bankTd.appendChild(bankInput);
 
   const conceptTd = document.createElement("td");
   const conceptInput = document.createElement("input");
@@ -4693,6 +4703,7 @@ function enterLoanEditMode(row, installment) {
   saveBtn.addEventListener("click", () => {
     updateLoanInstallment(installment.id, {
       payment_date: dateInput.value,
+      bank_name: bankInput.value,
       concept: conceptInput.value,
       total_amount: parseNumberInput(totalInput.value),
       interest_amount: parseNumberInput(interestInput.value),
@@ -4709,6 +4720,7 @@ function enterLoanEditMode(row, installment) {
   actionsTd.appendChild(cancelBtn);
 
   row.appendChild(dateTd);
+  row.appendChild(bankTd);
   row.appendChild(conceptTd);
   row.appendChild(totalTd);
   row.appendChild(interestTd);
@@ -4801,9 +4813,6 @@ function importLoanPlan() {
   }
   const formData = new FormData();
   formData.append("file", file);
-  if (loanConceptInput && loanConceptInput.value.trim()) {
-    formData.append("concept", loanConceptInput.value.trim());
-  }
   fetch(withCompanyParam("/api/loan-installments/import?preview=1"), {
     method: "POST",
     body: formData,
@@ -4851,10 +4860,19 @@ function renderLoanPlanPreview() {
     });
     dateTd.appendChild(dateInput);
 
+    const bankTd = document.createElement("td");
+    const bankInput = document.createElement("input");
+    bankInput.type = "text";
+    bankInput.value = item.bank_name || "";
+    bankInput.addEventListener("input", () => {
+      loanPlanDraft[index].bank_name = bankInput.value;
+    });
+    bankTd.appendChild(bankInput);
+
     const conceptTd = document.createElement("td");
     const conceptInput = document.createElement("input");
     conceptInput.type = "text";
-    conceptInput.value = item.concept || loanConceptInput?.value || "";
+    conceptInput.value = item.concept || "Plan de amortización";
     conceptInput.addEventListener("input", () => {
       loanPlanDraft[index].concept = conceptInput.value;
     });
@@ -4905,6 +4923,7 @@ function renderLoanPlanPreview() {
     actionsTd.appendChild(removeBtn);
 
     row.appendChild(dateTd);
+    row.appendChild(bankTd);
     row.appendChild(conceptTd);
     row.appendChild(totalTd);
     row.appendChild(interestTd);
@@ -4923,7 +4942,8 @@ function saveLoanPlanDraft() {
   const cleaned = loanPlanDraft
     .map((item) => ({
       payment_date: item.payment_date,
-      concept: (item.concept || loanConceptInput?.value || "").trim(),
+      bank_name: (item.bank_name || "").trim(),
+      concept: (item.concept || "Plan de amortización").trim(),
       total_amount: Number(item.total_amount),
       interest_amount: Number(item.interest_amount || 0),
       principal_amount: Number(item.principal_amount || 0),

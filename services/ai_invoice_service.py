@@ -1393,6 +1393,12 @@ def extract_loan_schedule(text: str) -> List[Dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         payment_date = _normalize_date(item.get("payment_date") or item.get("fecha_pago"))
+        bank_name = (
+            item.get("bank_name")
+            or item.get("banco")
+            or item.get("entidad")
+            or item.get("bank")
+        )
         total_amount = _normalize_amount(item.get("total_amount") or item.get("importe_total"))
         interest_amount = _normalize_amount(item.get("interest_amount") or item.get("interes"))
         principal_amount = _normalize_amount(item.get("principal_amount") or item.get("amortizacion"))
@@ -1410,6 +1416,7 @@ def extract_loan_schedule(text: str) -> List[Dict[str, Any]]:
         normalized.append(
             {
                 "payment_date": payment_date,
+                "bank_name": str(bank_name).strip() if bank_name else None,
                 "total_amount": round(total_amount, 2),
                 "interest_amount": round(interest_amount or 0, 2),
                 "principal_amount": round(principal_amount or 0, 2),

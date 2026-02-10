@@ -458,14 +458,14 @@
             <div class="upload-area loan-upload" id="loanPlanDropZone">
               <div class="upload-copy">
                 <h3>Arrastra y suelta</h3>
-                <p>Formatos permitidos: PDF, Excel.</p>
+                <p>Formatos permitidos: PDF, Excel, JPG, PNG.</p>
                 <p class="muted" id="loanPlanFileName">Ningún archivo seleccionado.</p>
               </div>
               <div class="upload-actions">
                 <button type="button" id="loanPlanSelectBtn" class="button ghost">
                   Seleccionar archivo
                 </button>
-                <input type="file" id="loanPlanFile" accept=".pdf,.xlsx,.xls" />
+                <input type="file" id="loanPlanFile" accept=".pdf,.xlsx,.xls,.jpg,.jpeg,.png" />
               </div>
             </div>
             <div class="billing-entries loan-preview">
@@ -479,6 +479,7 @@
                   <thead>
                     <tr>
                       <th>Fecha</th>
+                      <th>Banco</th>
                       <th>Concepto</th>
                       <th>Cuota (€)</th>
                       <th>Interés (€)</th>
@@ -492,35 +493,7 @@
               <p class="empty" id="loanPlanPreviewEmpty">No hay entradas pendientes.</p>
               <button id="loanPlanSaveBtn" class="button primary">Guardar plan</button>
             </div>
-            <div class="billing-form loan-form">
-              <div class="field">
-                <label for="loanConceptInput">Concepto</label>
-                <input type="text" id="loanConceptInput" placeholder="Ej. Préstamo Banco X" />
-              </div>
-              <div class="field">
-                <label for="loanPaymentDateInput">Fecha de pago</label>
-                <input type="date" id="loanPaymentDateInput" />
-              </div>
-              <div class="field">
-                <label for="loanTotalInput">Cuota total (€)</label>
-                <input type="number" id="loanTotalInput" min="0" step="0.01" placeholder="0,00" />
-              </div>
-              <div class="field">
-                <label for="loanInterestInput">Interés (€)</label>
-                <input type="number" id="loanInterestInput" min="0" step="0.01" placeholder="0,00" />
-              </div>
-              <div class="field">
-                <label for="loanPrincipalInput">Principal (€)</label>
-                <input
-                  type="number"
-                  id="loanPrincipalInput"
-                  min="0"
-                  step="0.01"
-                  placeholder="0,00"
-                  readonly
-                />
-              </div>
-              <button id="loanSaveBtn" class="button primary">Añadir cuota</button>
+            <div class="loan-actions">
               <button id="loanImportBtn" class="button ghost">Importar plan</button>
             </div>
             <div class="billing-table">
@@ -528,6 +501,7 @@
                 <thead>
                   <tr>
                     <th>Fecha</th>
+                    <th>Banco</th>
                     <th>Concepto</th>
                     <th>Cuota (€)</th>
                     <th>Interés (€)</th>
