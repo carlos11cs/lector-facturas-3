@@ -1,4 +1,5 @@
 import calendar
+import io
 import json
 import logging
 import multiprocessing as mp
@@ -11,6 +12,7 @@ from uuid import uuid4
 
 import httpx
 import fitz
+import openpyxl
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for, g
 from sqlalchemy import (
     Boolean,
@@ -30,7 +32,11 @@ from sqlalchemy import (
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
-from services.ai_invoice_service import analyze_invoice
+from services.ai_invoice_service import (
+    analyze_invoice,
+    _extract_pdf_text_from_bytes,
+    _extract_pdf_text_ocr_from_bytes,
+)
 from services.storage_service import get_public_url, upload_bytes
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -755,6 +761,161 @@ def parse_payment_dates(raw_value):
         if norm:
             normalized.append(norm)
     return sorted(set(normalized))
+
+
+def parse_loan_date(value):
+    normalized = normalize_date(value)
+    if normalized:
+        return normalized
+    if not value:
+        return None
+    raw = str(value).strip()
+    match = re.search(r"(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})", raw)
+    if not match:
+        return None
+    day, month, year = match.groups()
+    if len(year) == 2:
+        year = f"20{year}"
+    try:
+        return date(int(year), int(month), int(day)).isoformat()
+    except ValueError:
+        return None
+
+
+def parse_amount(value):
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if raw == "":
+        return None
+    raw = raw.replace("€", "").replace("EUR", "").replace("euro", "")
+    raw = raw.replace(" ", "")
+    if raw.count(",") >= 1 and raw.count(".") >= 1:
+        raw = raw.replace(".", "").replace(",", ".")
+    elif raw.count(",") == 1 and raw.count(".") == 0:
+        raw = raw.replace(",", ".")
+    elif raw.count(".") >= 1 and raw.count(",") == 0:
+        parts = raw.split(".")
+        if len(parts[-1]) == 2:
+            raw = "".join(parts[:-1]) + "." + parts[-1]
+        else:
+            raw = raw.replace(".", "")
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _choose_total_interest(amounts):
+    amounts = [amount for amount in amounts if amount is not None and amount >= 0]
+    if len(amounts) < 2:
+        return None, None
+    if len(amounts) == 2:
+        total = max(amounts)
+        interest = min(amounts)
+        return total, interest
+    for total in amounts:
+        for interest in amounts:
+            if total <= interest:
+                continue
+            principal = round(total - interest, 2)
+            for candidate in amounts:
+                if candidate in (total, interest):
+                    continue
+                if abs(candidate - principal) <= max(0.05, principal * 0.01):
+                    return total, interest
+    sorted_amounts = sorted(amounts)
+    total = sorted_amounts[-2] if len(sorted_amounts) >= 2 else sorted_amounts[-1]
+    interest = sorted_amounts[0]
+    if total <= interest:
+        return None, None
+    return total, interest
+
+
+def parse_loan_installments_from_text(text):
+    installments = []
+    if not text:
+        return installments
+    for line in text.splitlines():
+        date_value = parse_loan_date(line)
+        if not date_value:
+            continue
+        numbers = re.findall(r"\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+[.,]\d{2}", line)
+        amounts = [parse_amount(value) for value in numbers]
+        total, interest = _choose_total_interest(amounts)
+        if total is None or interest is None:
+            continue
+        principal = round(total - interest, 2)
+        installments.append(
+            {
+                "payment_date": date_value,
+                "total_amount": round(total, 2),
+                "interest_amount": round(interest, 2),
+                "principal_amount": round(principal, 2),
+            }
+        )
+    return installments
+
+
+def parse_loan_installments_from_excel(file_bytes):
+    installments = []
+    workbook = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+    sheet = workbook.active
+    rows = list(sheet.iter_rows(values_only=True))
+    if not rows:
+        return installments
+    headers = [str(value).strip().lower() if value else "" for value in rows[0]]
+    date_idx = None
+    total_idx = None
+    interest_idx = None
+    principal_idx = None
+    for idx, header in enumerate(headers):
+        if "fecha" in header:
+            date_idx = idx
+        if "interes" in header or "interés" in header:
+            interest_idx = idx
+        if "cuota" in header or "total" in header or "importe" in header:
+            total_idx = idx
+        if "principal" in header or "amort" in header:
+            principal_idx = idx
+
+    data_rows = rows[1:] if any(headers) else rows
+    for row in data_rows:
+        if date_idx is None or date_idx >= len(row):
+            continue
+        payment_date = parse_loan_date(row[date_idx])
+        if not payment_date:
+            continue
+        total_amount = None
+        interest_amount = None
+        principal_amount = None
+        if total_idx is not None and total_idx < len(row):
+            total_amount = parse_amount(row[total_idx])
+        if interest_idx is not None and interest_idx < len(row):
+            interest_amount = parse_amount(row[interest_idx])
+        if principal_idx is not None and principal_idx < len(row):
+            principal_amount = parse_amount(row[principal_idx])
+
+        if total_amount is None and principal_amount is not None and interest_amount is not None:
+            total_amount = principal_amount + interest_amount
+        if interest_amount is None and total_amount is not None and principal_amount is not None:
+            interest_amount = total_amount - principal_amount
+        if principal_amount is None and total_amount is not None and interest_amount is not None:
+            principal_amount = total_amount - interest_amount
+
+        if total_amount is None or interest_amount is None or principal_amount is None:
+            continue
+        if interest_amount < 0 or total_amount < 0:
+            continue
+        installments.append(
+            {
+                "payment_date": payment_date,
+                "total_amount": round(total_amount, 2),
+                "interest_amount": round(interest_amount, 2),
+                "principal_amount": round(principal_amount, 2),
+            }
+        )
+    return installments
 
 
 def vat_rate_to_str(value):
@@ -3717,6 +3878,61 @@ def delete_loan_installment(installment_id):
             return jsonify({"ok": False, "errors": ["Cuota no encontrada."]}), 404
 
     return jsonify({"ok": True})
+
+
+@app.route("/api/loan-installments/import", methods=["POST"])
+def import_loan_installments():
+    data_owner_id = get_data_owner_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    uploaded_file = request.files.get("file")
+    if not uploaded_file:
+        return jsonify({"ok": False, "errors": ["Archivo no recibido."]}), 400
+
+    filename = secure_filename(uploaded_file.filename or "")
+    if not filename:
+        return jsonify({"ok": False, "errors": ["Nombre de archivo inválido."]}), 400
+
+    concept = (request.form.get("concept") or "Préstamo bancario").strip()
+    file_bytes = uploaded_file.read()
+    extension = os.path.splitext(filename)[1].lower()
+    installments = []
+
+    try:
+        if extension in {".xlsx", ".xls"}:
+            installments = parse_loan_installments_from_excel(file_bytes)
+        elif extension == ".pdf":
+            text = _extract_pdf_text_from_bytes(file_bytes)
+            if not text or len(text.strip()) < 50:
+                text = _extract_pdf_text_ocr_from_bytes(file_bytes)
+            installments = parse_loan_installments_from_text(text)
+        else:
+            return jsonify({"ok": False, "errors": ["Formato no soportado."]}), 400
+    except Exception:
+        return jsonify({"ok": False, "errors": ["No se pudo leer el archivo."]}), 400
+
+    if not installments:
+        return jsonify({"ok": False, "errors": ["No se detectaron cuotas válidas."]}), 400
+
+    created_at = datetime.utcnow().isoformat()
+    with engine.begin() as conn:
+        for item in installments:
+            conn.execute(
+                loan_installments_table.insert().values(
+                    user_id=data_owner_id,
+                    company_id=company_id,
+                    concept=concept,
+                    payment_date=item["payment_date"],
+                    total_amount=item["total_amount"],
+                    interest_amount=item["interest_amount"],
+                    principal_amount=item["principal_amount"],
+                    created_at=created_at,
+                )
+            )
+
+    return jsonify({"ok": True, "count": len(installments)})
 
 
 @app.route("/api/billing/entries")

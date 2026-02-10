@@ -410,6 +410,8 @@ const loanTotalInput = document.getElementById("loanTotalInput");
 const loanInterestInput = document.getElementById("loanInterestInput");
 const loanPrincipalInput = document.getElementById("loanPrincipalInput");
 const loanSaveBtn = document.getElementById("loanSaveBtn");
+const loanPlanFile = document.getElementById("loanPlanFile");
+const loanImportBtn = document.getElementById("loanImportBtn");
 const loanTableBody = document.querySelector("#loanTable tbody");
 const loanEmpty = document.getElementById("loanEmpty");
 const fileInput = document.getElementById("fileInput");
@@ -4771,6 +4773,36 @@ function deleteLoanInstallment(id) {
     });
 }
 
+function importLoanPlan() {
+  if (!loanPlanFile || !loanPlanFile.files || loanPlanFile.files.length === 0) {
+    alert("Selecciona un archivo PDF o Excel.");
+    return;
+  }
+  const file = loanPlanFile.files[0];
+  const formData = new FormData();
+  formData.append("file", file);
+  if (loanConceptInput && loanConceptInput.value.trim()) {
+    formData.append("concept", loanConceptInput.value.trim());
+  }
+  fetch(withCompanyParam("/api/loan-installments/import"), {
+    method: "POST",
+    body: formData,
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        alert((data.errors || ["No se pudo importar el plan."]).join("\n"));
+        return;
+      }
+      loanPlanFile.value = "";
+      refreshLoanInstallments();
+      refreshPayments();
+    })
+    .catch(() => {
+      alert("No se pudo importar el plan.");
+    });
+}
+
 function enterNoInvoiceEditMode(row, expense) {
   const dateTd = row.children[0];
   const conceptTd = row.children[1];
@@ -6016,6 +6048,9 @@ function bindEvents() {
   }
   if (loanSaveBtn) {
     loanSaveBtn.addEventListener("click", saveLoanInstallment);
+  }
+  if (loanImportBtn) {
+    loanImportBtn.addEventListener("click", importLoanPlan);
   }
   if (exportPnlBtn) {
     exportPnlBtn.addEventListener("click", exportPnlPdf);

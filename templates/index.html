@@ -457,6 +457,10 @@
             </p>
             <div class="billing-form loan-form">
               <div class="field">
+                <label for="loanPlanFile">Plan (PDF o Excel)</label>
+                <input type="file" id="loanPlanFile" accept=".pdf,.xlsx,.xls" />
+              </div>
+              <div class="field">
                 <label for="loanConceptInput">Concepto</label>
                 <input type="text" id="loanConceptInput" placeholder="Ej. Préstamo Banco X" />
               </div>
@@ -484,6 +488,7 @@
                 />
               </div>
               <button id="loanSaveBtn" class="button primary">Añadir cuota</button>
+              <button id="loanImportBtn" class="button ghost">Importar plan</button>
             </div>
             <div class="billing-table">
               <table id="loanTable">
