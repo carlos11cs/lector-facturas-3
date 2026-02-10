@@ -1352,3 +1352,68 @@ def analyze_invoice(
         "analysis_text": raw_text[:500],
         "validation": validation,
     }
+
+
+def extract_loan_schedule(text: str) -> List[Dict[str, Any]]:
+    if not text or len(text.strip()) < 50:
+        return []
+
+    client = _get_client()
+    prompt = (
+        "Analiza el siguiente texto de un plan de amortización de préstamo. "
+        "Devuelve SOLO JSON válido con la clave installments, que es una lista de cuotas. "
+        "Cada cuota debe incluir: payment_date (YYYY-MM-DD), total_amount, interest_amount, principal_amount. "
+        "Usa null si un campo no se puede inferir con seguridad. "
+        "No incluyas texto adicional fuera del JSON.\n\n"
+        f"TEXTO_PLAN:\n{text}"
+    )
+
+    logger.info("Prompt enviado (loan_schedule): %s", prompt)
+    response = client.chat.completions.create(
+        model=DEFAULT_MODEL,
+        max_tokens=MAX_OUTPUT_TOKENS,
+        temperature=0,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    raw_text = ""
+    if response.choices:
+        raw_text = response.choices[0].message.content or ""
+    logger.info("Respuesta cruda modelo (loan_schedule): %s", raw_text)
+
+    data = _extract_json(raw_text)
+    items: List[Dict[str, Any]] = []
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = data.get("installments") or data.get("cuotas") or []
+
+    normalized: List[Dict[str, Any]] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        payment_date = _normalize_date(item.get("payment_date") or item.get("fecha_pago"))
+        total_amount = _normalize_amount(item.get("total_amount") or item.get("importe_total"))
+        interest_amount = _normalize_amount(item.get("interest_amount") or item.get("interes"))
+        principal_amount = _normalize_amount(item.get("principal_amount") or item.get("amortizacion"))
+
+        if total_amount is None and principal_amount is not None and interest_amount is not None:
+            total_amount = principal_amount + interest_amount
+        if principal_amount is None and total_amount is not None and interest_amount is not None:
+            principal_amount = total_amount - interest_amount
+        if interest_amount is None and total_amount is not None and principal_amount is not None:
+            interest_amount = total_amount - principal_amount
+
+        if not payment_date or total_amount is None:
+            continue
+
+        normalized.append(
+            {
+                "payment_date": payment_date,
+                "total_amount": round(total_amount, 2),
+                "interest_amount": round(interest_amount or 0, 2),
+                "principal_amount": round(principal_amount or 0, 2),
+            }
+        )
+
+    return normalized

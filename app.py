@@ -36,6 +36,7 @@ from services.ai_invoice_service import (
     analyze_invoice,
     _extract_pdf_text_from_bytes,
     _extract_pdf_text_ocr_from_bytes,
+    extract_loan_schedule,
 )
 from services.storage_service import get_public_url, upload_bytes
 
@@ -3908,6 +3909,8 @@ def import_loan_installments():
             if not text or len(text.strip()) < 50:
                 text = _extract_pdf_text_ocr_from_bytes(file_bytes)
             installments = parse_loan_installments_from_text(text)
+            if not installments and text and len(text.strip()) >= 50:
+                installments = extract_loan_schedule(text)
         else:
             return jsonify({"ok": False, "errors": ["Formato no soportado."]}), 400
     except Exception:
