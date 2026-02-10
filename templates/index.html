@@ -450,6 +450,58 @@
             </div>
             <p class="empty" id="noInvoiceEmpty">No hay gastos sin factura en este período.</p>
           </div>
+          <div class="billing-entries loan-panel">
+            <h3>Plan de amortización de préstamo</h3>
+            <p class="muted">
+              Registra cada cuota con su interés para llevar el calendario de pagos y los gastos financieros.
+            </p>
+            <div class="billing-form loan-form">
+              <div class="field">
+                <label for="loanConceptInput">Concepto</label>
+                <input type="text" id="loanConceptInput" placeholder="Ej. Préstamo Banco X" />
+              </div>
+              <div class="field">
+                <label for="loanPaymentDateInput">Fecha de pago</label>
+                <input type="date" id="loanPaymentDateInput" />
+              </div>
+              <div class="field">
+                <label for="loanTotalInput">Cuota total (€)</label>
+                <input type="number" id="loanTotalInput" min="0" step="0.01" placeholder="0,00" />
+              </div>
+              <div class="field">
+                <label for="loanInterestInput">Interés (€)</label>
+                <input type="number" id="loanInterestInput" min="0" step="0.01" placeholder="0,00" />
+              </div>
+              <div class="field">
+                <label for="loanPrincipalInput">Principal (€)</label>
+                <input
+                  type="number"
+                  id="loanPrincipalInput"
+                  min="0"
+                  step="0.01"
+                  placeholder="0,00"
+                  readonly
+                />
+              </div>
+              <button id="loanSaveBtn" class="button primary">Añadir cuota</button>
+            </div>
+            <div class="billing-table">
+              <table id="loanTable">
+                <thead>
+                  <tr>
+                    <th>Fecha</th>
+                    <th>Concepto</th>
+                    <th>Cuota (€)</th>
+                    <th>Interés (€)</th>
+                    <th>Principal (€)</th>
+                    <th>Acciones</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <p class="empty" id="loanEmpty">No hay cuotas registradas en este período.</p>
+          </div>
         </section>
       </section>
 
@@ -737,19 +789,19 @@
           </div>
           <div class="vat-result">
             <div class="vat-card">
-              <h3>Ingresos base anuales</h3>
+              <h3>Cifra de negocios (sin IVA)</h3>
               <p id="isIncome">0,00 €</p>
             </div>
             <div class="vat-card">
-              <h3>Gastos deducibles anuales</h3>
+              <h3>Resultado de explotación</h3>
               <p id="isExpenses">0,00 €</p>
             </div>
             <div class="vat-card result">
-              <h3>Resultado anual estimado</h3>
+              <h3>Resultado antes de impuestos</h3>
               <p id="isResult">0,00 €</p>
             </div>
             <div class="vat-card">
-              <h3>Base imponible anual estimada</h3>
+              <h3>Impuesto sobre sociedades (estimado)</h3>
               <p id="isBase">0,00 €</p>
             </div>
           </div>

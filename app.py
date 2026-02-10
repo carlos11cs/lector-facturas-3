@@ -198,6 +198,20 @@ no_invoice_table = Table(
     Column("created_at", String, nullable=False),
 )
 
+loan_installments_table = Table(
+    "loan_installments",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", Integer, nullable=False, server_default=str(DEFAULT_USER_ID)),
+    Column("company_id", Integer, nullable=False),
+    Column("concept", String, nullable=False),
+    Column("payment_date", String, nullable=False),
+    Column("total_amount", Float, nullable=False),
+    Column("interest_amount", Float, nullable=False),
+    Column("principal_amount", Float, nullable=False),
+    Column("created_at", String, nullable=False),
+)
+
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY") or secrets.token_urlsafe(32)
@@ -941,6 +955,15 @@ def _build_report_totals(user_id, company_id, months, year):
                 if not row["deductible"]:
                     continue
                 expense_base += float(row["amount"] or 0)
+
+            loan_rows = conn.execute(
+                select(loan_installments_table.c.interest_amount)
+                .where(loan_installments_table.c.user_id == user_id)
+                .where(loan_installments_table.c.company_id == company_id)
+                .where(loan_installments_table.c.payment_date.like(f"{prefix}%"))
+            ).mappings().all()
+            for row in loan_rows:
+                expense_base += float(row.get("interest_amount") or 0)
 
             income_invoice_rows = conn.execute(
                 select(income_invoices_table.c.base_amount, income_invoices_table.c.vat_amount)
@@ -1833,6 +1856,17 @@ def available_years():
                     years.add(int(str(value)[:4]))
                 except ValueError:
                     continue
+        loan_years = conn.execute(
+            select(loan_installments_table.c.payment_date)
+            .where(loan_installments_table.c.user_id == data_owner_id)
+            .where(loan_installments_table.c.company_id == company_id)
+        ).scalars().all()
+        for value in loan_years:
+            if value:
+                try:
+                    years.add(int(str(value)[:4]))
+                except ValueError:
+                    continue
 
     if not years:
         years = {date.today().year}
@@ -2420,6 +2454,26 @@ def list_payments():
             .order_by(no_invoice_table.c.expense_date.desc(), no_invoice_table.c.id.desc())
         ).mappings().all()
 
+        loan_rows = conn.execute(
+            select(
+                loan_installments_table.c.id,
+                loan_installments_table.c.payment_date,
+                loan_installments_table.c.concept,
+                loan_installments_table.c.total_amount,
+                loan_installments_table.c.interest_amount,
+                loan_installments_table.c.principal_amount,
+            )
+            .where(loan_installments_table.c.user_id == data_owner_id)
+            .where(loan_installments_table.c.company_id == company_id)
+            .where(
+                loan_installments_table.c.payment_date.between(buffer_start, year_end_iso)
+            )
+            .order_by(
+                loan_installments_table.c.payment_date.desc(),
+                loan_installments_table.c.id.desc(),
+            )
+        ).mappings().all()
+
         income_rows = conn.execute(
             select(
                 income_invoices_table.c.id,
@@ -2532,6 +2586,38 @@ def list_payments():
                 "deductible": bool(row.get("deductible")),
                 "amount": amount,
                 "type": "no_invoice",
+            }
+        )
+
+    for row in loan_rows:
+        payment_date = row.get("payment_date")
+        if not payment_date:
+            continue
+        try:
+            payment_dt = date.fromisoformat(payment_date)
+        except ValueError:
+            continue
+        if payment_dt < start or payment_dt > end:
+            continue
+        day = payment_dt.day
+        amount = float(row.get("total_amount") or 0)
+        day_totals[day] = round(day_totals.get(day, 0.0) + amount, 2)
+        items.append(
+            {
+                "id": row["id"],
+                "counterparty": row.get("concept"),
+                "concept": row.get("concept"),
+                "payment_date": payment_date,
+                "payment_dates": [payment_date],
+                "invoice_date": payment_date,
+                "base_amount": float(row.get("principal_amount") or 0),
+                "vat_rate": 0,
+                "vat_amount": 0,
+                "total_amount": amount,
+                "interest_amount": float(row.get("interest_amount") or 0),
+                "principal_amount": float(row.get("principal_amount") or 0),
+                "amount": amount,
+                "type": "loan_installment",
             }
         )
 
@@ -3443,6 +3529,192 @@ def delete_no_invoice_expense(expense_id):
 
     if result.rowcount == 0:
         return jsonify({"ok": False, "errors": ["Gasto no encontrado."]}), 404
+
+    return jsonify({"ok": True})
+
+
+@app.route("/api/loan-installments")
+def list_loan_installments():
+    month = request.args.get("month", type=int)
+    year = request.args.get("year", type=int)
+    data_owner_id = get_data_owner_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    today = date.today()
+    month = month or today.month
+    year = year or today.year
+    _, last_day = calendar.monthrange(year, month)
+    start = date(year, month, 1).isoformat()
+    end = date(year, month, last_day).isoformat()
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(
+                loan_installments_table.c.id,
+                loan_installments_table.c.payment_date,
+                loan_installments_table.c.concept,
+                loan_installments_table.c.total_amount,
+                loan_installments_table.c.interest_amount,
+                loan_installments_table.c.principal_amount,
+            )
+            .where(loan_installments_table.c.user_id == data_owner_id)
+            .where(loan_installments_table.c.company_id == company_id)
+            .where(loan_installments_table.c.payment_date.between(start, end))
+            .order_by(
+                loan_installments_table.c.payment_date.desc(),
+                loan_installments_table.c.id.desc(),
+            )
+        ).mappings().all()
+
+    installments = [
+        {
+            "id": row["id"],
+            "payment_date": row["payment_date"],
+            "concept": row["concept"],
+            "total_amount": float(row["total_amount"] or 0),
+            "interest_amount": float(row["interest_amount"] or 0),
+            "principal_amount": float(row["principal_amount"] or 0),
+        }
+        for row in rows
+    ]
+    return jsonify({"installments": installments})
+
+
+@app.route("/api/loan-installments", methods=["POST"])
+def create_loan_installment():
+    data_owner_id = get_data_owner_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    payload = request.get_json(silent=True) or {}
+    payment_date = payload.get("payment_date")
+    concept = (payload.get("concept") or "").strip()
+    total_amount = payload.get("total_amount")
+    interest_amount = payload.get("interest_amount")
+
+    errors = []
+    if not payment_date:
+        errors.append("Fecha de pago obligatoria.")
+    if not concept:
+        errors.append("Concepto obligatorio.")
+    try:
+        total_amount = float(total_amount)
+    except (TypeError, ValueError):
+        total_amount = None
+    try:
+        interest_amount = float(interest_amount)
+    except (TypeError, ValueError):
+        interest_amount = None
+
+    if total_amount is None or total_amount < 0:
+        errors.append("Importe total inválido.")
+    if interest_amount is None or interest_amount < 0:
+        errors.append("Interés inválido.")
+    if total_amount is not None and interest_amount is not None:
+        if interest_amount > total_amount:
+            errors.append("El interés no puede superar el importe total.")
+
+    if errors:
+        return jsonify({"ok": False, "errors": errors}), 400
+
+    principal_amount = round(total_amount - interest_amount, 2)
+    created_at = datetime.utcnow().isoformat()
+    with engine.begin() as conn:
+        result = conn.execute(
+            loan_installments_table.insert().values(
+                user_id=data_owner_id,
+                company_id=company_id,
+                concept=concept,
+                payment_date=payment_date,
+                total_amount=total_amount,
+                interest_amount=interest_amount,
+                principal_amount=principal_amount,
+                created_at=created_at,
+            )
+        )
+        new_id = result.inserted_primary_key[0] if result.inserted_primary_key else None
+
+    return jsonify({"ok": True, "id": new_id})
+
+
+@app.route("/api/loan-installments/<int:installment_id>", methods=["PUT"])
+def update_loan_installment(installment_id):
+    data_owner_id = get_data_owner_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    payload = request.get_json(silent=True) or {}
+    payment_date = payload.get("payment_date")
+    concept = (payload.get("concept") or "").strip()
+    total_amount = payload.get("total_amount")
+    interest_amount = payload.get("interest_amount")
+
+    errors = []
+    if not payment_date:
+        errors.append("Fecha de pago obligatoria.")
+    if not concept:
+        errors.append("Concepto obligatorio.")
+    try:
+        total_amount = float(total_amount)
+    except (TypeError, ValueError):
+        total_amount = None
+    try:
+        interest_amount = float(interest_amount)
+    except (TypeError, ValueError):
+        interest_amount = None
+
+    if total_amount is None or total_amount < 0:
+        errors.append("Importe total inválido.")
+    if interest_amount is None or interest_amount < 0:
+        errors.append("Interés inválido.")
+    if total_amount is not None and interest_amount is not None:
+        if interest_amount > total_amount:
+            errors.append("El interés no puede superar el importe total.")
+
+    if errors:
+        return jsonify({"ok": False, "errors": errors}), 400
+
+    principal_amount = round(total_amount - interest_amount, 2)
+    with engine.begin() as conn:
+        result = conn.execute(
+            loan_installments_table.update()
+            .where(loan_installments_table.c.id == installment_id)
+            .where(loan_installments_table.c.user_id == data_owner_id)
+            .where(loan_installments_table.c.company_id == company_id)
+            .values(
+                payment_date=payment_date,
+                concept=concept,
+                total_amount=total_amount,
+                interest_amount=interest_amount,
+                principal_amount=principal_amount,
+            )
+        )
+        if result.rowcount == 0:
+            return jsonify({"ok": False, "errors": ["Cuota no encontrada."]}), 404
+
+    return jsonify({"ok": True})
+
+
+@app.route("/api/loan-installments/<int:installment_id>", methods=["DELETE"])
+def delete_loan_installment(installment_id):
+    data_owner_id = get_data_owner_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    with engine.begin() as conn:
+        result = conn.execute(
+            loan_installments_table.delete()
+            .where(loan_installments_table.c.id == installment_id)
+            .where(loan_installments_table.c.user_id == data_owner_id)
+            .where(loan_installments_table.c.company_id == company_id)
+        )
+        if result.rowcount == 0:
+            return jsonify({"ok": False, "errors": ["Cuota no encontrada."]}), 404
 
     return jsonify({"ok": True})
 

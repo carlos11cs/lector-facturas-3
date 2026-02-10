@@ -12,6 +12,7 @@ let incomeGrossTotal = 0;
 let expenseGrossTotal = 0;
 let currentInvoices = [];
 let currentNoInvoiceExpenses = [];
+let currentLoanInstallments = [];
 let billingBaseTotal = 0;
 let currentSummary = null;
 let currentBillingSummary = null;
@@ -403,6 +404,14 @@ const noInvoiceDeductible = document.getElementById("noInvoiceDeductible");
 const noInvoiceSaveBtn = document.getElementById("noInvoiceSaveBtn");
 const noInvoiceTableBody = document.querySelector("#noInvoiceTable tbody");
 const noInvoiceEmpty = document.getElementById("noInvoiceEmpty");
+const loanConceptInput = document.getElementById("loanConceptInput");
+const loanPaymentDateInput = document.getElementById("loanPaymentDateInput");
+const loanTotalInput = document.getElementById("loanTotalInput");
+const loanInterestInput = document.getElementById("loanInterestInput");
+const loanPrincipalInput = document.getElementById("loanPrincipalInput");
+const loanSaveBtn = document.getElementById("loanSaveBtn");
+const loanTableBody = document.querySelector("#loanTable tbody");
+const loanEmpty = document.getElementById("loanEmpty");
 const fileInput = document.getElementById("fileInput");
 const folderInput = document.getElementById("folderInput");
 const dropZone = document.getElementById("dropZone");
@@ -3189,6 +3198,13 @@ function updateNetChart() {
       }
       expensesMap[month] += getNoInvoiceDeductibleAmount(expense);
     });
+    currentLoanInstallments.forEach((installment) => {
+      const month = Number(String(installment.payment_date || "").slice(5, 7));
+      if (!expensesMap[month]) {
+        expensesMap[month] = 0;
+      }
+      expensesMap[month] += Number(installment.interest_amount) || 0;
+    });
     currentIncomeInvoices.forEach((invoice) => {
       const month = Number(String(invoice.invoice_date || "").slice(5, 7));
       if (!incomeMap[month]) {
@@ -3458,6 +3474,35 @@ function updatePaymentDateFromCalendar(item, newDate) {
     alert("Selecciona una fecha válida.");
     return Promise.resolve();
   }
+  if (item.type === "loan_installment") {
+    const payload = {
+      payment_date: newDate,
+      concept: item.concept || "Préstamo bancario",
+      total_amount: item.total_amount ?? item.amount ?? 0,
+      interest_amount: item.interest_amount ?? 0,
+      company_id: getSelectedCompanyId(),
+    };
+    const url = withCompanyParam(`/api/loan-installments/${item.id}`);
+    return fetch(url, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (!data.ok) {
+          alert((data.errors || ["Error al actualizar."]).join("\n"));
+          return;
+        }
+        refreshPayments();
+        refreshLoanInstallments();
+      })
+      .catch(() => {
+        alert("No se pudo actualizar la fecha de vencimiento.");
+      });
+  }
   if (item.type === "no_invoice") {
     const payload = {
       expense_date: newDate,
@@ -3571,6 +3616,8 @@ function renderPaymentDayDetails(day) {
       label = "Cliente";
     } else if (item.type === "no_invoice") {
       label = "Concepto";
+    } else if (item.type === "loan_installment") {
+      label = "Préstamo";
     }
     supplier.textContent = `${label}: ${item.counterparty || "-"}`;
     const concept = document.createElement("span");
@@ -3583,6 +3630,8 @@ function renderPaymentDayDetails(day) {
         ? "Ingreso"
         : item.type === "no_invoice"
         ? "Gasto sin factura"
+        : item.type === "loan_installment"
+        ? "Cuota préstamo"
         : "Gasto";
     amount.textContent = `${formatCurrency(item.amount)} (${amountLabel})`;
     const editBtn = document.createElement("button");
@@ -3678,6 +3727,7 @@ function refreshAllData() {
     refreshIncomeInvoices(),
     refreshPayments(),
     refreshNoInvoiceExpenses(),
+    refreshLoanInstallments(),
     refreshAnnualTaxData(),
   ]).then(() => {
     updateDashboardTotals();
@@ -3696,7 +3746,9 @@ function updateDashboardEmptyState() {
     (Array.isArray(currentIncomeInvoices) && currentIncomeInvoices.length > 0);
   const hasNoInvoice =
     Array.isArray(currentNoInvoiceExpenses) && currentNoInvoiceExpenses.length > 0;
-  const hasData = hasExpenses || hasBilling || hasNoInvoice;
+  const hasLoans =
+    Array.isArray(currentLoanInstallments) && currentLoanInstallments.length > 0;
+  const hasData = hasExpenses || hasBilling || hasNoInvoice || hasLoans;
   emptyNode.style.display = hasData ? "none" : "block";
 }
 
@@ -3724,13 +3776,16 @@ function refreshAnnualTaxData() {
     Promise.all(months.map((targetMonth) => fetchNoInvoiceExpenses(targetMonth, year))).then(
       (expensesByMonth) => expensesByMonth.flat()
     ),
+    Promise.all(months.map((targetMonth) => fetchLoanInstallments(targetMonth, year))).then(
+      (installmentsByMonth) => installmentsByMonth.flat()
+    ),
     Promise.all(months.map((targetMonth) => fetchIncomeInvoices(targetMonth, year))).then(
       (invoicesByMonth) => invoicesByMonth.flat()
     ),
     Promise.all(months.map((targetMonth) => fetchBillingSummary(targetMonth, year))).then(
       (summaries) => mergeBillingSummaries(summaries, months)
     ),
-  ]).then(([invoices, expenses, incomeInvoices, billingSummary]) => {
+  ]).then(([invoices, expenses, loanInstallments, incomeInvoices, billingSummary]) => {
     const baseTotals = billingSummary.baseTotals || {};
     annualBillingBaseTotal =
       (Number(baseTotals["0"]) || 0) +
@@ -3755,13 +3810,18 @@ function refreshAnnualTaxData() {
       0
     );
 
-    annualDeductibleExpenses = annualInvoices + annualNoInvoice;
-    annualLoanInterestTotal = expenses.reduce((total, expense) => {
-      if (expense.expense_type === "prestamo") {
-        return total + (Number(expense.interest_amount) || 0);
-      }
-      return total;
-    }, 0);
+    annualLoanInterestTotal =
+      expenses.reduce((total, expense) => {
+        if (expense.expense_type === "prestamo") {
+          return total + (Number(expense.interest_amount) || 0);
+        }
+        return total;
+      }, 0) +
+      loanInstallments.reduce(
+        (total, installment) => total + (Number(installment.interest_amount) || 0),
+        0
+      );
+    annualDeductibleExpenses = annualInvoices + annualNoInvoice + annualLoanInterestTotal;
     updateTaxSummary();
   });
 }
@@ -4454,6 +4514,263 @@ function renderNoInvoiceExpenses(expenses) {
   updateDashboardTotals();
 }
 
+function syncLoanPrincipal() {
+  if (!loanTotalInput || !loanInterestInput || !loanPrincipalInput) {
+    return;
+  }
+  const totalValue = parseNumberInput(loanTotalInput.value) || 0;
+  const interestValue = parseNumberInput(loanInterestInput.value) || 0;
+  const principalValue = Math.max(totalValue - interestValue, 0);
+  loanPrincipalInput.value = formatAmountInput(principalValue);
+}
+
+function fetchLoanInstallments(month, year) {
+  const companyId = getSelectedCompanyId();
+  const suffix = companyId ? `&company_id=${companyId}` : "";
+  return fetch(`/api/loan-installments?month=${month}&year=${year}${suffix}`)
+    .then((res) => res.json())
+    .then((data) => data.installments || []);
+}
+
+function refreshLoanInstallments() {
+  if (!loanTableBody) {
+    return Promise.resolve();
+  }
+  const { month, year } = getSelectedMonthYear();
+  if (!month || !year) {
+    return Promise.resolve();
+  }
+  const months = getPeriodMonths();
+  return Promise.all(months.map((targetMonth) => fetchLoanInstallments(targetMonth, year)))
+    .then((installmentsByMonth) => {
+      const installments = installmentsByMonth.flat();
+      installments.sort((a, b) => b.payment_date.localeCompare(a.payment_date));
+      renderLoanInstallments(installments);
+    });
+}
+
+function renderLoanInstallments(installments) {
+  if (!loanTableBody || !loanEmpty) {
+    return;
+  }
+  loanTableBody.innerHTML = "";
+  currentLoanInstallments = installments;
+  if (!installments.length) {
+    loanEmpty.style.display = "block";
+    updateTaxSummary();
+    updateDashboardTotals();
+    return;
+  }
+  loanEmpty.style.display = "none";
+
+  installments.forEach((installment) => {
+    const tr = document.createElement("tr");
+    tr.dataset.id = installment.id;
+
+    const dateTd = document.createElement("td");
+    dateTd.textContent = installment.payment_date;
+
+    const conceptTd = document.createElement("td");
+    conceptTd.textContent = installment.concept;
+
+    const totalTd = document.createElement("td");
+    totalTd.textContent = formatCurrency(installment.total_amount);
+
+    const interestTd = document.createElement("td");
+    interestTd.textContent = formatCurrency(installment.interest_amount);
+
+    const principalTd = document.createElement("td");
+    principalTd.textContent = formatCurrency(installment.principal_amount);
+
+    const actionsTd = document.createElement("td");
+    actionsTd.classList.add("billing-actions");
+
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "button ghost";
+    editBtn.textContent = "Editar";
+    editBtn.addEventListener("click", () => {
+      enterLoanEditMode(tr, installment);
+    });
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "button danger";
+    deleteBtn.textContent = "Eliminar";
+    deleteBtn.addEventListener("click", () => {
+      if (!confirm("¿Seguro que deseas eliminar esta cuota?")) {
+        return;
+      }
+      deleteLoanInstallment(installment.id);
+    });
+
+    actionsTd.appendChild(editBtn);
+    actionsTd.appendChild(deleteBtn);
+
+    tr.appendChild(dateTd);
+    tr.appendChild(conceptTd);
+    tr.appendChild(totalTd);
+    tr.appendChild(interestTd);
+    tr.appendChild(principalTd);
+    tr.appendChild(actionsTd);
+    loanTableBody.appendChild(tr);
+  });
+
+  updateTaxSummary();
+  updateDashboardTotals();
+}
+
+function enterLoanEditMode(row, installment) {
+  row.innerHTML = "";
+
+  const dateTd = document.createElement("td");
+  const dateInput = document.createElement("input");
+  dateInput.type = "date";
+  dateInput.value = installment.payment_date;
+  dateTd.appendChild(dateInput);
+
+  const conceptTd = document.createElement("td");
+  const conceptInput = document.createElement("input");
+  conceptInput.type = "text";
+  conceptInput.value = installment.concept || "";
+  conceptTd.appendChild(conceptInput);
+
+  const totalTd = document.createElement("td");
+  const totalInput = document.createElement("input");
+  totalInput.type = "number";
+  totalInput.min = "0";
+  totalInput.step = "0.01";
+  totalInput.value = formatAmountInput(installment.total_amount);
+  totalTd.appendChild(totalInput);
+
+  const interestTd = document.createElement("td");
+  const interestInput = document.createElement("input");
+  interestInput.type = "number";
+  interestInput.min = "0";
+  interestInput.step = "0.01";
+  interestInput.value = formatAmountInput(installment.interest_amount);
+  interestTd.appendChild(interestInput);
+
+  const principalTd = document.createElement("td");
+  const principalInput = document.createElement("input");
+  principalInput.type = "number";
+  principalInput.readOnly = true;
+  const updatePrincipal = () => {
+    const totalValue = parseNumberInput(totalInput.value) || 0;
+    const interestValue = parseNumberInput(interestInput.value) || 0;
+    principalInput.value = formatAmountInput(Math.max(totalValue - interestValue, 0));
+  };
+  totalInput.addEventListener("input", updatePrincipal);
+  interestInput.addEventListener("input", updatePrincipal);
+  updatePrincipal();
+  principalTd.appendChild(principalInput);
+
+  const actionsTd = document.createElement("td");
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "button primary";
+  saveBtn.textContent = "Guardar";
+  saveBtn.addEventListener("click", () => {
+    updateLoanInstallment(installment.id, {
+      payment_date: dateInput.value,
+      concept: conceptInput.value,
+      total_amount: parseNumberInput(totalInput.value),
+      interest_amount: parseNumberInput(interestInput.value),
+    });
+  });
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "button ghost";
+  cancelBtn.textContent = "Cancelar";
+  cancelBtn.addEventListener("click", () => {
+    refreshLoanInstallments();
+  });
+  actionsTd.appendChild(saveBtn);
+  actionsTd.appendChild(cancelBtn);
+
+  row.appendChild(dateTd);
+  row.appendChild(conceptTd);
+  row.appendChild(totalTd);
+  row.appendChild(interestTd);
+  row.appendChild(principalTd);
+  row.appendChild(actionsTd);
+}
+
+function saveLoanInstallment() {
+  if (!loanConceptInput || !loanPaymentDateInput || !loanTotalInput || !loanInterestInput) {
+    return;
+  }
+  const payload = {
+    concept: loanConceptInput.value.trim(),
+    payment_date: loanPaymentDateInput.value,
+    total_amount: parseNumberInput(loanTotalInput.value),
+    interest_amount: parseNumberInput(loanInterestInput.value),
+    company_id: getSelectedCompanyId(),
+  };
+  fetch(withCompanyParam("/api/loan-installments"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        alert((data.errors || ["Error al guardar la cuota."]).join("\n"));
+        return;
+      }
+      loanTotalInput.value = "";
+      loanInterestInput.value = "";
+      loanPrincipalInput.value = "";
+      refreshLoanInstallments();
+      refreshPayments();
+    })
+    .catch(() => {
+      alert("No se pudo guardar la cuota.");
+    });
+}
+
+function updateLoanInstallment(id, payload) {
+  fetch(withCompanyParam(`/api/loan-installments/${id}`), {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ ...payload, company_id: getSelectedCompanyId() }),
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        alert((data.errors || ["Error al actualizar la cuota."]).join("\n"));
+        return;
+      }
+      refreshLoanInstallments();
+      refreshPayments();
+    })
+    .catch(() => {
+      alert("No se pudo actualizar la cuota.");
+    });
+}
+
+function deleteLoanInstallment(id) {
+  fetch(withCompanyParam(`/api/loan-installments/${id}`), {
+    method: "DELETE",
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        alert((data.errors || ["Error al eliminar la cuota."]).join("\n"));
+        return;
+      }
+      refreshLoanInstallments();
+      refreshPayments();
+    })
+    .catch(() => {
+      alert("No se pudo eliminar la cuota.");
+    });
+}
+
 function enterNoInvoiceEditMode(row, expense) {
   const dateTd = row.children[0];
   const conceptTd = row.children[1];
@@ -4947,8 +5264,12 @@ function updateTaxSummary() {
     (total, expense) => total + getNoInvoiceDeductibleAmount(expense),
     0
   );
+  const loanInterestPeriod = currentLoanInstallments.reduce(
+    (total, installment) => total + (Number(installment.interest_amount) || 0),
+    0
+  );
 
-  const periodExpenses = deductibleInvoices + deductibleNoInvoice;
+  const periodExpenses = deductibleInvoices + deductibleNoInvoice + loanInterestPeriod;
   currentDeductibleExpenses = periodExpenses;
 
   const annualIncome = annualBillingBaseTotal;
@@ -4988,7 +5309,10 @@ function updatePnlSummary() {
       return sum + (Number(expense.interest_amount) || 0);
     }
     return sum;
-  }, 0);
+  }, 0) + currentLoanInstallments.reduce(
+    (sum, installment) => sum + (Number(installment.interest_amount) || 0),
+    0
+  );
   const invoiceExpenses = currentInvoices.reduce((sum, invoice) => {
     if (invoice.expense_category === "non_deductible") {
       return sum;
@@ -5684,6 +6008,15 @@ function bindEvents() {
   if (noInvoiceSaveBtn) {
     noInvoiceSaveBtn.addEventListener("click", saveNoInvoiceExpense);
   }
+  if (loanTotalInput) {
+    loanTotalInput.addEventListener("input", syncLoanPrincipal);
+  }
+  if (loanInterestInput) {
+    loanInterestInput.addEventListener("input", syncLoanPrincipal);
+  }
+  if (loanSaveBtn) {
+    loanSaveBtn.addEventListener("click", saveLoanInstallment);
+  }
   if (exportPnlBtn) {
     exportPnlBtn.addEventListener("click", exportPnlPdf);
   }
@@ -5730,6 +6063,9 @@ function init() {
       }
       if (!noInvoiceDate.value) {
         noInvoiceDate.value = now.toISOString().slice(0, 10);
+      }
+      if (loanPaymentDateInput && !loanPaymentDateInput.value) {
+        loanPaymentDateInput.value = now.toISOString().slice(0, 10);
       }
       updateHeaderContext();
       refreshAllData();

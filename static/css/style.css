@@ -1182,6 +1182,14 @@ h1 {
   font-size: 0.95rem;
 }
 
+.loan-panel {
+  margin-top: 24px;
+}
+
+.loan-form {
+  margin-bottom: 16px;
+}
+
 .billing-table th,
 .billing-table td {
   padding: 12px 10px;
