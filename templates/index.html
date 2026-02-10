@@ -468,6 +468,30 @@
                 <input type="file" id="loanPlanFile" accept=".pdf,.xlsx,.xls" />
               </div>
             </div>
+            <div class="billing-entries loan-preview">
+              <h4>Entradas detectadas del plan</h4>
+              <p class="muted">
+                Revisa y edita las cuotas antes de guardarlas. No se guardará nada hasta pulsar
+                “Guardar plan”.
+              </p>
+              <div class="billing-table">
+                <table id="loanPlanPreviewTable">
+                  <thead>
+                    <tr>
+                      <th>Fecha</th>
+                      <th>Concepto</th>
+                      <th>Cuota (€)</th>
+                      <th>Interés (€)</th>
+                      <th>Principal (€)</th>
+                      <th>Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <p class="empty" id="loanPlanPreviewEmpty">No hay entradas pendientes.</p>
+              <button id="loanPlanSaveBtn" class="button primary">Guardar plan</button>
+            </div>
             <div class="billing-form loan-form">
               <div class="field">
                 <label for="loanConceptInput">Concepto</label>

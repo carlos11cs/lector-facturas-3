@@ -32,6 +32,7 @@ let pendingIncomeFiles = [];
 let currentIncomeInvoices = [];
 let staffMembers = [];
 let selectedLoanPlanFile = null;
+let loanPlanDraft = [];
 const lowQualityDismissedIds = new Set();
 let billingLastSource = "base";
 
@@ -416,6 +417,9 @@ const loanPlanDropZone = document.getElementById("loanPlanDropZone");
 const loanPlanSelectBtn = document.getElementById("loanPlanSelectBtn");
 const loanPlanFileName = document.getElementById("loanPlanFileName");
 const loanImportBtn = document.getElementById("loanImportBtn");
+const loanPlanPreviewBody = document.querySelector("#loanPlanPreviewTable tbody");
+const loanPlanPreviewEmpty = document.getElementById("loanPlanPreviewEmpty");
+const loanPlanSaveBtn = document.getElementById("loanPlanSaveBtn");
 const loanTableBody = document.querySelector("#loanTable tbody");
 const loanEmpty = document.getElementById("loanEmpty");
 const fileInput = document.getElementById("fileInput");
@@ -4555,6 +4559,16 @@ function refreshLoanInstallments() {
     });
 }
 
+function resetLoanPlanPreview() {
+  loanPlanDraft = [];
+  if (loanPlanPreviewBody) {
+    loanPlanPreviewBody.innerHTML = "";
+  }
+  if (loanPlanPreviewEmpty) {
+    loanPlanPreviewEmpty.style.display = "block";
+  }
+}
+
 function renderLoanInstallments(installments) {
   if (!loanTableBody || !loanEmpty) {
     return;
@@ -4790,7 +4804,7 @@ function importLoanPlan() {
   if (loanConceptInput && loanConceptInput.value.trim()) {
     formData.append("concept", loanConceptInput.value.trim());
   }
-  fetch(withCompanyParam("/api/loan-installments/import"), {
+  fetch(withCompanyParam("/api/loan-installments/import?preview=1"), {
     method: "POST",
     body: formData,
   })
@@ -4800,6 +4814,142 @@ function importLoanPlan() {
         alert((data.errors || ["No se pudo importar el plan."]).join("\n"));
         return;
       }
+      loanPlanDraft = Array.isArray(data.installments) ? data.installments : [];
+      renderLoanPlanPreview();
+    })
+    .catch(() => {
+      alert("No se pudo importar el plan.");
+    });
+}
+
+function renderLoanPlanPreview() {
+  if (!loanPlanPreviewBody) {
+    return;
+  }
+  loanPlanPreviewBody.innerHTML = "";
+
+  if (!loanPlanDraft.length) {
+    if (loanPlanPreviewEmpty) {
+      loanPlanPreviewEmpty.style.display = "block";
+    }
+    return;
+  }
+
+  if (loanPlanPreviewEmpty) {
+    loanPlanPreviewEmpty.style.display = "none";
+  }
+
+  loanPlanDraft.forEach((item, index) => {
+    const row = document.createElement("tr");
+
+    const dateTd = document.createElement("td");
+    const dateInput = document.createElement("input");
+    dateInput.type = "date";
+    dateInput.value = item.payment_date || "";
+    dateInput.addEventListener("input", () => {
+      loanPlanDraft[index].payment_date = dateInput.value;
+    });
+    dateTd.appendChild(dateInput);
+
+    const conceptTd = document.createElement("td");
+    const conceptInput = document.createElement("input");
+    conceptInput.type = "text";
+    conceptInput.value = item.concept || loanConceptInput?.value || "";
+    conceptInput.addEventListener("input", () => {
+      loanPlanDraft[index].concept = conceptInput.value;
+    });
+    conceptTd.appendChild(conceptInput);
+
+    const totalTd = document.createElement("td");
+    const totalInput = document.createElement("input");
+    totalInput.type = "number";
+    totalInput.min = "0";
+    totalInput.step = "0.01";
+    totalInput.value = formatAmountInput(item.total_amount);
+    totalInput.addEventListener("input", () => {
+      loanPlanDraft[index].total_amount = parseNumberInput(totalInput.value);
+    });
+    totalTd.appendChild(totalInput);
+
+    const interestTd = document.createElement("td");
+    const interestInput = document.createElement("input");
+    interestInput.type = "number";
+    interestInput.min = "0";
+    interestInput.step = "0.01";
+    interestInput.value = formatAmountInput(item.interest_amount);
+    interestInput.addEventListener("input", () => {
+      loanPlanDraft[index].interest_amount = parseNumberInput(interestInput.value);
+    });
+    interestTd.appendChild(interestInput);
+
+    const principalTd = document.createElement("td");
+    const principalInput = document.createElement("input");
+    principalInput.type = "number";
+    principalInput.min = "0";
+    principalInput.step = "0.01";
+    principalInput.value = formatAmountInput(item.principal_amount);
+    principalInput.addEventListener("input", () => {
+      loanPlanDraft[index].principal_amount = parseNumberInput(principalInput.value);
+    });
+    principalTd.appendChild(principalInput);
+
+    const actionsTd = document.createElement("td");
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "button danger";
+    removeBtn.textContent = "Quitar";
+    removeBtn.addEventListener("click", () => {
+      loanPlanDraft.splice(index, 1);
+      renderLoanPlanPreview();
+    });
+    actionsTd.appendChild(removeBtn);
+
+    row.appendChild(dateTd);
+    row.appendChild(conceptTd);
+    row.appendChild(totalTd);
+    row.appendChild(interestTd);
+    row.appendChild(principalTd);
+    row.appendChild(actionsTd);
+
+    loanPlanPreviewBody.appendChild(row);
+  });
+}
+
+function saveLoanPlanDraft() {
+  if (!loanPlanDraft.length) {
+    alert("No hay entradas para guardar.");
+    return;
+  }
+  const cleaned = loanPlanDraft
+    .map((item) => ({
+      payment_date: item.payment_date,
+      concept: (item.concept || loanConceptInput?.value || "").trim(),
+      total_amount: Number(item.total_amount),
+      interest_amount: Number(item.interest_amount || 0),
+      principal_amount: Number(item.principal_amount || 0),
+    }))
+    .filter((item) => item.payment_date && !Number.isNaN(item.total_amount));
+
+  if (!cleaned.length) {
+    alert("Revisa las fechas y los importes antes de guardar.");
+    return;
+  }
+
+  fetch(withCompanyParam("/api/loan-installments/batch"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ installments: cleaned, company_id: getSelectedCompanyId() }),
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        alert((data.errors || ["No se pudo guardar el plan."]).join("\n"));
+        return;
+      }
+      loanPlanDraft = [];
+      renderLoanPlanPreview();
       if (loanPlanFile) {
         loanPlanFile.value = "";
       }
@@ -4811,7 +4961,7 @@ function importLoanPlan() {
       refreshPayments();
     })
     .catch(() => {
-      alert("No se pudo importar el plan.");
+      alert("No se pudo guardar el plan.");
     });
 }
 
@@ -5946,6 +6096,7 @@ function bindEvents() {
       if (loanPlanFileName) {
         loanPlanFileName.textContent = file ? file.name : "Ningún archivo seleccionado.";
       }
+      resetLoanPlanPreview();
     });
   }
 
@@ -5973,7 +6124,12 @@ function bindEvents() {
       if (loanPlanFileName) {
         loanPlanFileName.textContent = file.name;
       }
+      resetLoanPlanPreview();
     });
+  }
+
+  if (loanPlanSaveBtn) {
+    loanPlanSaveBtn.addEventListener("click", saveLoanPlanDraft);
   }
 
   if (uploadBtn) {

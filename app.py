@@ -3919,6 +3919,19 @@ def import_loan_installments():
     if not installments:
         return jsonify({"ok": False, "errors": ["No se detectaron cuotas válidas."]}), 400
 
+    if request.args.get("preview") or request.form.get("preview"):
+        preview_items = [
+            {
+                "payment_date": item["payment_date"],
+                "concept": concept,
+                "total_amount": item["total_amount"],
+                "interest_amount": item["interest_amount"],
+                "principal_amount": item["principal_amount"],
+            }
+            for item in installments
+        ]
+        return jsonify({"ok": True, "installments": preview_items})
+
     created_at = datetime.utcnow().isoformat()
     with engine.begin() as conn:
         for item in installments:
@@ -3936,6 +3949,78 @@ def import_loan_installments():
             )
 
     return jsonify({"ok": True, "count": len(installments)})
+
+
+@app.route("/api/loan-installments/batch", methods=["POST"])
+def create_loan_installments_batch():
+    data_owner_id = get_data_owner_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    payload = request.get_json(silent=True) or {}
+    installments = payload.get("installments")
+    if not isinstance(installments, list) or not installments:
+        return jsonify({"ok": False, "errors": ["No hay cuotas para guardar."]}), 400
+
+    created_at = datetime.utcnow().isoformat()
+    errors = []
+    clean_items = []
+    for item in installments:
+        if not isinstance(item, dict):
+            continue
+        payment_date = (item.get("payment_date") or "").strip()
+        if not payment_date:
+            errors.append("Fecha de pago inválida.")
+            continue
+        try:
+            total_amount = float(item.get("total_amount") or 0)
+        except (TypeError, ValueError):
+            errors.append("Importe total inválido.")
+            continue
+        try:
+            interest_amount = float(item.get("interest_amount") or 0)
+        except (TypeError, ValueError):
+            interest_amount = 0.0
+        try:
+            principal_amount = float(item.get("principal_amount") or 0)
+        except (TypeError, ValueError):
+            principal_amount = 0.0
+        concept = (item.get("concept") or "Préstamo bancario").strip()
+        if total_amount < 0 or interest_amount < 0 or principal_amount < 0:
+            errors.append("Importes inválidos.")
+            continue
+        if principal_amount == 0 and total_amount and interest_amount:
+            principal_amount = max(total_amount - interest_amount, 0)
+        clean_items.append(
+            {
+                "payment_date": payment_date,
+                "concept": concept,
+                "total_amount": round(total_amount, 2),
+                "interest_amount": round(interest_amount, 2),
+                "principal_amount": round(principal_amount, 2),
+            }
+        )
+
+    if errors and not clean_items:
+        return jsonify({"ok": False, "errors": errors}), 400
+
+    with engine.begin() as conn:
+        for item in clean_items:
+            conn.execute(
+                loan_installments_table.insert().values(
+                    user_id=data_owner_id,
+                    company_id=company_id,
+                    concept=item["concept"],
+                    payment_date=item["payment_date"],
+                    total_amount=item["total_amount"],
+                    interest_amount=item["interest_amount"],
+                    principal_amount=item["principal_amount"],
+                    created_at=created_at,
+                )
+            )
+
+    return jsonify({"ok": True, "count": len(clean_items)})
 
 
 @app.route("/api/billing/entries")
