@@ -455,11 +455,20 @@
             <p class="muted">
               Registra cada cuota con su interés para llevar el calendario de pagos y los gastos financieros.
             </p>
-            <div class="billing-form loan-form">
-              <div class="field">
-                <label for="loanPlanFile">Plan (PDF o Excel)</label>
+            <div class="upload-area loan-upload" id="loanPlanDropZone">
+              <div class="upload-copy">
+                <h3>Arrastra y suelta</h3>
+                <p>Formatos permitidos: PDF, Excel.</p>
+                <p class="muted" id="loanPlanFileName">Ningún archivo seleccionado.</p>
+              </div>
+              <div class="upload-actions">
+                <button type="button" id="loanPlanSelectBtn" class="button ghost">
+                  Seleccionar archivo
+                </button>
                 <input type="file" id="loanPlanFile" accept=".pdf,.xlsx,.xls" />
               </div>
+            </div>
+            <div class="billing-form loan-form">
               <div class="field">
                 <label for="loanConceptInput">Concepto</label>
                 <input type="text" id="loanConceptInput" placeholder="Ej. Préstamo Banco X" />

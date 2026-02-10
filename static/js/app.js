@@ -31,6 +31,7 @@ let selectedCompanyId = null;
 let pendingIncomeFiles = [];
 let currentIncomeInvoices = [];
 let staffMembers = [];
+let selectedLoanPlanFile = null;
 const lowQualityDismissedIds = new Set();
 let billingLastSource = "base";
 
@@ -411,6 +412,9 @@ const loanInterestInput = document.getElementById("loanInterestInput");
 const loanPrincipalInput = document.getElementById("loanPrincipalInput");
 const loanSaveBtn = document.getElementById("loanSaveBtn");
 const loanPlanFile = document.getElementById("loanPlanFile");
+const loanPlanDropZone = document.getElementById("loanPlanDropZone");
+const loanPlanSelectBtn = document.getElementById("loanPlanSelectBtn");
+const loanPlanFileName = document.getElementById("loanPlanFileName");
 const loanImportBtn = document.getElementById("loanImportBtn");
 const loanTableBody = document.querySelector("#loanTable tbody");
 const loanEmpty = document.getElementById("loanEmpty");
@@ -4774,11 +4778,13 @@ function deleteLoanInstallment(id) {
 }
 
 function importLoanPlan() {
-  if (!loanPlanFile || !loanPlanFile.files || loanPlanFile.files.length === 0) {
+  const file =
+    (loanPlanFile && loanPlanFile.files && loanPlanFile.files[0]) ||
+    selectedLoanPlanFile;
+  if (!file) {
     alert("Selecciona un archivo PDF o Excel.");
     return;
   }
-  const file = loanPlanFile.files[0];
   const formData = new FormData();
   formData.append("file", file);
   if (loanConceptInput && loanConceptInput.value.trim()) {
@@ -4794,7 +4800,13 @@ function importLoanPlan() {
         alert((data.errors || ["No se pudo importar el plan."]).join("\n"));
         return;
       }
-      loanPlanFile.value = "";
+      if (loanPlanFile) {
+        loanPlanFile.value = "";
+      }
+      selectedLoanPlanFile = null;
+      if (loanPlanFileName) {
+        loanPlanFileName.textContent = "Ningún archivo seleccionado.";
+      }
       refreshLoanInstallments();
       refreshPayments();
     })
@@ -5917,6 +5929,49 @@ function bindEvents() {
       incomeDropZone.classList.remove("dragover");
       if (event.dataTransfer.files) {
         addIncomeFiles(event.dataTransfer.files);
+      }
+    });
+  }
+
+  if (loanPlanSelectBtn && loanPlanFile) {
+    loanPlanSelectBtn.addEventListener("click", () => {
+      loanPlanFile.click();
+    });
+  }
+
+  if (loanPlanFile) {
+    loanPlanFile.addEventListener("change", () => {
+      const file = loanPlanFile.files && loanPlanFile.files[0];
+      selectedLoanPlanFile = file || null;
+      if (loanPlanFileName) {
+        loanPlanFileName.textContent = file ? file.name : "Ningún archivo seleccionado.";
+      }
+    });
+  }
+
+  if (loanPlanDropZone) {
+    loanPlanDropZone.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      loanPlanDropZone.classList.add("dragover");
+    });
+    loanPlanDropZone.addEventListener("dragleave", () => {
+      loanPlanDropZone.classList.remove("dragover");
+    });
+    loanPlanDropZone.addEventListener("drop", (event) => {
+      event.preventDefault();
+      loanPlanDropZone.classList.remove("dragover");
+      const file = event.dataTransfer?.files?.[0];
+      if (!file) {
+        return;
+      }
+      selectedLoanPlanFile = file;
+      if (loanPlanFile) {
+        const transfer = new DataTransfer();
+        transfer.items.add(file);
+        loanPlanFile.files = transfer.files;
+      }
+      if (loanPlanFileName) {
+        loanPlanFileName.textContent = file.name;
       }
     });
   }
