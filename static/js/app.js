@@ -125,6 +125,29 @@ function getPnlInputValue(id) {
   return parsed === null ? 0 : parsed;
 }
 
+function getBalanceInputValue(id) {
+  const el = document.getElementById(id);
+  if (!el) {
+    return 0;
+  }
+  const parsed = parseNumberInput(el.value);
+  return parsed === null ? 0 : parsed;
+}
+
+function updateBalanceTotals() {
+  if (!bsTotalAssets || !bsTotalLiabilities) {
+    return;
+  }
+  const totalAssets =
+    getBalanceInputValue("bsAssetNonCurrent") + getBalanceInputValue("bsAssetCurrent");
+  const totalLiabilities =
+    getBalanceInputValue("bsEquity") +
+    getBalanceInputValue("bsLiabNonCurrent") +
+    getBalanceInputValue("bsLiabCurrent");
+  bsTotalAssets.textContent = formatCurrency(totalAssets);
+  bsTotalLiabilities.textContent = formatCurrency(totalLiabilities);
+}
+
 function setPnlInputValue(id, value, auto = false) {
   const el = document.getElementById(id);
   if (!el) {
@@ -146,6 +169,17 @@ function bindPnlInputs() {
       updatePnlSummary();
     });
   });
+}
+
+function bindBalanceInputs() {
+  balanceInputIds.forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) {
+      return;
+    }
+    el.addEventListener("input", updateBalanceTotals);
+  });
+  updateBalanceTotals();
 }
 
 function normalizeEntityName(value) {
@@ -433,8 +467,20 @@ const sections = document.querySelectorAll(".page-section");
 const sidebarToggle = document.getElementById("sidebarToggle");
 const sidebarOverlay = document.getElementById("sidebarOverlay");
 const exportPnlBtn = document.getElementById("exportPnlBtn");
+const pnlEmailBtn = document.getElementById("pnlEmailBtn");
 const pnlName = document.getElementById("pnlName");
 const pnlTaxId = document.getElementById("pnlTaxId");
+const balancePdfBtn = document.getElementById("balancePdfBtn");
+const balanceEmailBtn = document.getElementById("balanceEmailBtn");
+const balanceName = document.getElementById("balanceName");
+const balanceTaxId = document.getElementById("balanceTaxId");
+const bsAssetNonCurrent = document.getElementById("bsAssetNonCurrent");
+const bsAssetCurrent = document.getElementById("bsAssetCurrent");
+const bsEquity = document.getElementById("bsEquity");
+const bsLiabNonCurrent = document.getElementById("bsLiabNonCurrent");
+const bsLiabCurrent = document.getElementById("bsLiabCurrent");
+const bsTotalAssets = document.getElementById("bsTotalAssets");
+const bsTotalLiabilities = document.getElementById("bsTotalLiabilities");
 const globalProcessing = document.getElementById("globalProcessing");
 const globalProcessingText = document.getElementById("globalProcessingText");
 const companyDisplayName = document.getElementById("companyDisplayName");
@@ -504,6 +550,13 @@ const pnlInputIds = [
   "pnlLine19",
 ];
 const pnlManualOverrides = new Set();
+const balanceInputIds = [
+  "bsAssetNonCurrent",
+  "bsAssetCurrent",
+  "bsEquity",
+  "bsLiabNonCurrent",
+  "bsLiabCurrent",
+];
 
 function isAllowedFile(fileName) {
   const lower = fileName.toLowerCase();
@@ -1446,6 +1499,20 @@ function updateHeaderContext() {
     headerCompanyLabel.textContent = company
       ? `Empresa: ${company.display_name}`
       : "Empresa: -";
+    if (company) {
+      if (pnlName && !pnlName.value) {
+        pnlName.value = company.legal_name || company.display_name || "";
+      }
+      if (pnlTaxId && !pnlTaxId.value) {
+        pnlTaxId.value = company.tax_id || "";
+      }
+      if (balanceName && !balanceName.value) {
+        balanceName.value = company.legal_name || company.display_name || "";
+      }
+      if (balanceTaxId && !balanceTaxId.value) {
+        balanceTaxId.value = company.tax_id || "";
+      }
+    }
   }
 }
 
@@ -5782,6 +5849,172 @@ function exportPnlPdf() {
   doc.save(filename);
 }
 
+function getPnlRowsForEmail() {
+  return [
+    { label: "1. Importe neto de la cifra de negocios", value: getPnlInputValue("pnlLine1") },
+    { label: "2. Variación de existencias de productos terminados y en curso", value: getPnlInputValue("pnlLine2") },
+    { label: "3. Trabajos realizados por la empresa para su activo", value: getPnlInputValue("pnlLine3") },
+    { label: "4. Aprovisionamientos", value: getPnlInputValue("pnlLine4") },
+    { label: "5. Otros ingresos de explotación", value: getPnlInputValue("pnlLine5") },
+    { label: "6. Gastos de personal", value: getPnlInputValue("pnlLine6") },
+    { label: "7. Otros gastos de explotación", value: getPnlInputValue("pnlLine7") },
+    { label: "8. Amortización del inmovilizado", value: getPnlInputValue("pnlLine8") },
+    { label: "9. Imputación de subvenciones de inmovilizado no financiero y otras", value: getPnlInputValue("pnlLine9") },
+    { label: "10. Excesos de provisiones", value: getPnlInputValue("pnlLine10") },
+    { label: "11. Deterioro y resultado por enajenación del inmovilizado", value: getPnlInputValue("pnlLine11") },
+    { label: "12. Otros resultados", value: getPnlInputValue("pnlLine12") },
+    { label: "A) RESULTADO DE EXPLOTACIÓN", value: document.getElementById("pnlOperatingResult")?.textContent || "" },
+    { label: "13.a Imputación de subvenciones, donaciones y legados de carácter financiero", value: getPnlInputValue("pnlLine13a") },
+    { label: "13.b Otros ingresos financieros", value: getPnlInputValue("pnlLine13b") },
+    { label: "14. Gastos financieros", value: getPnlInputValue("pnlLine14") },
+    { label: "15. Variación de valor razonable en instrumentos financieros", value: getPnlInputValue("pnlLine15") },
+    { label: "16. Diferencias de cambio", value: getPnlInputValue("pnlLine16") },
+    { label: "17. Deterioro y resultado por enajenación de instrumentos financieros", value: getPnlInputValue("pnlLine17") },
+    { label: "18.a Incorporación al activo de gastos financieros", value: getPnlInputValue("pnlLine18a") },
+    { label: "18.b Ingresos financieros derivados de convenios de acreedores", value: getPnlInputValue("pnlLine18b") },
+    { label: "18.c Resto de ingresos y gastos", value: getPnlInputValue("pnlLine18c") },
+    { label: "B) RESULTADO FINANCIERO", value: document.getElementById("pnlFinancialResult")?.textContent || "" },
+    { label: "C) RESULTADO ANTES DE IMPUESTOS", value: document.getElementById("pnlPreTax")?.textContent || "" },
+    { label: "19. Impuestos sobre beneficios", value: getPnlInputValue("pnlLine19") },
+    { label: "D) RESULTADO DEL EJERCICIO", value: document.getElementById("pnlNet")?.textContent || "" },
+  ];
+}
+
+function exportBalancePdf() {
+  if (!window.jspdf || !balanceName || !balanceTaxId) {
+    return;
+  }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: "pt", format: "a4" });
+
+  const nameValue = balanceName.value.trim();
+  const taxIdValue = balanceTaxId.value.trim();
+  const periodLabel = headerPeriodLabel ? headerPeriodLabel.textContent.trim() : "";
+  const generated = new Date().toLocaleDateString("es-ES");
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(18);
+  doc.text("Balance de situación (estimado)", 40, 50);
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(11);
+  doc.text(`Nombre: ${nameValue || "-"}`, 40, 80);
+  doc.text(`CIF/NIF: ${taxIdValue || "-"}`, 40, 98);
+  doc.text(`Periodo: ${periodLabel || "-"}`, 40, 116);
+  doc.text(`Fecha de generación: ${generated}`, 40, 134);
+
+  const assetRows = [
+    ["Activo no corriente", formatCurrency(getBalanceInputValue("bsAssetNonCurrent"))],
+    ["Activo corriente", formatCurrency(getBalanceInputValue("bsAssetCurrent"))],
+    ["Total activo", bsTotalAssets ? bsTotalAssets.textContent : formatCurrency(0)],
+  ];
+  const liabilityRows = [
+    ["Patrimonio neto", formatCurrency(getBalanceInputValue("bsEquity"))],
+    ["Pasivo no corriente", formatCurrency(getBalanceInputValue("bsLiabNonCurrent"))],
+    ["Pasivo corriente", formatCurrency(getBalanceInputValue("bsLiabCurrent"))],
+    ["Total patrimonio neto y pasivo", bsTotalLiabilities ? bsTotalLiabilities.textContent : formatCurrency(0)],
+  ];
+
+  const startY = 170;
+  doc.setFont("helvetica", "bold");
+  doc.text("Activo", 40, startY);
+  doc.text("Patrimonio neto y pasivo", 320, startY);
+
+  doc.setFont("helvetica", "normal");
+  let yLeft = startY + 18;
+  assetRows.forEach((row) => {
+    doc.text(String(row[0]), 40, yLeft);
+    doc.text(String(row[1]), 220, yLeft, { align: "right" });
+    yLeft += 18;
+  });
+
+  let yRight = startY + 18;
+  liabilityRows.forEach((row) => {
+    doc.text(String(row[0]), 320, yRight);
+    doc.text(String(row[1]), 520, yRight, { align: "right" });
+    yRight += 18;
+  });
+
+  doc.setFontSize(9);
+  doc.text(
+    "Balance de situación estimado. Importes editables y no sustitutivos del asesoramiento fiscal profesional.",
+    40,
+    760,
+    { maxWidth: 520 }
+  );
+
+  const filename = `balance_${periodLabel || "periodo"}.pdf`.replace(/\s+/g, "_");
+  doc.save(filename);
+}
+
+function sendPnlEmail() {
+  const periodLabel = headerPeriodLabel ? headerPeriodLabel.textContent.trim() : "";
+  const payload = {
+    name: pnlName ? pnlName.value.trim() : "",
+    tax_id: pnlTaxId ? pnlTaxId.value.trim() : "",
+    period_label: periodLabel,
+    lines: getPnlRowsForEmail(),
+    totals: {
+      operating: document.getElementById("pnlOperatingResult")?.textContent || "",
+      financial: document.getElementById("pnlFinancialResult")?.textContent || "",
+      pretax: document.getElementById("pnlPreTax")?.textContent || "",
+      net: document.getElementById("pnlNet")?.textContent || "",
+    },
+  };
+
+  fetch(withCompanyParam("/api/pnl/email"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        alert((data.errors || ["No se pudo enviar el P&G."]).join("\n"));
+        return;
+      }
+      alert("P&G enviado correctamente.");
+    })
+    .catch(() => {
+      alert("No se pudo enviar el P&G.");
+    });
+}
+
+function sendBalanceEmail() {
+  const periodLabel = headerPeriodLabel ? headerPeriodLabel.textContent.trim() : "";
+  const payload = {
+    name: balanceName ? balanceName.value.trim() : "",
+    tax_id: balanceTaxId ? balanceTaxId.value.trim() : "",
+    period_label: periodLabel,
+    lines: {
+      asset_non_current: getBalanceInputValue("bsAssetNonCurrent"),
+      asset_current: getBalanceInputValue("bsAssetCurrent"),
+      equity: getBalanceInputValue("bsEquity"),
+      liab_non_current: getBalanceInputValue("bsLiabNonCurrent"),
+      liab_current: getBalanceInputValue("bsLiabCurrent"),
+      total_assets: bsTotalAssets ? bsTotalAssets.textContent : "",
+      total_liabilities: bsTotalLiabilities ? bsTotalLiabilities.textContent : "",
+    },
+  };
+
+  fetch(withCompanyParam("/api/balance/email"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        alert((data.errors || ["No se pudo enviar el balance."]).join("\n"));
+        return;
+      }
+      alert("Balance enviado correctamente.");
+    })
+    .catch(() => {
+      alert("No se pudo enviar el balance.");
+    });
+}
+
 function populateReportMonthSelect(select) {
   if (!select) {
     return;
@@ -6286,6 +6519,15 @@ function bindEvents() {
   if (exportPnlBtn) {
     exportPnlBtn.addEventListener("click", exportPnlPdf);
   }
+  if (pnlEmailBtn) {
+    pnlEmailBtn.addEventListener("click", sendPnlEmail);
+  }
+  if (balancePdfBtn) {
+    balancePdfBtn.addEventListener("click", exportBalancePdf);
+  }
+  if (balanceEmailBtn) {
+    balanceEmailBtn.addEventListener("click", sendBalanceEmail);
+  }
   if (reportQuarterSelect) {
     reportQuarterSelect.addEventListener("change", () => {
       toggleReportCustomRange();
@@ -6305,6 +6547,8 @@ function init() {
   populateMonthSelects();
   populateReportMonthSelect(reportStartMonthSelect);
   populateReportMonthSelect(reportEndMonthSelect);
+
+  bindBalanceInputs();
   toggleReportCustomRange();
   bindEvents();
   initNavigation();

@@ -33,6 +33,7 @@
         <button class="nav-link" data-section="reports" type="button">Informes</button>
         <button class="nav-link" data-section="taxes" type="button">Modelos de impuestos</button>
         <button class="nav-link" data-section="pnl" type="button">Pérdidas y Ganancias</button>
+        <button class="nav-link" data-section="balance" type="button">Balance de situación</button>
         {% if user and user.role == "owner" %}
         <a class="nav-link" href="{{ url_for('admin_dashboard') }}">Panel de gestorías</a>
         {% endif %}
@@ -827,7 +828,10 @@
               <h2>Cuenta de pérdidas y ganancias (estimada)</h2>
               <p>Cuenta de resultados estimada para el periodo seleccionado.</p>
             </div>
-            <button id="exportPnlBtn" class="button primary">Exportar PDF</button>
+            <div class="panel-actions">
+              <button id="pnlEmailBtn" class="button ghost">Enviar por email</button>
+              <button id="exportPnlBtn" class="button primary">Exportar PDF</button>
+            </div>
           </div>
 
           <div class="pnl-form">
@@ -967,6 +971,91 @@
           </div>
           <p class="pnl-note">
             Estructura basada en el Plan General Contable PYMES. Importes estimados automáticamente y no sustitutivos del asesoramiento fiscal profesional.
+          </p>
+        </section>
+      </section>
+
+      <section class="page-section" data-section="balance">
+        <section class="panel balance-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Balance de situación (estimado)</h2>
+              <p>Completa o revisa las partidas principales según el PGC/PGC PYMES.</p>
+            </div>
+            <div class="panel-actions">
+              <button id="balanceEmailBtn" class="button ghost">Enviar por email</button>
+              <button id="balancePdfBtn" class="button primary">Exportar PDF</button>
+            </div>
+          </div>
+          <div class="balance-form">
+            <div class="field">
+              <label for="balanceName">Nombre / Razón social</label>
+              <input type="text" id="balanceName" placeholder="Ej. Consultoría Norte SL" />
+            </div>
+            <div class="field">
+              <label for="balanceTaxId">CIF / NIF</label>
+              <input type="text" id="balanceTaxId" placeholder="Ej. B12345678" />
+            </div>
+          </div>
+          <div class="balance-grid">
+            <div class="balance-column">
+              <h3>Activo</h3>
+              <table class="balance-table">
+                <thead>
+                  <tr>
+                    <th>Concepto</th>
+                    <th>Importe (€)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Activo no corriente</td>
+                    <td><input class="balance-input" id="bsAssetNonCurrent" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr>
+                    <td>Activo corriente</td>
+                    <td><input class="balance-input" id="bsAssetCurrent" type="number" step="0.01" /></td>
+                  </tr>
+                </tbody>
+              </table>
+              <div class="balance-total">
+                <span>Total activo</span>
+                <strong id="bsTotalAssets">0,00 €</strong>
+              </div>
+            </div>
+            <div class="balance-column">
+              <h3>Patrimonio neto y pasivo</h3>
+              <table class="balance-table">
+                <thead>
+                  <tr>
+                    <th>Concepto</th>
+                    <th>Importe (€)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Patrimonio neto</td>
+                    <td><input class="balance-input" id="bsEquity" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr>
+                    <td>Pasivo no corriente</td>
+                    <td><input class="balance-input" id="bsLiabNonCurrent" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr>
+                    <td>Pasivo corriente</td>
+                    <td><input class="balance-input" id="bsLiabCurrent" type="number" step="0.01" /></td>
+                  </tr>
+                </tbody>
+              </table>
+              <div class="balance-total">
+                <span>Total patrimonio neto y pasivo</span>
+                <strong id="bsTotalLiabilities">0,00 €</strong>
+              </div>
+            </div>
+          </div>
+          <p class="pnl-note">
+            Balance de situación estimado basado en estructura PGC. Importes editables y no sustitutivos del
+            asesoramiento fiscal profesional.
           </p>
         </section>
       </section>

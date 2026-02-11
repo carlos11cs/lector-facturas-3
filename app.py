@@ -2999,6 +2999,160 @@ def quarterly_report_email():
     return jsonify({"ok": True})
 
 
+@app.route("/api/pnl/email", methods=["POST"])
+def pnl_email():
+    data_owner_id = get_data_owner_id()
+    user_role = (g.current_user or {}).get("role")
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    payload = request.get_json(silent=True) or {}
+    name = (payload.get("name") or "").strip()
+    tax_id = (payload.get("tax_id") or "").strip()
+    period_label = (payload.get("period_label") or "").strip()
+    lines = payload.get("lines") or []
+    totals = payload.get("totals") or {}
+
+    with engine.connect() as conn:
+        company_query = select(
+            companies_table.c.display_name,
+            companies_table.c.legal_name,
+            companies_table.c.tax_id,
+            companies_table.c.email,
+        ).where(companies_table.c.id == company_id)
+        if user_role != "owner":
+            company_query = company_query.where(companies_table.c.agency_id == data_owner_id)
+        company = conn.execute(company_query).mappings().first()
+        user = conn.execute(
+            select(users_table.c.email).where(users_table.c.id == get_current_user_id())
+        ).mappings().first()
+    if not company:
+        return jsonify({"ok": False, "errors": ["Empresa no encontrada."]}), 404
+    if not company.get("email"):
+        return jsonify({"ok": False, "errors": ["La empresa no tiene email."]}), 400
+
+    company_name = name or company.get("display_name") or company.get("legal_name") or ""
+    company_tax = tax_id or company.get("tax_id") or ""
+
+    rows_html = ""
+    for item in lines:
+        if not isinstance(item, dict):
+            continue
+        label = item.get("label") or item.get("id") or ""
+        value = item.get("value")
+        try:
+            value = float(value)
+            value_str = f"{value:.2f} €"
+        except (TypeError, ValueError):
+            value_str = str(value or "")
+        rows_html += f"<tr><td>{label}</td><td style='text-align:right'>{value_str}</td></tr>"
+
+    html = f"""
+    <h2>Cuenta de pérdidas y ganancias (estimada)</h2>
+    <p><strong>Empresa:</strong> {company_name}</p>
+    <p><strong>CIF/NIF:</strong> {company_tax}</p>
+    <p><strong>Periodo:</strong> {period_label or '-'}</p>
+    <table style="border-collapse:collapse;width:100%;margin-top:12px">
+      <thead>
+        <tr>
+          <th style="border:1px solid #e5e7eb;padding:8px;text-align:left">Concepto</th>
+          <th style="border:1px solid #e5e7eb;padding:8px;text-align:right">Importe (€)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows_html}
+      </tbody>
+    </table>
+    <p><strong>Resultado de explotación:</strong> {totals.get("operating", "")}</p>
+    <p><strong>Resultado financiero:</strong> {totals.get("financial", "")}</p>
+    <p><strong>Resultado antes de impuestos:</strong> {totals.get("pretax", "")}</p>
+    <p><strong>Resultado del ejercicio:</strong> {totals.get("net", "")}</p>
+    """
+    reply_to = user["email"] if user else None
+    sent = send_email(
+        company["email"],
+        f"P&G {period_label}".strip(),
+        html,
+        reply_to=reply_to,
+    )
+    if not sent:
+        return jsonify({"ok": False, "errors": ["No se pudo enviar el P&G."]}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/api/balance/email", methods=["POST"])
+def balance_email():
+    data_owner_id = get_data_owner_id()
+    user_role = (g.current_user or {}).get("role")
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    payload = request.get_json(silent=True) or {}
+    name = (payload.get("name") or "").strip()
+    tax_id = (payload.get("tax_id") or "").strip()
+    period_label = (payload.get("period_label") or "").strip()
+    lines = payload.get("lines") or {}
+
+    with engine.connect() as conn:
+        company_query = select(
+            companies_table.c.display_name,
+            companies_table.c.legal_name,
+            companies_table.c.tax_id,
+            companies_table.c.email,
+        ).where(companies_table.c.id == company_id)
+        if user_role != "owner":
+            company_query = company_query.where(companies_table.c.agency_id == data_owner_id)
+        company = conn.execute(company_query).mappings().first()
+        user = conn.execute(
+            select(users_table.c.email).where(users_table.c.id == get_current_user_id())
+        ).mappings().first()
+    if not company:
+        return jsonify({"ok": False, "errors": ["Empresa no encontrada."]}), 404
+    if not company.get("email"):
+        return jsonify({"ok": False, "errors": ["La empresa no tiene email."]}), 400
+
+    company_name = name or company.get("display_name") or company.get("legal_name") or ""
+    company_tax = tax_id or company.get("tax_id") or ""
+
+    html = f"""
+    <h2>Balance de situación (estimado)</h2>
+    <p><strong>Empresa:</strong> {company_name}</p>
+    <p><strong>CIF/NIF:</strong> {company_tax}</p>
+    <p><strong>Periodo:</strong> {period_label or '-'}</p>
+    <table style="border-collapse:collapse;width:100%;margin-top:12px">
+      <tr>
+        <th style="border:1px solid #e5e7eb;padding:8px;text-align:left">Activo</th>
+        <th style="border:1px solid #e5e7eb;padding:8px;text-align:right">Importe (€)</th>
+      </tr>
+      <tr><td style="border:1px solid #e5e7eb;padding:8px">Activo no corriente</td><td style="border:1px solid #e5e7eb;padding:8px;text-align:right">{lines.get("asset_non_current","")}</td></tr>
+      <tr><td style="border:1px solid #e5e7eb;padding:8px">Activo corriente</td><td style="border:1px solid #e5e7eb;padding:8px;text-align:right">{lines.get("asset_current","")}</td></tr>
+      <tr><td style="border:1px solid #e5e7eb;padding:8px"><strong>Total activo</strong></td><td style="border:1px solid #e5e7eb;padding:8px;text-align:right"><strong>{lines.get("total_assets","")}</strong></td></tr>
+    </table>
+    <table style="border-collapse:collapse;width:100%;margin-top:12px">
+      <tr>
+        <th style="border:1px solid #e5e7eb;padding:8px;text-align:left">Patrimonio neto y pasivo</th>
+        <th style="border:1px solid #e5e7eb;padding:8px;text-align:right">Importe (€)</th>
+      </tr>
+      <tr><td style="border:1px solid #e5e7eb;padding:8px">Patrimonio neto</td><td style="border:1px solid #e5e7eb;padding:8px;text-align:right">{lines.get("equity","")}</td></tr>
+      <tr><td style="border:1px solid #e5e7eb;padding:8px">Pasivo no corriente</td><td style="border:1px solid #e5e7eb;padding:8px;text-align:right">{lines.get("liab_non_current","")}</td></tr>
+      <tr><td style="border:1px solid #e5e7eb;padding:8px">Pasivo corriente</td><td style="border:1px solid #e5e7eb;padding:8px;text-align:right">{lines.get("liab_current","")}</td></tr>
+      <tr><td style="border:1px solid #e5e7eb;padding:8px"><strong>Total patrimonio neto y pasivo</strong></td><td style="border:1px solid #e5e7eb;padding:8px;text-align:right"><strong>{lines.get("total_liabilities","")}</strong></td></tr>
+    </table>
+    """
+    reply_to = user["email"] if user else None
+    sent = send_email(
+        company["email"],
+        f"Balance de situación {period_label}".strip(),
+        html,
+        reply_to=reply_to,
+    )
+    if not sent:
+        return jsonify({"ok": False, "errors": ["No se pudo enviar el balance."]}), 500
+    return jsonify({"ok": True})
+
+
 @app.route("/api/invoices/<int:invoice_id>", methods=["PUT"])
 def update_invoice(invoice_id):
     data_owner_id = get_data_owner_id()
