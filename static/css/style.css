@@ -984,6 +984,16 @@ h1 {
   border-bottom: 1px solid #e5e7eb;
 }
 
+.balance-indent {
+  padding-left: 18px;
+  color: var(--muted);
+}
+
+.balance-subtotal td {
+  font-weight: 600;
+  background: #f9fbf7;
+}
+
 .balance-table th {
   text-align: left;
   color: var(--muted);

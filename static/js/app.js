@@ -138,12 +138,48 @@ function updateBalanceTotals() {
   if (!bsTotalAssets || !bsTotalLiabilities) {
     return;
   }
-  const totalAssets =
-    getBalanceInputValue("bsAssetNonCurrent") + getBalanceInputValue("bsAssetCurrent");
-  const totalLiabilities =
-    getBalanceInputValue("bsEquity") +
-    getBalanceInputValue("bsLiabNonCurrent") +
-    getBalanceInputValue("bsLiabCurrent");
+  const assetNonCurrent =
+    getBalanceInputValue("bsAssetIntangible") +
+    getBalanceInputValue("bsAssetTangible") +
+    getBalanceInputValue("bsAssetInvestmentProperty") +
+    getBalanceInputValue("bsAssetLongTermInv") +
+    getBalanceInputValue("bsAssetDeferredTax");
+  const assetCurrent =
+    getBalanceInputValue("bsAssetInventory") +
+    getBalanceInputValue("bsAssetReceivables") +
+    getBalanceInputValue("bsAssetShortTermInv") +
+    getBalanceInputValue("bsAssetCash") +
+    getBalanceInputValue("bsAssetCurrentTax");
+  const equityTotal =
+    getBalanceInputValue("bsEquityCapital") +
+    getBalanceInputValue("bsEquityReserves") +
+    getBalanceInputValue("bsEquityResult") +
+    getBalanceInputValue("bsEquityGrants");
+  const liabNonCurrent =
+    getBalanceInputValue("bsLiabLongTermDebt") +
+    getBalanceInputValue("bsLiabLongTermOther");
+  const liabCurrent =
+    getBalanceInputValue("bsLiabShortTermDebt") +
+    getBalanceInputValue("bsLiabPayables") +
+    getBalanceInputValue("bsLiabOtherCurrent");
+  const totalAssets = assetNonCurrent + assetCurrent;
+  const totalLiabilities = equityTotal + liabNonCurrent + liabCurrent;
+
+  if (bsAssetNonCurrentTotal) {
+    bsAssetNonCurrentTotal.textContent = formatCurrency(assetNonCurrent);
+  }
+  if (bsAssetCurrentTotal) {
+    bsAssetCurrentTotal.textContent = formatCurrency(assetCurrent);
+  }
+  if (bsEquityTotal) {
+    bsEquityTotal.textContent = formatCurrency(equityTotal);
+  }
+  if (bsLiabNonCurrentTotal) {
+    bsLiabNonCurrentTotal.textContent = formatCurrency(liabNonCurrent);
+  }
+  if (bsLiabCurrentTotal) {
+    bsLiabCurrentTotal.textContent = formatCurrency(liabCurrent);
+  }
   bsTotalAssets.textContent = formatCurrency(totalAssets);
   bsTotalLiabilities.textContent = formatCurrency(totalLiabilities);
 }
@@ -474,11 +510,30 @@ const balancePdfBtn = document.getElementById("balancePdfBtn");
 const balanceEmailBtn = document.getElementById("balanceEmailBtn");
 const balanceName = document.getElementById("balanceName");
 const balanceTaxId = document.getElementById("balanceTaxId");
-const bsAssetNonCurrent = document.getElementById("bsAssetNonCurrent");
-const bsAssetCurrent = document.getElementById("bsAssetCurrent");
-const bsEquity = document.getElementById("bsEquity");
-const bsLiabNonCurrent = document.getElementById("bsLiabNonCurrent");
-const bsLiabCurrent = document.getElementById("bsLiabCurrent");
+const bsAssetIntangible = document.getElementById("bsAssetIntangible");
+const bsAssetTangible = document.getElementById("bsAssetTangible");
+const bsAssetInvestmentProperty = document.getElementById("bsAssetInvestmentProperty");
+const bsAssetLongTermInv = document.getElementById("bsAssetLongTermInv");
+const bsAssetDeferredTax = document.getElementById("bsAssetDeferredTax");
+const bsAssetInventory = document.getElementById("bsAssetInventory");
+const bsAssetReceivables = document.getElementById("bsAssetReceivables");
+const bsAssetShortTermInv = document.getElementById("bsAssetShortTermInv");
+const bsAssetCash = document.getElementById("bsAssetCash");
+const bsAssetCurrentTax = document.getElementById("bsAssetCurrentTax");
+const bsEquityCapital = document.getElementById("bsEquityCapital");
+const bsEquityReserves = document.getElementById("bsEquityReserves");
+const bsEquityResult = document.getElementById("bsEquityResult");
+const bsEquityGrants = document.getElementById("bsEquityGrants");
+const bsLiabLongTermDebt = document.getElementById("bsLiabLongTermDebt");
+const bsLiabLongTermOther = document.getElementById("bsLiabLongTermOther");
+const bsLiabShortTermDebt = document.getElementById("bsLiabShortTermDebt");
+const bsLiabPayables = document.getElementById("bsLiabPayables");
+const bsLiabOtherCurrent = document.getElementById("bsLiabOtherCurrent");
+const bsAssetNonCurrentTotal = document.getElementById("bsAssetNonCurrentTotal");
+const bsAssetCurrentTotal = document.getElementById("bsAssetCurrentTotal");
+const bsEquityTotal = document.getElementById("bsEquityTotal");
+const bsLiabNonCurrentTotal = document.getElementById("bsLiabNonCurrentTotal");
+const bsLiabCurrentTotal = document.getElementById("bsLiabCurrentTotal");
 const bsTotalAssets = document.getElementById("bsTotalAssets");
 const bsTotalLiabilities = document.getElementById("bsTotalLiabilities");
 const globalProcessing = document.getElementById("globalProcessing");
@@ -551,11 +606,25 @@ const pnlInputIds = [
 ];
 const pnlManualOverrides = new Set();
 const balanceInputIds = [
-  "bsAssetNonCurrent",
-  "bsAssetCurrent",
-  "bsEquity",
-  "bsLiabNonCurrent",
-  "bsLiabCurrent",
+  "bsAssetIntangible",
+  "bsAssetTangible",
+  "bsAssetInvestmentProperty",
+  "bsAssetLongTermInv",
+  "bsAssetDeferredTax",
+  "bsAssetInventory",
+  "bsAssetReceivables",
+  "bsAssetShortTermInv",
+  "bsAssetCash",
+  "bsAssetCurrentTax",
+  "bsEquityCapital",
+  "bsEquityReserves",
+  "bsEquityResult",
+  "bsEquityGrants",
+  "bsLiabLongTermDebt",
+  "bsLiabLongTermOther",
+  "bsLiabShortTermDebt",
+  "bsLiabPayables",
+  "bsLiabOtherCurrent",
 ];
 
 function isAllowedFile(fileName) {
@@ -5892,55 +5961,117 @@ function exportBalancePdf() {
   const periodLabel = headerPeriodLabel ? headerPeriodLabel.textContent.trim() : "";
   const generated = new Date().toLocaleDateString("es-ES");
 
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(18);
-  doc.text("Balance de situación (estimado)", 40, 50);
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const margin = 48;
+  const contentWidth = pageWidth - margin * 2;
+  let y = margin;
 
+  const brandColor = [34, 124, 101];
+  const mutedColor = [93, 106, 99];
+
+  doc.setFillColor(242, 245, 242);
+  doc.rect(0, 0, pageWidth, 84, "F");
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(16);
+  doc.setTextColor(...brandColor);
+  doc.text("Ledged", margin, 40);
+  doc.setFontSize(18);
+  doc.setTextColor(28, 32, 36);
+  doc.text("Balance de situación (estimado)", margin, 64);
+
+  y = 104;
   doc.setFont("helvetica", "normal");
   doc.setFontSize(11);
-  doc.text(`Nombre: ${nameValue || "-"}`, 40, 80);
-  doc.text(`CIF/NIF: ${taxIdValue || "-"}`, 40, 98);
-  doc.text(`Periodo: ${periodLabel || "-"}`, 40, 116);
-  doc.text(`Fecha de generación: ${generated}`, 40, 134);
+  doc.setTextColor(40, 44, 48);
+  const meta = [];
+  if (nameValue) meta.push(`Nombre: ${nameValue}`);
+  if (taxIdValue) meta.push(`CIF/NIF: ${taxIdValue}`);
+  if (periodLabel) meta.push(`Periodo: ${periodLabel}`);
+  meta.push(`Fecha de generación: ${generated}`);
+
+  meta.forEach((line) => {
+    doc.text(line, margin, y);
+    y += 16;
+  });
+
+  y += 8;
+  doc.setDrawColor(221, 229, 223);
+  doc.line(margin, y, pageWidth - margin, y);
+  y += 18;
 
   const assetRows = [
-    ["Activo no corriente", formatCurrency(getBalanceInputValue("bsAssetNonCurrent"))],
-    ["Activo corriente", formatCurrency(getBalanceInputValue("bsAssetCurrent"))],
-    ["Total activo", bsTotalAssets ? bsTotalAssets.textContent : formatCurrency(0)],
+    ["A) ACTIVO NO CORRIENTE", ""],
+    ["I. Inmovilizado intangible", formatCurrency(getBalanceInputValue("bsAssetIntangible"))],
+    ["II. Inmovilizado material", formatCurrency(getBalanceInputValue("bsAssetTangible"))],
+    ["III. Inversiones inmobiliarias", formatCurrency(getBalanceInputValue("bsAssetInvestmentProperty"))],
+    ["IV. Inversiones financieras a largo plazo", formatCurrency(getBalanceInputValue("bsAssetLongTermInv"))],
+    ["V. Activos por impuesto diferido", formatCurrency(getBalanceInputValue("bsAssetDeferredTax"))],
+    ["Subtotal activo no corriente", bsAssetNonCurrentTotal ? bsAssetNonCurrentTotal.textContent : formatCurrency(0)],
+    ["B) ACTIVO CORRIENTE", ""],
+    ["I. Existencias", formatCurrency(getBalanceInputValue("bsAssetInventory"))],
+    ["II. Deudores comerciales y otras cuentas a cobrar", formatCurrency(getBalanceInputValue("bsAssetReceivables"))],
+    ["III. Inversiones financieras a corto plazo", formatCurrency(getBalanceInputValue("bsAssetShortTermInv"))],
+    ["IV. Efectivo y otros activos líquidos equivalentes", formatCurrency(getBalanceInputValue("bsAssetCash"))],
+    ["V. Activos por impuesto corriente", formatCurrency(getBalanceInputValue("bsAssetCurrentTax"))],
+    ["Subtotal activo corriente", bsAssetCurrentTotal ? bsAssetCurrentTotal.textContent : formatCurrency(0)],
+    ["TOTAL ACTIVO", bsTotalAssets ? bsTotalAssets.textContent : formatCurrency(0)],
   ];
   const liabilityRows = [
-    ["Patrimonio neto", formatCurrency(getBalanceInputValue("bsEquity"))],
-    ["Pasivo no corriente", formatCurrency(getBalanceInputValue("bsLiabNonCurrent"))],
-    ["Pasivo corriente", formatCurrency(getBalanceInputValue("bsLiabCurrent"))],
-    ["Total patrimonio neto y pasivo", bsTotalLiabilities ? bsTotalLiabilities.textContent : formatCurrency(0)],
+    ["A) PATRIMONIO NETO", ""],
+    ["I. Capital", formatCurrency(getBalanceInputValue("bsEquityCapital"))],
+    ["II. Reservas", formatCurrency(getBalanceInputValue("bsEquityReserves"))],
+    ["III. Resultado del ejercicio", formatCurrency(getBalanceInputValue("bsEquityResult"))],
+    ["IV. Subvenciones, donaciones y legados", formatCurrency(getBalanceInputValue("bsEquityGrants"))],
+    ["Subtotal patrimonio neto", bsEquityTotal ? bsEquityTotal.textContent : formatCurrency(0)],
+    ["B) PASIVO NO CORRIENTE", ""],
+    ["I. Deudas a largo plazo", formatCurrency(getBalanceInputValue("bsLiabLongTermDebt"))],
+    ["II. Otras obligaciones a largo plazo", formatCurrency(getBalanceInputValue("bsLiabLongTermOther"))],
+    ["Subtotal pasivo no corriente", bsLiabNonCurrentTotal ? bsLiabNonCurrentTotal.textContent : formatCurrency(0)],
+    ["C) PASIVO CORRIENTE", ""],
+    ["I. Deudas a corto plazo", formatCurrency(getBalanceInputValue("bsLiabShortTermDebt"))],
+    ["II. Proveedores y otras cuentas a pagar", formatCurrency(getBalanceInputValue("bsLiabPayables"))],
+    ["III. Otras obligaciones corrientes", formatCurrency(getBalanceInputValue("bsLiabOtherCurrent"))],
+    ["Subtotal pasivo corriente", bsLiabCurrentTotal ? bsLiabCurrentTotal.textContent : formatCurrency(0)],
+    ["TOTAL PATRIMONIO NETO Y PASIVO", bsTotalLiabilities ? bsTotalLiabilities.textContent : formatCurrency(0)],
   ];
 
-  const startY = 170;
   doc.setFont("helvetica", "bold");
-  doc.text("Activo", 40, startY);
-  doc.text("Patrimonio neto y pasivo", 320, startY);
+  doc.setTextColor(...mutedColor);
+  doc.text("Activo", margin, y);
+  doc.text("Patrimonio neto y pasivo", margin + contentWidth / 2 + 10, y);
+  y += 18;
 
   doc.setFont("helvetica", "normal");
-  let yLeft = startY + 18;
+  doc.setTextColor(36, 40, 44);
+  let yLeft = y;
   assetRows.forEach((row) => {
+    const isHeader = row[1] === "" || row[0].startsWith("TOTAL");
+    doc.setFont("helvetica", isHeader ? "bold" : "normal");
     doc.text(String(row[0]), 40, yLeft);
-    doc.text(String(row[1]), 220, yLeft, { align: "right" });
+    if (row[1]) {
+      doc.text(String(row[1]), 220, yLeft, { align: "right" });
+    }
     yLeft += 18;
   });
 
-  let yRight = startY + 18;
+  let yRight = y;
   liabilityRows.forEach((row) => {
-    doc.text(String(row[0]), 320, yRight);
-    doc.text(String(row[1]), 520, yRight, { align: "right" });
+    const isHeader = row[1] === "" || row[0].startsWith("TOTAL");
+    doc.setFont("helvetica", isHeader ? "bold" : "normal");
+    doc.text(String(row[0]), margin + contentWidth / 2 + 10, yRight);
+    if (row[1]) {
+      doc.text(String(row[1]), pageWidth - margin, yRight, { align: "right" });
+    }
     yRight += 18;
   });
 
   doc.setFontSize(9);
+  doc.setTextColor(...mutedColor);
   doc.text(
     "Balance de situación estimado. Importes editables y no sustitutivos del asesoramiento fiscal profesional.",
-    40,
+    margin,
     760,
-    { maxWidth: 520 }
+    { maxWidth: contentWidth }
   );
 
   const filename = `balance_${periodLabel || "periodo"}.pdf`.replace(/\s+/g, "_");
@@ -5986,15 +6117,7 @@ function sendBalanceEmail() {
     name: balanceName ? balanceName.value.trim() : "",
     tax_id: balanceTaxId ? balanceTaxId.value.trim() : "",
     period_label: periodLabel,
-    lines: {
-      asset_non_current: getBalanceInputValue("bsAssetNonCurrent"),
-      asset_current: getBalanceInputValue("bsAssetCurrent"),
-      equity: getBalanceInputValue("bsEquity"),
-      liab_non_current: getBalanceInputValue("bsLiabNonCurrent"),
-      liab_current: getBalanceInputValue("bsLiabCurrent"),
-      total_assets: bsTotalAssets ? bsTotalAssets.textContent : "",
-      total_liabilities: bsTotalLiabilities ? bsTotalLiabilities.textContent : "",
-    },
+    lines: getBalanceRowsForEmail(),
   };
 
   fetch(withCompanyParam("/api/balance/email"), {
@@ -6013,6 +6136,42 @@ function sendBalanceEmail() {
     .catch(() => {
       alert("No se pudo enviar el balance.");
     });
+}
+
+function getBalanceRowsForEmail() {
+  return [
+    { label: "A) ACTIVO NO CORRIENTE", value: "" },
+    { label: "I. Inmovilizado intangible", value: getBalanceInputValue("bsAssetIntangible") },
+    { label: "II. Inmovilizado material", value: getBalanceInputValue("bsAssetTangible") },
+    { label: "III. Inversiones inmobiliarias", value: getBalanceInputValue("bsAssetInvestmentProperty") },
+    { label: "IV. Inversiones financieras a largo plazo", value: getBalanceInputValue("bsAssetLongTermInv") },
+    { label: "V. Activos por impuesto diferido", value: getBalanceInputValue("bsAssetDeferredTax") },
+    { label: "Subtotal activo no corriente", value: bsAssetNonCurrentTotal ? bsAssetNonCurrentTotal.textContent : "" },
+    { label: "B) ACTIVO CORRIENTE", value: "" },
+    { label: "I. Existencias", value: getBalanceInputValue("bsAssetInventory") },
+    { label: "II. Deudores comerciales y otras cuentas a cobrar", value: getBalanceInputValue("bsAssetReceivables") },
+    { label: "III. Inversiones financieras a corto plazo", value: getBalanceInputValue("bsAssetShortTermInv") },
+    { label: "IV. Efectivo y otros activos líquidos equivalentes", value: getBalanceInputValue("bsAssetCash") },
+    { label: "V. Activos por impuesto corriente", value: getBalanceInputValue("bsAssetCurrentTax") },
+    { label: "Subtotal activo corriente", value: bsAssetCurrentTotal ? bsAssetCurrentTotal.textContent : "" },
+    { label: "TOTAL ACTIVO", value: bsTotalAssets ? bsTotalAssets.textContent : "" },
+    { label: "A) PATRIMONIO NETO", value: "" },
+    { label: "I. Capital", value: getBalanceInputValue("bsEquityCapital") },
+    { label: "II. Reservas", value: getBalanceInputValue("bsEquityReserves") },
+    { label: "III. Resultado del ejercicio", value: getBalanceInputValue("bsEquityResult") },
+    { label: "IV. Subvenciones, donaciones y legados", value: getBalanceInputValue("bsEquityGrants") },
+    { label: "Subtotal patrimonio neto", value: bsEquityTotal ? bsEquityTotal.textContent : "" },
+    { label: "B) PASIVO NO CORRIENTE", value: "" },
+    { label: "I. Deudas a largo plazo", value: getBalanceInputValue("bsLiabLongTermDebt") },
+    { label: "II. Otras obligaciones a largo plazo", value: getBalanceInputValue("bsLiabLongTermOther") },
+    { label: "Subtotal pasivo no corriente", value: bsLiabNonCurrentTotal ? bsLiabNonCurrentTotal.textContent : "" },
+    { label: "C) PASIVO CORRIENTE", value: "" },
+    { label: "I. Deudas a corto plazo", value: getBalanceInputValue("bsLiabShortTermDebt") },
+    { label: "II. Proveedores y otras cuentas a pagar", value: getBalanceInputValue("bsLiabPayables") },
+    { label: "III. Otras obligaciones corrientes", value: getBalanceInputValue("bsLiabOtherCurrent") },
+    { label: "Subtotal pasivo corriente", value: bsLiabCurrentTotal ? bsLiabCurrentTotal.textContent : "" },
+    { label: "TOTAL PATRIMONIO NETO Y PASIVO", value: bsTotalLiabilities ? bsTotalLiabilities.textContent : "" },
+  ];
 }
 
 function populateReportMonthSelect(select) {

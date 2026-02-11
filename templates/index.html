@@ -1009,12 +1009,60 @@
                 </thead>
                 <tbody>
                   <tr>
-                    <td>Activo no corriente</td>
-                    <td><input class="balance-input" id="bsAssetNonCurrent" type="number" step="0.01" /></td>
+                    <td><strong>A) ACTIVO NO CORRIENTE</strong></td>
+                    <td></td>
                   </tr>
                   <tr>
-                    <td>Activo corriente</td>
-                    <td><input class="balance-input" id="bsAssetCurrent" type="number" step="0.01" /></td>
+                    <td class="balance-indent">I. Inmovilizado intangible</td>
+                    <td><input class="balance-input" id="bsAssetIntangible" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr>
+                    <td class="balance-indent">II. Inmovilizado material</td>
+                    <td><input class="balance-input" id="bsAssetTangible" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr>
+                    <td class="balance-indent">III. Inversiones inmobiliarias</td>
+                    <td><input class="balance-input" id="bsAssetInvestmentProperty" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr>
+                    <td class="balance-indent">IV. Inversiones financieras a largo plazo</td>
+                    <td><input class="balance-input" id="bsAssetLongTermInv" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr>
+                    <td class="balance-indent">V. Activos por impuesto diferido</td>
+                    <td><input class="balance-input" id="bsAssetDeferredTax" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr class="balance-subtotal">
+                    <td>Subtotal activo no corriente</td>
+                    <td><strong id="bsAssetNonCurrentTotal">0,00 €</strong></td>
+                  </tr>
+                  <tr>
+                    <td><strong>B) ACTIVO CORRIENTE</strong></td>
+                    <td></td>
+                  </tr>
+                  <tr>
+                    <td class="balance-indent">I. Existencias</td>
+                    <td><input class="balance-input" id="bsAssetInventory" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr>
+                    <td class="balance-indent">II. Deudores comerciales y otras cuentas a cobrar</td>
+                    <td><input class="balance-input" id="bsAssetReceivables" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr>
+                    <td class="balance-indent">III. Inversiones financieras a corto plazo</td>
+                    <td><input class="balance-input" id="bsAssetShortTermInv" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr>
+                    <td class="balance-indent">IV. Efectivo y otros activos líquidos equivalentes</td>
+                    <td><input class="balance-input" id="bsAssetCash" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr>
+                    <td class="balance-indent">V. Activos por impuesto corriente</td>
+                    <td><input class="balance-input" id="bsAssetCurrentTax" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr class="balance-subtotal">
+                    <td>Subtotal activo corriente</td>
+                    <td><strong id="bsAssetCurrentTotal">0,00 €</strong></td>
                   </tr>
                 </tbody>
               </table>
@@ -1034,16 +1082,64 @@
                 </thead>
                 <tbody>
                   <tr>
-                    <td>Patrimonio neto</td>
-                    <td><input class="balance-input" id="bsEquity" type="number" step="0.01" /></td>
+                    <td><strong>A) PATRIMONIO NETO</strong></td>
+                    <td></td>
                   </tr>
                   <tr>
-                    <td>Pasivo no corriente</td>
-                    <td><input class="balance-input" id="bsLiabNonCurrent" type="number" step="0.01" /></td>
+                    <td class="balance-indent">I. Capital</td>
+                    <td><input class="balance-input" id="bsEquityCapital" type="number" step="0.01" /></td>
                   </tr>
                   <tr>
-                    <td>Pasivo corriente</td>
-                    <td><input class="balance-input" id="bsLiabCurrent" type="number" step="0.01" /></td>
+                    <td class="balance-indent">II. Reservas</td>
+                    <td><input class="balance-input" id="bsEquityReserves" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr>
+                    <td class="balance-indent">III. Resultado del ejercicio</td>
+                    <td><input class="balance-input" id="bsEquityResult" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr>
+                    <td class="balance-indent">IV. Subvenciones, donaciones y legados</td>
+                    <td><input class="balance-input" id="bsEquityGrants" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr class="balance-subtotal">
+                    <td>Subtotal patrimonio neto</td>
+                    <td><strong id="bsEquityTotal">0,00 €</strong></td>
+                  </tr>
+                  <tr>
+                    <td><strong>B) PASIVO NO CORRIENTE</strong></td>
+                    <td></td>
+                  </tr>
+                  <tr>
+                    <td class="balance-indent">I. Deudas a largo plazo</td>
+                    <td><input class="balance-input" id="bsLiabLongTermDebt" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr>
+                    <td class="balance-indent">II. Otras obligaciones a largo plazo</td>
+                    <td><input class="balance-input" id="bsLiabLongTermOther" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr class="balance-subtotal">
+                    <td>Subtotal pasivo no corriente</td>
+                    <td><strong id="bsLiabNonCurrentTotal">0,00 €</strong></td>
+                  </tr>
+                  <tr>
+                    <td><strong>C) PASIVO CORRIENTE</strong></td>
+                    <td></td>
+                  </tr>
+                  <tr>
+                    <td class="balance-indent">I. Deudas a corto plazo</td>
+                    <td><input class="balance-input" id="bsLiabShortTermDebt" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr>
+                    <td class="balance-indent">II. Proveedores y otras cuentas a pagar</td>
+                    <td><input class="balance-input" id="bsLiabPayables" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr>
+                    <td class="balance-indent">III. Otras obligaciones corrientes</td>
+                    <td><input class="balance-input" id="bsLiabOtherCurrent" type="number" step="0.01" /></td>
+                  </tr>
+                  <tr class="balance-subtotal">
+                    <td>Subtotal pasivo corriente</td>
+                    <td><strong id="bsLiabCurrentTotal">0,00 €</strong></td>
                   </tr>
                 </tbody>
               </table>

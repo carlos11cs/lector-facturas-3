@@ -3093,7 +3093,7 @@ def balance_email():
     name = (payload.get("name") or "").strip()
     tax_id = (payload.get("tax_id") or "").strip()
     period_label = (payload.get("period_label") or "").strip()
-    lines = payload.get("lines") or {}
+    lines = payload.get("lines") or []
 
     with engine.connect() as conn:
         company_query = select(
@@ -3116,6 +3116,22 @@ def balance_email():
     company_name = name or company.get("display_name") or company.get("legal_name") or ""
     company_tax = tax_id or company.get("tax_id") or ""
 
+    rows_html = ""
+    for item in lines:
+        if not isinstance(item, dict):
+            continue
+        label = item.get("label") or ""
+        value = item.get("value")
+        try:
+            value_num = float(value)
+            value = f"{value_num:.2f} €"
+        except (TypeError, ValueError):
+            value = value or ""
+        rows_html += (
+            f"<tr><td style='border:1px solid #e5e7eb;padding:8px'>{label}</td>"
+            f"<td style='border:1px solid #e5e7eb;padding:8px;text-align:right'>{value}</td></tr>"
+        )
+
     html = f"""
     <h2>Balance de situación (estimado)</h2>
     <p><strong>Empresa:</strong> {company_name}</p>
@@ -3123,22 +3139,10 @@ def balance_email():
     <p><strong>Periodo:</strong> {period_label or '-'}</p>
     <table style="border-collapse:collapse;width:100%;margin-top:12px">
       <tr>
-        <th style="border:1px solid #e5e7eb;padding:8px;text-align:left">Activo</th>
+        <th style="border:1px solid #e5e7eb;padding:8px;text-align:left">Concepto</th>
         <th style="border:1px solid #e5e7eb;padding:8px;text-align:right">Importe (€)</th>
       </tr>
-      <tr><td style="border:1px solid #e5e7eb;padding:8px">Activo no corriente</td><td style="border:1px solid #e5e7eb;padding:8px;text-align:right">{lines.get("asset_non_current","")}</td></tr>
-      <tr><td style="border:1px solid #e5e7eb;padding:8px">Activo corriente</td><td style="border:1px solid #e5e7eb;padding:8px;text-align:right">{lines.get("asset_current","")}</td></tr>
-      <tr><td style="border:1px solid #e5e7eb;padding:8px"><strong>Total activo</strong></td><td style="border:1px solid #e5e7eb;padding:8px;text-align:right"><strong>{lines.get("total_assets","")}</strong></td></tr>
-    </table>
-    <table style="border-collapse:collapse;width:100%;margin-top:12px">
-      <tr>
-        <th style="border:1px solid #e5e7eb;padding:8px;text-align:left">Patrimonio neto y pasivo</th>
-        <th style="border:1px solid #e5e7eb;padding:8px;text-align:right">Importe (€)</th>
-      </tr>
-      <tr><td style="border:1px solid #e5e7eb;padding:8px">Patrimonio neto</td><td style="border:1px solid #e5e7eb;padding:8px;text-align:right">{lines.get("equity","")}</td></tr>
-      <tr><td style="border:1px solid #e5e7eb;padding:8px">Pasivo no corriente</td><td style="border:1px solid #e5e7eb;padding:8px;text-align:right">{lines.get("liab_non_current","")}</td></tr>
-      <tr><td style="border:1px solid #e5e7eb;padding:8px">Pasivo corriente</td><td style="border:1px solid #e5e7eb;padding:8px;text-align:right">{lines.get("liab_current","")}</td></tr>
-      <tr><td style="border:1px solid #e5e7eb;padding:8px"><strong>Total patrimonio neto y pasivo</strong></td><td style="border:1px solid #e5e7eb;padding:8px;text-align:right"><strong>{lines.get("total_liabilities","")}</strong></td></tr>
+      {rows_html}
     </table>
     """
     reply_to = user["email"] if user else None
