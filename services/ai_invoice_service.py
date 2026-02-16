@@ -1351,10 +1351,9 @@ def analyze_invoice(
     payment_dates = sorted({d for d in payment_dates if d})
     payment_date = payment_dates[0] if payment_dates else None
 
-    if pdf_kind != "original" or base_amount is None or vat_amount is None or total_amount is None:
-        base_amount, vat_amount, total_amount = _maybe_override_amounts_from_text(
-            extracted_text, base_amount, vat_amount, total_amount, vat_rate
-        )
+    base_amount, vat_amount, total_amount = _maybe_override_amounts_from_text(
+        extracted_text, base_amount, vat_amount, total_amount, vat_rate
+    )
 
     assumed_vat = False
     if vat_rate is None and not _has_vat_exemption_indicators(extracted_text):
