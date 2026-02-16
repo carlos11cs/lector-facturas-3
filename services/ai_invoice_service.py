@@ -1169,6 +1169,17 @@ def _round_amount(value: Optional[float]) -> Optional[float]:
     return round(float(value), 2)
 
 
+def _confidence_score_for_source(source: Optional[str]) -> Optional[float]:
+    if not source:
+        return None
+    mapping = {
+        "regex_tax_summary": 0.98,
+        "llm": 0.85,
+        "fallback": 0.60,
+    }
+    return mapping.get(source)
+
+
 def _has_vat_exemption_indicators(text: str) -> bool:
     if not text:
         return False
@@ -1532,6 +1543,8 @@ def analyze_invoice(
             "vat_rate": None,
             "vat_amount": None,
             "total_amount": None,
+            "extraction_source": None,
+            "confidence_score": None,
             "analysis_text": "",
             "validation": {"is_consistent": None, "difference": None},
         }
@@ -1747,6 +1760,7 @@ def analyze_invoice(
             total_amount,
         )
 
+    confidence_score = _confidence_score_for_source(amount_source)
     logger.info("Fuente importes (%s): %s", filename, amount_source)
     logger.info(
         "Valores detectados (%s): proveedor=%s cliente=%s fecha=%s pago=%s base=%s iva_rate=%s iva_importe=%s total=%s",
@@ -1774,6 +1788,8 @@ def analyze_invoice(
         "vat_amount": vat_amount,
         "total_amount": total_amount,
         "vat_breakdown": vat_breakdown,
+        "extraction_source": amount_source,
+        "confidence_score": confidence_score,
         "analysis_text": raw_text[:500],
         "validation": validation,
     }
