@@ -476,9 +476,23 @@ def _extract_tax_summary_from_text(text: str) -> Dict[str, Any]:
             match = re.search(r"(\d{1,2}(?:[.,]\d{1,2})?)\s*%?", line)
             if match:
                 candidate_rate = _normalize_rate(match.group(1))
-                if candidate_rate is not None and candidate_rate <= 30:
+                if candidate_rate in {0, 4, 10, 21}:
                     rate_value = candidate_rate
                     rate_raw = match.group(1)
+                    break
+    if rate_value is None:
+        for line in block:
+            stripped_line = line.strip()
+            if stripped_line.startswith("(") and stripped_line.endswith(")"):
+                continue
+            candidate_line = stripped_line.strip("()")
+            if "/" in candidate_line:
+                continue
+            if re.match(r"^\d{1,2}(?:[.,]\d{1,2})?$", candidate_line):
+                candidate_rate = _normalize_rate(candidate_line)
+                if candidate_rate in {0, 4, 10, 21}:
+                    rate_value = candidate_rate
+                    rate_raw = candidate_line
                     break
 
     base_value, base_raw = find_amount_after_keywords(
@@ -506,8 +520,9 @@ def _extract_tax_summary_from_text(text: str) -> Dict[str, Any]:
             amount_candidates.append((parsed, raw))
     if rate_value is None and amount_candidates:
         for candidate, raw in amount_candidates:
-            if 0 < candidate <= 30:
-                rate_value = _normalize_rate(candidate)
+            normalized_candidate = _normalize_rate(candidate)
+            if normalized_candidate in {0, 4, 10, 21}:
+                rate_value = normalized_candidate
                 rate_raw = raw
                 break
     if rate_value is not None:
@@ -551,6 +566,12 @@ def _extract_tax_summary_from_text(text: str) -> Dict[str, Any]:
         expected_total = round(base_value + (vat_value or 0), 2)
         if total_value is None or abs(total_value - expected_total) > 0.05:
             total_value = expected_total
+    if base_value is not None and total_value is not None:
+        computed_vat = round(total_value - base_value, 2)
+        if vat_value is None or abs(vat_value - computed_vat) > 0.05:
+            vat_value = computed_vat
+        if rate_value is None and base_value > 0:
+            rate_value = round(100 * vat_value / base_value, 2)
 
     if base_value is not None and vat_value is None and rate_value is not None:
         vat_value = round(base_value * (rate_value / 100), 2)
@@ -598,6 +619,10 @@ def _apply_tax_summary_override(
     def within_tolerance(a: float, b: float) -> bool:
         return abs(a - b) <= 0.03
 
+    if summary_base is not None and summary_total is not None:
+        computed_vat = round(summary_total - summary_base, 2)
+        if summary_vat is None or abs(summary_vat - computed_vat) > 0.05:
+            summary_vat = computed_vat
     if summary_base is not None and summary_rate is not None and summary_vat is None:
         summary_vat = round(summary_base * (summary_rate / 100), 2)
     if summary_base is not None and summary_vat is not None and summary_total is None:
