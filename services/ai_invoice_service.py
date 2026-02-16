@@ -287,12 +287,24 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
                 if numbers:
                     amount = _normalize_amount(numbers[-1])
                 if amount is None and idx + 1 < len(lines):
-                    numbers = re.findall(
-                        r"\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+[.,]\d{2}",
-                        lines[idx + 1],
-                    )
-                    if numbers:
-                        amount = _normalize_amount(numbers[0])
+                    candidates = []
+                    for offset in range(1, 4):
+                        if idx + offset >= len(lines):
+                            break
+                        next_line = lines[idx + offset]
+                        numbers = re.findall(
+                            r"\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+[.,]\d{2}",
+                            next_line,
+                        )
+                        if not numbers:
+                            continue
+                        has_currency = "€" in next_line or "EUR" in next_line.upper()
+                        candidates.append((has_currency, numbers, next_line))
+                        if has_currency:
+                            amount = _normalize_amount(numbers[-1])
+                            break
+                    if amount is None and candidates:
+                        amount = _normalize_amount(candidates[0][1][0])
                 if amount is not None:
                     return amount
         return None
@@ -334,6 +346,7 @@ def _maybe_override_amounts_from_text(
     extracted = _extract_amounts_from_text(text)
     text_base = extracted.get("base")
     text_total = extracted.get("total")
+    text_vat = extracted.get("vat")
 
     def is_significantly_different(a: Optional[float], b: Optional[float]) -> bool:
         if a is None or b is None:
@@ -342,6 +355,12 @@ def _maybe_override_amounts_from_text(
         return abs(a - b) > tolerance
 
     math_ok = _validate_math(base_amount, vat_amount, total_amount)
+    text_math_ok = _validate_math(text_base, text_vat, text_total)
+    if text_math_ok and (not math_ok or is_significantly_different(base_amount, text_base) or is_significantly_different(total_amount, text_total)):
+        base_amount = text_base
+        vat_amount = text_vat
+        total_amount = text_total
+        return base_amount, vat_amount, total_amount
 
     if text_base is not None and (base_amount is None or is_significantly_different(base_amount, text_base)):
         base_amount = text_base
