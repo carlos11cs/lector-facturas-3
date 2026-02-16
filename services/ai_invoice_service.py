@@ -749,6 +749,40 @@ def _summarize_vat_breakdown(lines: List[Dict[str, Any]]) -> Optional[Tuple[floa
     return (_round_amount(base_total), _round_amount(vat_total), _round_amount(total_total))
 
 
+def _reconcile_vat_breakdown(
+    vat_breakdown: List[Dict[str, Any]],
+    base_amount: Optional[float],
+    vat_amount: Optional[float],
+    total_amount: Optional[float],
+    vat_rate: Optional[float],
+    source: Optional[str],
+) -> List[Dict[str, Any]]:
+    if not vat_breakdown:
+        return []
+    if base_amount is None or vat_amount is None or total_amount is None:
+        return vat_breakdown
+    summary = _summarize_vat_breakdown(vat_breakdown)
+    if not summary:
+        return vat_breakdown
+    base_sum, vat_sum, total_sum = summary
+    if (
+        abs((base_sum or 0) - base_amount) <= 0.05
+        and abs((vat_sum or 0) - vat_amount) <= 0.05
+        and abs((total_sum or 0) - total_amount) <= 0.05
+    ):
+        return vat_breakdown
+    if source == "regex_tax_summary" and vat_rate is not None:
+        return [
+            {
+                "rate": float(vat_rate),
+                "base": _round_amount(base_amount),
+                "vat_amount": _round_amount(vat_amount),
+                "total": _round_amount(total_amount),
+            }
+        ]
+    return vat_breakdown
+
+
 def _extract_vat_breakdown_from_text(text: str) -> List[Dict[str, Any]]:
     if not text:
         return []
@@ -1787,6 +1821,15 @@ def analyze_invoice(
 
     confidence_score = _confidence_score_for_source(amount_source)
     logger.info("Fuente importes (%s): %s", filename, amount_source)
+
+    vat_breakdown = _reconcile_vat_breakdown(
+        vat_breakdown,
+        base_amount,
+        vat_amount,
+        total_amount,
+        vat_rate,
+        amount_source,
+    )
     logger.info(
         "Valores detectados (%s): proveedor=%s cliente=%s fecha=%s pago=%s base=%s iva_rate=%s iva_importe=%s total=%s",
         filename,

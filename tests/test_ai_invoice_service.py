@@ -76,6 +76,19 @@ class TestAiInvoiceService(unittest.TestCase):
         self.assertAlmostEqual(total, 1417.32, places=2)
         self.assertAlmostEqual(rate, 21.0, places=2)
 
+        corrected = svc._reconcile_vat_breakdown(
+            [{"rate": 21.0, "base": 971.36, "vat_amount": 245.98, "total": 1217.32}],
+            base,
+            vat,
+            total,
+            rate,
+            source,
+        )
+        self.assertEqual(len(corrected), 1)
+        self.assertAlmostEqual(corrected[0]["base"], 1171.34, places=2)
+        self.assertAlmostEqual(corrected[0]["vat_amount"], 245.98, places=2)
+        self.assertAlmostEqual(corrected[0]["total"], 1417.32, places=2)
+
     def test_invoice_and_payment_dates(self):
         invoice_date = svc._extract_invoice_date_from_text(FIXTURE_TEXT)
         self.assertEqual(invoice_date, "2026-02-03")
