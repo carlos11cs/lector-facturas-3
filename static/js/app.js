@@ -117,7 +117,7 @@ function formatPercent(value) {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   });
-  return `${formatter.format(number)} %`;
+  return `${formatter.format(number)}%`;
 }
 
 function parseNumberInput(value) {
@@ -145,7 +145,7 @@ function formatAmountInput(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
     return "";
   }
-  return Number(value).toFixed(2);
+  return currencyFormatter.format(Number(value));
 }
 
 function getPnlInputValue(id) {
@@ -1845,8 +1845,7 @@ function renderTable() {
 
     const baseTd = document.createElement("td");
     const baseInput = document.createElement("input");
-    baseInput.type = "number";
-    baseInput.step = "0.01";
+    baseInput.type = "text";
     baseInput.min = "0";
     baseInput.placeholder = "0,00";
     baseInput.value = item.base;
@@ -1910,8 +1909,7 @@ function renderTable() {
 
     const vatAmountTd = document.createElement("td");
     const vatAmountInput = document.createElement("input");
-    vatAmountInput.type = "number";
-    vatAmountInput.step = "0.01";
+    vatAmountInput.type = "text";
     vatAmountInput.min = "0";
     vatAmountInput.placeholder = "0,00";
     vatAmountInput.value = item.vatAmount;
@@ -1931,8 +1929,7 @@ function renderTable() {
 
     const totalTd = document.createElement("td");
     const totalInput = document.createElement("input");
-    totalInput.type = "number";
-    totalInput.step = "0.01";
+    totalInput.type = "text";
     totalInput.min = "0";
     totalInput.placeholder = "0,00";
     totalInput.value = item.total;
@@ -2003,8 +2000,7 @@ function renderTable() {
         rateCell.appendChild(rateSelect);
 
         const baseLineInput = document.createElement("input");
-        baseLineInput.type = "number";
-        baseLineInput.step = "0.01";
+        baseLineInput.type = "text";
         baseLineInput.min = "0";
         baseLineInput.placeholder = "0,00";
         baseLineInput.value = line.base || "";
@@ -2012,16 +2008,14 @@ function renderTable() {
         baseCell.appendChild(baseLineInput);
 
         const vatLineInput = document.createElement("input");
-        vatLineInput.type = "number";
-        vatLineInput.step = "0.01";
+        vatLineInput.type = "text";
         vatLineInput.min = "0";
         vatLineInput.readOnly = true;
         vatLineInput.value = line.vat_amount || "";
         vatCell.appendChild(vatLineInput);
 
         const totalLineInput = document.createElement("input");
-        totalLineInput.type = "number";
-        totalLineInput.step = "0.01";
+        totalLineInput.type = "text";
         totalLineInput.min = "0";
         totalLineInput.readOnly = true;
         totalLineInput.value = line.total || "";
@@ -2184,8 +2178,7 @@ function renderIncomeTable() {
 
     const baseTd = document.createElement("td");
     const baseInput = document.createElement("input");
-    baseInput.type = "number";
-    baseInput.step = "0.01";
+    baseInput.type = "text";
     baseInput.min = "0";
     baseInput.placeholder = "0,00";
     baseInput.value = item.base;
@@ -2244,8 +2237,7 @@ function renderIncomeTable() {
 
     const vatAmountTd = document.createElement("td");
     const vatAmountInput = document.createElement("input");
-    vatAmountInput.type = "number";
-    vatAmountInput.step = "0.01";
+    vatAmountInput.type = "text";
     vatAmountInput.min = "0";
     vatAmountInput.placeholder = "0,00";
     vatAmountInput.value = item.vatAmount;
@@ -2265,8 +2257,7 @@ function renderIncomeTable() {
 
     const totalTd = document.createElement("td");
     const totalInput = document.createElement("input");
-    totalInput.type = "number";
-    totalInput.step = "0.01";
+    totalInput.type = "text";
     totalInput.min = "0";
     totalInput.placeholder = "0,00";
     totalInput.value = item.total;
@@ -2337,8 +2328,7 @@ function renderIncomeTable() {
         rateCell.appendChild(rateSelect);
 
         const baseLineInput = document.createElement("input");
-        baseLineInput.type = "number";
-        baseLineInput.step = "0.01";
+        baseLineInput.type = "text";
         baseLineInput.min = "0";
         baseLineInput.placeholder = "0,00";
         baseLineInput.value = line.base || "";
@@ -2346,16 +2336,14 @@ function renderIncomeTable() {
         baseCell.appendChild(baseLineInput);
 
         const vatLineInput = document.createElement("input");
-        vatLineInput.type = "number";
-        vatLineInput.step = "0.01";
+        vatLineInput.type = "text";
         vatLineInput.min = "0";
         vatLineInput.readOnly = true;
         vatLineInput.value = line.vat_amount || "";
         vatCell.appendChild(vatLineInput);
 
         const totalLineInput = document.createElement("input");
-        totalLineInput.type = "number";
-        totalLineInput.step = "0.01";
+        totalLineInput.type = "text";
         totalLineInput.min = "0";
         totalLineInput.readOnly = true;
         totalLineInput.value = line.total || "";
@@ -4242,22 +4230,19 @@ function enterIncomeInvoiceEditMode(row, invoice) {
   clientInput.value = invoice.client;
 
   const baseInput = document.createElement("input");
-  baseInput.type = "number";
-  baseInput.step = "0.01";
+  baseInput.type = "text";
   baseInput.min = "0";
   baseInput.value = invoice.base_amount;
 
   const vatSelect = createVatSelect(invoice.vat_rate);
 
   const vatAmountInput = document.createElement("input");
-  vatAmountInput.type = "number";
-  vatAmountInput.step = "0.01";
+  vatAmountInput.type = "text";
   vatAmountInput.min = "0";
   vatAmountInput.value = invoice.vat_amount || 0;
 
   const totalInput = document.createElement("input");
-  totalInput.type = "number";
-  totalInput.step = "0.01";
+  totalInput.type = "text";
   totalInput.min = "0";
   totalInput.value = invoice.total_amount;
 
@@ -4420,22 +4405,19 @@ function enterInvoiceEditMode(row, invoice) {
   supplierInput.addEventListener("input", updateSupplierWarning);
 
   const baseInput = document.createElement("input");
-  baseInput.type = "number";
-  baseInput.step = "0.01";
+  baseInput.type = "text";
   baseInput.min = "0";
   baseInput.value = invoice.base_amount;
 
   const vatSelect = createVatSelect(invoice.vat_rate);
 
   const vatAmountInput = document.createElement("input");
-  vatAmountInput.type = "number";
-  vatAmountInput.step = "0.01";
+  vatAmountInput.type = "text";
   vatAmountInput.min = "0";
   vatAmountInput.value = invoice.vat_amount || 0;
 
   const totalInput = document.createElement("input");
-  totalInput.type = "number";
-  totalInput.step = "0.01";
+  totalInput.type = "text";
   totalInput.min = "0";
   totalInput.value = invoice.total_amount;
 
@@ -4820,23 +4802,21 @@ function enterLoanEditMode(row, installment) {
 
   const totalTd = document.createElement("td");
   const totalInput = document.createElement("input");
-  totalInput.type = "number";
+  totalInput.type = "text";
   totalInput.min = "0";
-  totalInput.step = "0.01";
   totalInput.value = formatAmountInput(installment.total_amount);
   totalTd.appendChild(totalInput);
 
   const interestTd = document.createElement("td");
   const interestInput = document.createElement("input");
-  interestInput.type = "number";
+  interestInput.type = "text";
   interestInput.min = "0";
-  interestInput.step = "0.01";
   interestInput.value = formatAmountInput(installment.interest_amount);
   interestTd.appendChild(interestInput);
 
   const principalTd = document.createElement("td");
   const principalInput = document.createElement("input");
-  principalInput.type = "number";
+  principalInput.type = "text";
   principalInput.readOnly = true;
   const updatePrincipal = () => {
     const totalValue = parseNumberInput(totalInput.value) || 0;
@@ -5033,9 +5013,8 @@ function renderLoanPlanPreview() {
 
     const totalTd = document.createElement("td");
     const totalInput = document.createElement("input");
-    totalInput.type = "number";
+    totalInput.type = "text";
     totalInput.min = "0";
-    totalInput.step = "0.01";
     totalInput.value = formatAmountInput(item.total_amount);
     totalInput.addEventListener("input", () => {
       loanPlanDraft[index].total_amount = parseNumberInput(totalInput.value);
@@ -5044,9 +5023,8 @@ function renderLoanPlanPreview() {
 
     const interestTd = document.createElement("td");
     const interestInput = document.createElement("input");
-    interestInput.type = "number";
+    interestInput.type = "text";
     interestInput.min = "0";
-    interestInput.step = "0.01";
     interestInput.value = formatAmountInput(item.interest_amount);
     interestInput.addEventListener("input", () => {
       loanPlanDraft[index].interest_amount = parseNumberInput(interestInput.value);
@@ -5055,9 +5033,8 @@ function renderLoanPlanPreview() {
 
     const principalTd = document.createElement("td");
     const principalInput = document.createElement("input");
-    principalInput.type = "number";
+    principalInput.type = "text";
     principalInput.min = "0";
-    principalInput.step = "0.01";
     principalInput.value = formatAmountInput(item.principal_amount);
     principalInput.addEventListener("input", () => {
       loanPlanDraft[index].principal_amount = parseNumberInput(principalInput.value);
@@ -5158,8 +5135,7 @@ function enterNoInvoiceEditMode(row, expense) {
   conceptInput.value = expense.concept;
 
   const amountInput = document.createElement("input");
-  amountInput.type = "number";
-  amountInput.step = "0.01";
+  amountInput.type = "text";
   amountInput.min = "0";
   amountInput.value = expense.amount;
 
@@ -5174,8 +5150,7 @@ function enterNoInvoiceEditMode(row, expense) {
     vatRateSelect.value = "";
   }
   const vatAmountInput = document.createElement("input");
-  vatAmountInput.type = "number";
-  vatAmountInput.step = "0.01";
+  vatAmountInput.type = "text";
   vatAmountInput.min = "0";
   vatAmountInput.value =
     expense.vat_deductible && expense.vat_amount
@@ -5184,8 +5159,7 @@ function enterNoInvoiceEditMode(row, expense) {
   vatAmountInput.readOnly = true;
 
   const interestInput = document.createElement("input");
-  interestInput.type = "number";
-  interestInput.step = "0.01";
+  interestInput.type = "text";
   interestInput.min = "0";
   interestInput.value =
     expense.expense_type === "prestamo" ? Number(expense.interest_amount || 0) : "";
@@ -5520,8 +5494,7 @@ function enterEditMode(row, entry) {
   const actionsTd = row.children[actionsIndex];
 
   const baseInput = document.createElement("input");
-  baseInput.type = "number";
-  baseInput.step = "0.01";
+  baseInput.type = "text";
   baseInput.min = "0";
   baseInput.value = Number(entry.base).toFixed(2);
 
