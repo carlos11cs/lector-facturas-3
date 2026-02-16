@@ -3623,10 +3623,7 @@ function updatePaymentDateFromCalendar(item, newDate) {
   if (item.type === "loan_installment") {
     const payload = {
       payment_date: newDate,
-      concept: item.concept || "Préstamo bancario",
-      total_amount: item.total_amount ?? item.amount ?? 0,
-      interest_amount: item.interest_amount ?? 0,
-      company_id: getSelectedCompanyId(),
+      payment_only: true,
     };
     const url = withCompanyParam(`/api/loan-installments/${item.id}`);
     return fetch(url, {
@@ -3652,16 +3649,7 @@ function updatePaymentDateFromCalendar(item, newDate) {
   if (item.type === "no_invoice") {
     const payload = {
       expense_date: newDate,
-      concept: item.concept || "Gasto sin factura",
-      amount: item.total_amount ?? item.amount ?? 0,
-      interest_amount: item.interest_amount ?? 0,
-      vat_deductible: item.vat_deductible ?? false,
-      vat_rate: item.vat_rate_no_invoice ?? item.vat_rate ?? null,
-      vat_amount: item.vat_amount_no_invoice ?? item.vat_amount ?? null,
-      base_amount: item.base_amount_no_invoice ?? item.base_amount ?? null,
-      expense_type: item.expense_type || "otro",
-      deductible: item.deductible !== undefined ? item.deductible : true,
-      company_id: getSelectedCompanyId(),
+      payment_only: true,
     };
     const url = withCompanyParam(`/api/expenses/no-invoice/${item.id}`);
     return fetch(url, {
@@ -3698,10 +3686,7 @@ function updatePaymentDateFromCalendar(item, newDate) {
     invoice_date: item.invoice_date,
     payment_date: newDate,
     payment_dates: updatedDates,
-    base_amount: item.base_amount,
-    vat_rate: item.vat_rate,
-    vat_amount: item.vat_amount,
-    total_amount: item.total_amount,
+    payment_only: true,
   };
   if (item.type === "income") {
     payload.client = item.counterparty || "";

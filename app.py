@@ -3165,15 +3165,33 @@ def update_invoice(invoice_id):
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
     payload = request.get_json(silent=True) or {}
 
+    payment_only = payload.get("payment_only") or payload.get("paymentOnly")
     invoice_date = payload.get("invoice_date") or ""
     payment_dates_payload = payload.get("payment_dates") or payload.get("paymentDates")
     payment_dates = parse_payment_dates(payment_dates_payload)
-    payment_date = compute_payment_date(
-        invoice_date,
+    payment_date_input = (
         payload.get("payment_date")
         or payload.get("paymentDate")
-        or (payment_dates[0] if payment_dates else None),
+        or (payment_dates[0] if payment_dates else None)
     )
+    payment_date = compute_payment_date(invoice_date, payment_date_input)
+    if payment_only:
+        if not payment_date_input:
+            return jsonify({"ok": False, "errors": ["Fecha de pago obligatoria."]}), 400
+        updates = {"payment_date": payment_date_input}
+        if payment_dates_payload is not None:
+            updates["payment_dates"] = json.dumps(payment_dates) if payment_dates else None
+        with engine.begin() as conn:
+            result = conn.execute(
+                invoices_table.update()
+                .where(invoices_table.c.id == invoice_id)
+                .where(invoices_table.c.user_id == data_owner_id)
+                .where(invoices_table.c.company_id == company_id)
+                .values(**updates)
+            )
+        if result.rowcount == 0:
+            return jsonify({"ok": False, "errors": ["Factura no encontrada."]}), 404
+        return jsonify({"ok": True})
     supplier = (payload.get("supplier") or "").strip()
     base_amount = parse_amount(str(payload.get("base_amount") or ""))
     vat_rate_raw = vat_rate_to_str(payload.get("vat_rate"))
@@ -3466,15 +3484,33 @@ def update_income_invoice(invoice_id):
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
 
     payload = request.get_json(silent=True) or {}
+    payment_only = payload.get("payment_only") or payload.get("paymentOnly")
     invoice_date = payload.get("invoice_date") or ""
     payment_dates_payload = payload.get("payment_dates") or payload.get("paymentDates")
     payment_dates = parse_payment_dates(payment_dates_payload)
-    payment_date = compute_payment_date(
-        invoice_date,
+    payment_date_input = (
         payload.get("payment_date")
         or payload.get("paymentDate")
-        or (payment_dates[0] if payment_dates else None),
+        or (payment_dates[0] if payment_dates else None)
     )
+    payment_date = compute_payment_date(invoice_date, payment_date_input)
+    if payment_only:
+        if not payment_date_input:
+            return jsonify({"ok": False, "errors": ["Fecha de pago obligatoria."]}), 400
+        updates = {"payment_date": payment_date_input}
+        if payment_dates_payload is not None:
+            updates["payment_dates"] = json.dumps(payment_dates) if payment_dates else None
+        with engine.begin() as conn:
+            result = conn.execute(
+                income_invoices_table.update()
+                .where(income_invoices_table.c.id == invoice_id)
+                .where(income_invoices_table.c.user_id == data_owner_id)
+                .where(income_invoices_table.c.company_id == company_id)
+                .values(**updates)
+            )
+        if result.rowcount == 0:
+            return jsonify({"ok": False, "errors": ["Factura no encontrada."]}), 404
+        return jsonify({"ok": True})
     client = (payload.get("client") or "").strip()
     base_amount = parse_amount(str(payload.get("base_amount") or ""))
     vat_rate_raw = vat_rate_to_str(payload.get("vat_rate"))
@@ -3738,7 +3774,22 @@ def update_no_invoice_expense(expense_id):
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
     payload = request.get_json(silent=True) or {}
 
+    payment_only = payload.get("payment_only") or payload.get("paymentOnly")
     expense_date = payload.get("expense_date") or ""
+    if payment_only:
+        if not expense_date:
+            return jsonify({"ok": False, "errors": ["Fecha obligatoria."]}), 400
+        with engine.begin() as conn:
+            result = conn.execute(
+                no_invoice_table.update()
+                .where(no_invoice_table.c.id == expense_id)
+                .where(no_invoice_table.c.user_id == data_owner_id)
+                .where(no_invoice_table.c.company_id == company_id)
+                .values(expense_date=expense_date)
+            )
+        if result.rowcount == 0:
+            return jsonify({"ok": False, "errors": ["Gasto no encontrado."]}), 404
+        return jsonify({"ok": True})
     concept = (payload.get("concept") or "").strip()
     amount = parse_amount(str(payload.get("amount") or ""))
     expense_type = payload.get("expense_type") or ""
@@ -3996,10 +4047,27 @@ def update_loan_installment(installment_id):
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
 
     payload = request.get_json(silent=True) or {}
+    payment_only = payload.get("payment_only") or payload.get("paymentOnly")
     payment_date = payload.get("payment_date")
     concept = (payload.get("concept") or "").strip()
     total_amount = payload.get("total_amount")
     interest_amount = payload.get("interest_amount")
+    bank_name = (payload.get("bank_name") or payload.get("bankName") or "").strip()
+
+    if payment_only:
+        if not payment_date:
+            return jsonify({"ok": False, "errors": ["Fecha de pago obligatoria."]}), 400
+        with engine.begin() as conn:
+            result = conn.execute(
+                loan_installments_table.update()
+                .where(loan_installments_table.c.id == installment_id)
+                .where(loan_installments_table.c.user_id == data_owner_id)
+                .where(loan_installments_table.c.company_id == company_id)
+                .values(payment_date=payment_date)
+            )
+            if result.rowcount == 0:
+                return jsonify({"ok": False, "errors": ["Cuota no encontrada."]}), 404
+        return jsonify({"ok": True})
 
     errors = []
     if not payment_date:

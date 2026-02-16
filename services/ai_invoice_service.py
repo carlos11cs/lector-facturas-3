@@ -265,12 +265,25 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
         return {"base": None, "vat": None, "total": None}
     lines = [line.strip() for line in text.splitlines() if line.strip()]
 
-    def find_amount_for_keywords(keywords: List[str]) -> Optional[float]:
+    def find_amount_for_keywords(
+        keywords: List[str],
+        *,
+        forbid_if_contains: Optional[List[str]] = None,
+        require_currency_on_keyword_line: bool = False,
+        require_single_amount: bool = False,
+    ) -> Optional[float]:
         for idx, line in enumerate(lines):
             upper = line.upper()
             if any(keyword in upper for keyword in keywords):
+                if forbid_if_contains and any(token in upper for token in forbid_if_contains):
+                    continue
                 amount = None
                 numbers = re.findall(r"\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+[.,]\d{2}", line)
+                if require_currency_on_keyword_line and not numbers:
+                    if "€" not in line and "EUR" not in upper:
+                        continue
+                if require_single_amount and len(numbers) > 1:
+                    continue
                 if numbers:
                     amount = _normalize_amount(numbers[-1])
                 if amount is None and idx + 1 < len(lines):
@@ -284,10 +297,29 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
                     return amount
         return None
 
-    base_amount = find_amount_for_keywords(["BASE IMPONIBLE", "BASE IVA", "BASE"])
-    total_amount = find_amount_for_keywords(
-        ["TOTAL FACTURA", "TOTAL EUR", "TOTAL BRUTO", "TOTAL IVA INCLUIDO", "TOTAL"]
+    base_amount = find_amount_for_keywords(
+        ["BASE IMPONIBLE", "BASE IVA", "BASE", "TOTAL BRUTO"]
     )
+    total_amount = find_amount_for_keywords(
+        [
+            "TOTAL FACTURA",
+            "TOTAL IVA INCLUIDO",
+            "TOTAL CON IVA",
+            "TOTAL A PAGAR",
+            "TOTAL EUR",
+            "TOTAL",
+        ],
+        forbid_if_contains=["BRUTO", "BASE", "IMPONIBLE", "I.V.A", "IVA", "REC.EQUIV"],
+        require_single_amount=True,
+    )
+    if total_amount is None:
+        currency_matches = re.findall(
+            r"(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+[.,]\d{2})\s*(?:EUR|€)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if currency_matches:
+            total_amount = _normalize_amount(currency_matches[-1])
     vat_amount = find_amount_for_keywords(["I.V.A", "IVA"])
     return {"base": base_amount, "vat": vat_amount, "total": total_amount}
 
@@ -317,7 +349,7 @@ def _maybe_override_amounts_from_text(
             vat_amount = round(base_amount * (vat_rate / 100), 2)
             total_amount = round(base_amount + vat_amount, 2)
 
-    if text_total is not None and (total_amount is None or is_significantly_different(total_amount, text_total)):
+    if text_total is not None and (total_amount is None or (not math_ok and is_significantly_different(total_amount, text_total))):
         total_amount = text_total
         if base_amount is not None and vat_amount is None:
             vat_amount = round(total_amount - base_amount, 2)
