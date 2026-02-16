@@ -288,7 +288,7 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
                     amount = _normalize_amount(numbers[-1])
                 if amount is None and idx + 1 < len(lines):
                     candidates = []
-                    for offset in range(1, 4):
+                    for offset in range(1, 8):
                         if idx + offset >= len(lines):
                             break
                         next_line = lines[idx + offset]
@@ -361,6 +361,14 @@ def _maybe_override_amounts_from_text(
         vat_amount = text_vat
         total_amount = text_total
         return base_amount, vat_amount, total_amount
+
+    if vat_rate is not None and text_base is not None and text_vat is not None and text_total is None:
+        computed_total = round(text_base + text_vat, 2)
+        if _validate_math(text_base, text_vat, computed_total):
+            base_amount = text_base
+            vat_amount = text_vat
+            total_amount = computed_total
+            return base_amount, vat_amount, total_amount
 
     if text_base is not None and (base_amount is None or is_significantly_different(base_amount, text_base)):
         base_amount = text_base
