@@ -82,6 +82,11 @@ class TestAiInvoiceService(unittest.TestCase):
         payment_dates = svc._find_payment_dates_by_keywords(FIXTURE_TEXT, invoice_date)
         self.assertIn("2026-04-04", payment_dates)
 
+    def test_confidence_score_mapping(self):
+        self.assertAlmostEqual(svc._confidence_score_for_source("regex_tax_summary"), 0.98, places=2)
+        self.assertAlmostEqual(svc._confidence_score_for_source("llm"), 0.85, places=2)
+        self.assertAlmostEqual(svc._confidence_score_for_source("fallback"), 0.60, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()

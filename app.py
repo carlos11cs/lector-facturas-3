@@ -135,6 +135,8 @@ invoices_table = Table(
     Column("payment_date", String),
     Column("payment_dates", Text),
     Column("ocr_text", Text),
+    Column("extraction_source", String),
+    Column("confidence_score", Float),
     Column("expense_category", String, nullable=False, server_default="with_invoice"),
     Column("created_at", String, nullable=False),
 )
@@ -157,6 +159,8 @@ income_invoices_table = Table(
     Column("payment_date", String),
     Column("payment_dates", Text),
     Column("ocr_text", Text),
+    Column("extraction_source", String),
+    Column("confidence_score", Float),
     Column("created_at", String, nullable=False),
 )
 
@@ -250,6 +254,8 @@ def init_db():
     add_column_if_missing("invoices", "payment_date", "VARCHAR")
     add_column_if_missing("invoices", "payment_dates", "TEXT")
     add_column_if_missing("invoices", "vat_breakdown", "TEXT")
+    add_column_if_missing("invoices", "extraction_source", "VARCHAR")
+    add_column_if_missing("invoices", "confidence_score", "FLOAT")
     if "invoices" in table_names:
         with engine.begin() as conn:
             conn.execute(
@@ -302,6 +308,8 @@ def init_db():
     add_column_if_missing("income_invoices", "payment_date", "VARCHAR")
     add_column_if_missing("income_invoices", "payment_dates", "TEXT")
     add_column_if_missing("income_invoices", "vat_breakdown", "TEXT")
+    add_column_if_missing("income_invoices", "extraction_source", "VARCHAR")
+    add_column_if_missing("income_invoices", "confidence_score", "FLOAT")
     if "income_invoices" in table_names:
         with engine.begin() as conn:
             conn.execute(
@@ -2110,6 +2118,10 @@ def upload_invoices():
                 )
                 analysis_text = entry.get("analysisText") or entry.get("ocrText")
                 analysis_status = entry.get("analysisStatus") or entry.get("analysis_status") or "ok"
+                extraction_source = (
+                    entry.get("extractionSource") or entry.get("extraction_source")
+                )
+                confidence_score = entry.get("confidenceScore") or entry.get("confidence_score")
                 expense_category = entry.get("expenseCategory") or "with_invoice"
 
                 if not stored_name:
@@ -2179,6 +2191,8 @@ def upload_invoices():
                         payment_date=payment_date,
                         payment_dates=json.dumps(payment_dates) if payment_dates else None,
                         ocr_text=analysis_text,
+                        extraction_source=extraction_source,
+                        confidence_score=confidence_score,
                         expense_category=expense_category,
                         created_at=created_at,
                     )
@@ -2295,6 +2309,8 @@ def upload_invoices():
                     payment_date=payment_date,
                     payment_dates=json.dumps(payment_dates_list) if payment_dates_list else None,
                     ocr_text=None,
+                    extraction_source=None,
+                    confidence_score=None,
                     expense_category="with_invoice",
                     created_at=created_at,
                 )
@@ -2534,6 +2550,8 @@ def list_invoices():
                 invoices_table.c.total_amount,
                 invoices_table.c.vat_breakdown,
                 invoices_table.c.payment_date,
+                invoices_table.c.extraction_source,
+                invoices_table.c.confidence_score,
                 invoices_table.c.original_filename,
                 invoices_table.c.expense_category,
             )
@@ -2555,6 +2573,8 @@ def list_invoices():
             "vat_amount": float(row["vat_amount"]) if row["vat_amount"] is not None else None,
             "total_amount": float(row["total_amount"]),
             "vat_breakdown": row["vat_breakdown"],
+            "extraction_source": row.get("extraction_source"),
+            "confidence_score": float(row["confidence_score"]) if row["confidence_score"] is not None else None,
             "original_filename": row["original_filename"],
             "expense_category": row["expense_category"] or "with_invoice",
         }
@@ -3342,6 +3362,8 @@ def list_income_invoices():
                 income_invoices_table.c.vat_rate,
                 income_invoices_table.c.vat_amount,
                 income_invoices_table.c.total_amount,
+                income_invoices_table.c.extraction_source,
+                income_invoices_table.c.confidence_score,
                 income_invoices_table.c.original_filename,
             )
             .where(income_invoices_table.c.user_id == data_owner_id)
@@ -3362,6 +3384,8 @@ def list_income_invoices():
             "vat_amount": float(row["vat_amount"]) if row["vat_amount"] is not None else None,
             "total_amount": float(row["total_amount"]),
             "vat_breakdown": row["vat_breakdown"],
+            "extraction_source": row.get("extraction_source"),
+            "confidence_score": float(row["confidence_score"]) if row["confidence_score"] is not None else None,
             "original_filename": row["original_filename"],
         }
         for row in rows
@@ -3408,6 +3432,10 @@ def create_income_invoices():
                 or (payment_dates[0] if payment_dates else None),
             )
             analysis_text = entry.get("analysisText") or entry.get("ocrText")
+            extraction_source = (
+                entry.get("extractionSource") or entry.get("extraction_source")
+            )
+            confidence_score = entry.get("confidenceScore") or entry.get("confidence_score")
 
             if not stored_name:
                 errors.append(f"Archivo faltante para {original_name}.")
@@ -3468,6 +3496,8 @@ def create_income_invoices():
                     payment_date=payment_date,
                     payment_dates=json.dumps(payment_dates) if payment_dates else None,
                     ocr_text=analysis_text,
+                    extraction_source=extraction_source,
+                    confidence_score=confidence_score,
                     created_at=created_at,
                 )
             )
