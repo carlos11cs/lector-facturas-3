@@ -91,16 +91,48 @@ function hideLowQualityModal() {
   document.body.classList.remove("modal-open");
 }
 
+const currencyFormatter = new Intl.NumberFormat("es-ES", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
 function formatCurrency(value) {
-  const number = Number(value || 0);
-  return `${number.toFixed(2).replace(".", ",")} €`;
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "0,00 €";
+  }
+  return `${currencyFormatter.format(number)} €`;
+}
+
+function formatPercent(value) {
+  if (value === null || value === undefined || value === "") {
+    return "-";
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "-";
+  }
+  const digits = Number.isInteger(number) ? 0 : 2;
+  const formatter = new Intl.NumberFormat("es-ES", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+  return `${formatter.format(number)} %`;
 }
 
 function parseNumberInput(value) {
   if (value === null || value === undefined || value === "") {
     return null;
   }
-  const cleaned = String(value).replace(",", ".").trim();
+  let cleaned = String(value)
+    .replace(/[%€]/g, "")
+    .replace(/\s/g, "")
+    .trim();
+  if (cleaned.includes(",") && cleaned.includes(".")) {
+    cleaned = cleaned.replace(/\./g, "").replace(",", ".");
+  } else {
+    cleaned = cleaned.replace(",", ".");
+  }
   const numeric = Number(cleaned);
   return Number.isNaN(numeric) ? null : numeric;
 }
@@ -797,13 +829,13 @@ function getVatDisplayFromInvoice(invoice) {
   if (rates.length > 1) {
     return {
       label: "Mixto",
-      title: `IVA: ${rates.map((rate) => `${rate}%`).join(" · ")}`,
+      title: `IVA: ${rates.map((rate) => formatPercent(rate).replace(" ", "")).join(" · ")}`,
     };
   }
   if (rates.length === 1) {
-    return { label: `${rates[0]}%`, title: "" };
+    return { label: formatPercent(rates[0]), title: "" };
   }
-  return { label: `${invoice.vat_rate}%`, title: "" };
+  return { label: formatPercent(invoice.vat_rate), title: "" };
 }
 
 function formatExpenseCategory(category) {
@@ -4586,7 +4618,7 @@ function renderNoInvoiceExpenses(expenses) {
         expense.vat_rate ?? expense.vat_rate_no_invoice ?? null;
       const vatValue =
         expense.vat_amount ?? expense.vat_amount_no_invoice ?? 0;
-      vatRateTd.textContent = rateValue !== null ? `${rateValue}%` : "-";
+      vatRateTd.textContent = formatPercent(rateValue);
       vatAmountTd.textContent = formatCurrency(vatValue);
     } else {
       vatRateTd.textContent = "-";
@@ -5441,7 +5473,7 @@ function renderBillingEntries(entries) {
     baseTd.textContent = formatCurrency(entry.base);
 
     const vatTd = document.createElement("td");
-    vatTd.textContent = `${entry.vat}%`;
+    vatTd.textContent = formatPercent(entry.vat);
 
     const vatAmountTd = document.createElement("td");
     vatAmountTd.textContent = formatCurrency(entry.vatAmount);
