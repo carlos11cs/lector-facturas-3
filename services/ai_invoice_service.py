@@ -8,10 +8,20 @@ from datetime import date, timedelta
 from typing import Any, Dict, Optional, List, Tuple
 
 import mimetypes
-import fitz  # PyMuPDF
-import httpx
-import openai
-from openai import OpenAI
+try:
+    import fitz  # PyMuPDF
+except ModuleNotFoundError:
+    fitz = None
+try:
+    import httpx
+except ModuleNotFoundError:
+    httpx = None
+try:
+    import openai
+    from openai import OpenAI
+except ModuleNotFoundError:
+    openai = None
+    OpenAI = None
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +34,8 @@ OCR_MAX_SECONDS = int(os.getenv("OCR_MAX_SECONDS", "7"))
 OCR_MAX_DIM = int(os.getenv("OCR_MAX_DIM", "1600"))
 _client: Optional[OpenAI] = None
 _ocr_reader = None
+_EU_AMOUNT_RE = re.compile(r"\d{1,3}(?:[.\s]\d{3})*,\d{2}|\d+,\d{2}")
+_EU_THOUSANDS_RE = re.compile(r"^\d{1,3}\.\d{3},\d{2}$")
 
 
 def _get_client() -> OpenAI:
@@ -31,34 +43,53 @@ def _get_client() -> OpenAI:
     if _client is not None:
         return _client
 
+    if OpenAI is None or openai is None:
+        raise RuntimeError("openai no esta instalado")
+
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY no configurada")
 
     logger.info("OpenAI SDK version: %s", openai.__version__)
-    logger.info("httpx version: %s", httpx.__version__)
+    if httpx is not None:
+        logger.info("httpx version: %s", httpx.__version__)
 
     _client = OpenAI(api_key=api_key)
     return _client
 
 
-def _extract_json(text: str) -> Dict[str, Any]:
+def extract_first_json_object(text: str) -> Optional[Dict[str, Any]]:
     if not text:
-        return {}
+        return None
     cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```[a-zA-Z]*", "", cleaned)
-        cleaned = cleaned.strip("` \n")
+    cleaned = re.sub(r"```[a-zA-Z]*", "", cleaned)
+    cleaned = cleaned.replace("```", "")
+    start = cleaned.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    end = None
+    for idx in range(start, len(cleaned)):
+        char = cleaned[idx]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                end = idx
+                break
+    if end is None:
+        return None
+    snippet = cleaned[start : end + 1]
     try:
-        return json.loads(cleaned)
+        return json.loads(snippet)
     except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except json.JSONDecodeError:
-                return {}
-    return {}
+        return None
+
+
+def _extract_json(text: str) -> Dict[str, Any]:
+    data = extract_first_json_object(text)
+    return data if isinstance(data, dict) else {}
 
 
 def _normalize_date(value: Optional[str]) -> Optional[str]:
@@ -188,13 +219,43 @@ def _pick_first_non_empty(*values: Any) -> Any:
     return None
 
 
+def parse_eu_amount(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    raw = str(value)
+    raw = raw.replace("EUR", "").replace("€", "").replace("EURO", "").replace("EUROS", "")
+    raw = raw.strip()
+    raw = re.sub(r"\s+", "", raw)
+    if not raw:
+        return None
+    sign = -1 if raw.startswith("-") else 1
+    raw = raw.lstrip("+-")
+    raw = raw.replace(".", "").replace(",", ".")
+    raw = re.sub(r"[^\d.]", "", raw)
+    if not raw:
+        return None
+    try:
+        return sign * float(raw)
+    except ValueError:
+        return None
+
+
 def _normalize_amount(value: Any) -> Optional[float]:
     if value is None:
         return None
     if isinstance(value, (int, float)):
         return float(value)
-    raw = str(value).replace("EUR", "").replace("euro", "").strip()
+    raw = str(value).replace("EUR", "").replace("euro", "").replace("€", "").strip()
     raw = raw.replace(" ", "")
+    if re.match(r"^\d{1,3}(?:,\d{3})+\.\d{2}$", raw):
+        try:
+            return float(raw.replace(",", ""))
+        except ValueError:
+            return None
+    if "," in raw:
+        parsed = parse_eu_amount(raw)
+        if parsed is not None:
+            return parsed
     if raw.count(",") >= 1 and raw.count(".") >= 1:
         raw = raw.replace(".", "").replace(",", ".")
     elif raw.count(",") == 1 and raw.count(".") == 0:
@@ -334,6 +395,267 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
             total_amount = _normalize_amount(currency_matches[-1])
     vat_amount = find_amount_for_keywords(["I.V.A", "IVA"])
     return {"base": base_amount, "vat": vat_amount, "total": total_amount}
+
+
+def _extract_invoice_date_from_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for idx, line in enumerate(lines):
+        lowered = line.lower()
+        if "vencimiento" in lowered or "fecha de pago" in lowered:
+            continue
+        if "factura" in lowered and "fecha" in lowered:
+            if "dias" in lowered:
+                continue
+            if idx > 0 and "vencimiento" in lines[idx - 1].lower():
+                continue
+            found = _extract_first_date(line)
+            if found:
+                return found
+        if lowered.startswith("fecha") or " fecha " in lowered:
+            found = _extract_first_date(line)
+            if found:
+                return found
+            for offset in range(1, 11):
+                if idx + offset < len(lines):
+                    candidate = _extract_first_date(lines[idx + offset])
+                    if candidate:
+                        return candidate
+    return None
+
+
+def _extract_tax_summary_from_text(text: str) -> Dict[str, Any]:
+    if not text:
+        return {"found": False}
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return {"found": False}
+    start_idx = None
+    for idx, line in enumerate(lines):
+        if "IMPUESTOS" in line.upper():
+            start_idx = idx
+            break
+    if start_idx is None:
+        for idx, line in enumerate(lines):
+            if "BASE IMPONIBLE" in line.upper():
+                start_idx = idx
+                break
+    if start_idx is None:
+        return {"found": False}
+    block = lines[start_idx : start_idx + 20]
+
+    def find_amount_after_keywords(
+        keywords: List[str],
+        *,
+        forbid_if_contains: Optional[List[str]] = None,
+        prefer_last: bool = False,
+    ) -> Tuple[Optional[float], Optional[str]]:
+        for idx, line in enumerate(block):
+            upper = line.upper()
+            if any(keyword in upper for keyword in keywords):
+                if forbid_if_contains and any(token in upper for token in forbid_if_contains):
+                    continue
+                candidates: List[str] = []
+                for offset in range(0, 8):
+                    if idx + offset >= len(block):
+                        break
+                    next_line = block[idx + offset]
+                    matches = _EU_AMOUNT_RE.findall(next_line)
+                    if matches:
+                        candidates.extend(matches)
+                if candidates:
+                    raw_value = candidates[-1] if prefer_last else candidates[0]
+                    return parse_eu_amount(raw_value), raw_value
+        return None, None
+
+    rate_value = None
+    rate_raw = None
+    for line in block:
+        if "IVA" in line.upper() or "%" in line:
+            match = re.search(r"(\d{1,2}(?:[.,]\d{1,2})?)\s*%?", line)
+            if match:
+                candidate_rate = _normalize_rate(match.group(1))
+                if candidate_rate is not None and candidate_rate <= 30:
+                    rate_value = candidate_rate
+                    rate_raw = match.group(1)
+                    break
+
+    base_value, base_raw = find_amount_after_keywords(
+        ["BASE IMPONIBLE", "BASE IVA", "BASE I.V.A", "B.IMPON", "BASE"],
+        forbid_if_contains=["TOTAL", "IVA", "I.V.A"],
+        prefer_last=False,
+    )
+    vat_value, vat_raw = find_amount_after_keywords(
+        ["I.V.A", "IVA"],
+        forbid_if_contains=["REC", "RECARGO"],
+        prefer_last=False,
+    )
+    total_value, total_raw = find_amount_after_keywords(
+        ["TOTAL"],
+        forbid_if_contains=["BRUTO", "IMPONIBLE", "I.V.A", "IVA", "REC"],
+        prefer_last=True,
+    )
+
+    amount_candidates: List[Tuple[float, str]] = []
+    for line in block:
+        for raw in _EU_AMOUNT_RE.findall(line):
+            parsed = parse_eu_amount(raw)
+            if parsed is None:
+                continue
+            amount_candidates.append((parsed, raw))
+    if rate_value is None and amount_candidates:
+        for candidate, raw in amount_candidates:
+            if 0 < candidate <= 30:
+                rate_value = _normalize_rate(candidate)
+                rate_raw = raw
+                break
+    if rate_value is not None:
+        amount_candidates = [
+            (value, raw)
+            for (value, raw) in amount_candidates
+            if abs(value - rate_value) > 0.1
+        ]
+
+    if rate_value is not None and amount_candidates:
+        for base_candidate, base_candidate_raw in amount_candidates:
+            if base_candidate <= 0:
+                continue
+            expected_vat = round(base_candidate * (rate_value / 100), 2)
+            vat_match = None
+            for vat_candidate, vat_candidate_raw in amount_candidates:
+                if abs(vat_candidate - expected_vat) <= 0.05:
+                    vat_match = (vat_candidate, vat_candidate_raw)
+                    break
+            if vat_match:
+                computed_total = round(base_candidate + vat_match[0], 2)
+                total_match = None
+                for total_candidate, total_candidate_raw in amount_candidates:
+                    if abs(total_candidate - computed_total) <= 0.05:
+                        total_match = (total_candidate, total_candidate_raw)
+                        break
+                if base_value is None:
+                    base_value, base_raw = base_candidate, base_candidate_raw
+                if vat_value is None:
+                    vat_value, vat_raw = vat_match
+                if total_value is None:
+                    total_value, total_raw = (
+                        total_match if total_match else (computed_total, None)
+                    )
+                break
+
+    if base_value is not None and rate_value is not None:
+        expected_vat = round(base_value * (rate_value / 100), 2)
+        if vat_value is None or abs(vat_value - expected_vat) > 0.05:
+            vat_value = expected_vat
+        expected_total = round(base_value + (vat_value or 0), 2)
+        if total_value is None or abs(total_value - expected_total) > 0.05:
+            total_value = expected_total
+
+    if base_value is not None and vat_value is None and rate_value is not None:
+        vat_value = round(base_value * (rate_value / 100), 2)
+    if base_value is not None and vat_value is not None and total_value is None:
+        total_value = round(base_value + vat_value, 2)
+    if base_value is not None and total_value is not None and vat_value is None:
+        vat_value = round(total_value - base_value, 2)
+    if rate_value is None and base_value and vat_value:
+        if base_value > 0:
+            rate_value = round(100 * vat_value / base_value, 2)
+
+    found = any(value is not None for value in (base_value, vat_value, total_value))
+    return {
+        "found": found,
+        "base_amount": base_value,
+        "vat_amount": vat_value,
+        "total_amount": total_value,
+        "vat_rate": rate_value,
+        "base_raw": base_raw,
+        "vat_raw": vat_raw,
+        "total_raw": total_raw,
+        "rate_raw": rate_raw,
+        "source": "regex_tax_summary" if found else None,
+    }
+
+
+def _apply_tax_summary_override(
+    text: str,
+    base_amount: Optional[float],
+    vat_amount: Optional[float],
+    total_amount: Optional[float],
+    vat_rate: Optional[float],
+    summary: Optional[Dict[str, Any]],
+) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float], str]:
+    source = "llm"
+    if not summary or not summary.get("found"):
+        return base_amount, vat_amount, total_amount, vat_rate, source
+
+    summary_base = summary.get("base_amount")
+    summary_vat = summary.get("vat_amount")
+    summary_total = summary.get("total_amount")
+    summary_rate = summary.get("vat_rate") or vat_rate
+    summary_base_raw = summary.get("base_raw")
+
+    def within_tolerance(a: float, b: float) -> bool:
+        return abs(a - b) <= 0.03
+
+    if summary_base is not None and summary_rate is not None and summary_vat is None:
+        summary_vat = round(summary_base * (summary_rate / 100), 2)
+    if summary_base is not None and summary_vat is not None and summary_total is None:
+        summary_total = round(summary_base + summary_vat, 2)
+    if summary_base is not None and summary_total is not None and summary_vat is None:
+        summary_vat = round(summary_total - summary_base, 2)
+    if summary_rate is None and summary_base and summary_vat:
+        summary_rate = round(100 * summary_vat / summary_base, 2)
+
+    summary_math_ok = (
+        summary_base is not None
+        and summary_vat is not None
+        and summary_total is not None
+        and within_tolerance(summary_base + summary_vat, summary_total)
+    )
+    llm_math_ok = _validate_math(base_amount, vat_amount, total_amount).get("is_consistent")
+
+    if (
+        summary_base_raw
+        and isinstance(summary_base_raw, str)
+        and _EU_THOUSANDS_RE.match(summary_base_raw)
+        and base_amount is not None
+        and summary_base is not None
+    ):
+        diff = abs(summary_base - base_amount)
+        if 150 <= diff <= 350:
+            base_amount = summary_base
+            vat_amount = summary_vat
+            total_amount = summary_total
+            vat_rate = summary_rate
+            source = "regex_tax_summary"
+            return base_amount, vat_amount, total_amount, vat_rate, source
+
+    if summary_math_ok and (not llm_math_ok):
+        base_amount = summary_base
+        vat_amount = summary_vat
+        total_amount = summary_total
+        vat_rate = summary_rate
+        source = "regex_tax_summary"
+        return base_amount, vat_amount, total_amount, vat_rate, source
+
+    if summary_math_ok:
+        base_amount = summary_base
+        vat_amount = summary_vat
+        total_amount = summary_total
+        vat_rate = summary_rate
+        source = "regex_tax_summary"
+        return base_amount, vat_amount, total_amount, vat_rate, source
+
+    if summary_base is not None or summary_total is not None:
+        base_amount = summary_base or base_amount
+        vat_amount = summary_vat or vat_amount
+        total_amount = summary_total or total_amount
+        vat_rate = summary_rate or vat_rate
+        source = "regex_tax_summary"
+        return base_amount, vat_amount, total_amount, vat_rate, source
+
+    return base_amount, vat_amount, total_amount, vat_rate, source
 
 
 def _maybe_override_amounts_from_text(
@@ -919,6 +1241,9 @@ def _has_amount_hints(text: str) -> bool:
 
 
 def _extract_pdf_text(file_path: str) -> str:
+    if fitz is None:
+        logger.warning("PyMuPDF no disponible. Texto PDF no extraido.")
+        return ""
     with fitz.open(file_path) as doc:
         parts = []
         for page in doc:
@@ -927,6 +1252,9 @@ def _extract_pdf_text(file_path: str) -> str:
 
 
 def _extract_pdf_text_from_bytes(data: bytes) -> str:
+    if fitz is None:
+        logger.warning("PyMuPDF no disponible. Texto PDF no extraido.")
+        return ""
     with fitz.open(stream=data, filetype="pdf") as doc:
         parts = []
         for page in doc:
@@ -980,6 +1308,9 @@ def _get_ocr_reader():
 
 
 def _extract_pdf_text_ocr(file_path: str) -> str:
+    if fitz is None:
+        logger.warning("PyMuPDF no disponible. OCR PDF omitido.")
+        return ""
     reader = _get_ocr_reader()
     if reader is None:
         return ""
@@ -1020,6 +1351,9 @@ def _extract_pdf_text_ocr(file_path: str) -> str:
 
 
 def _extract_pdf_text_ocr_from_bytes(data: bytes) -> str:
+    if fitz is None:
+        logger.warning("PyMuPDF no disponible. OCR PDF omitido.")
+        return ""
     reader = _get_ocr_reader()
     if reader is None:
         return ""
@@ -1202,6 +1536,17 @@ def analyze_invoice(
             "validation": {"is_consistent": None, "difference": None},
         }
 
+    tax_summary = _extract_tax_summary_from_text(extracted_text)
+    if tax_summary.get("found"):
+        logger.info(
+            "Resumen impuestos detectado (%s): base=%s iva=%s total=%s rate=%s",
+            filename,
+            tax_summary.get("base_amount"),
+            tax_summary.get("vat_amount"),
+            tax_summary.get("total_amount"),
+            tax_summary.get("vat_rate"),
+        )
+
     is_income = document_type == "income"
     if is_income:
         prompt = (
@@ -1245,6 +1590,8 @@ def analyze_invoice(
     logger.info("Respuesta cruda modelo (%s): %s", filename, raw_text)
 
     data = _extract_json(raw_text)
+    if not data:
+        logger.warning("No se pudo extraer JSON valido (%s). Se usara regex/fallback.", filename)
 
     provider_name = (
         data.get("supplier")
@@ -1261,6 +1608,8 @@ def analyze_invoice(
     invoice_date = _normalize_date(
         data.get("invoice_date") or data.get("fecha_factura") or data.get("fecha")
     )
+    if invoice_date is None:
+        invoice_date = _extract_invoice_date_from_text(extracted_text)
     payment_dates: List[str] = []
     raw_payment_dates = (
         data.get("payment_dates")
@@ -1351,9 +1700,25 @@ def analyze_invoice(
     payment_dates = sorted({d for d in payment_dates if d})
     payment_date = payment_dates[0] if payment_dates else None
 
-    base_amount, vat_amount, total_amount = _maybe_override_amounts_from_text(
-        extracted_text, base_amount, vat_amount, total_amount, vat_rate
+    amount_source = "llm" if data else "fallback"
+    (
+        base_amount,
+        vat_amount,
+        total_amount,
+        vat_rate,
+        tax_source,
+    ) = _apply_tax_summary_override(
+        extracted_text, base_amount, vat_amount, total_amount, vat_rate, tax_summary
     )
+    if tax_source == "regex_tax_summary":
+        amount_source = tax_source
+    else:
+        before_values = (base_amount, vat_amount, total_amount)
+        base_amount, vat_amount, total_amount = _maybe_override_amounts_from_text(
+            extracted_text, base_amount, vat_amount, total_amount, vat_rate
+        )
+        if (base_amount, vat_amount, total_amount) != before_values and amount_source != "llm":
+            amount_source = "fallback"
 
     assumed_vat = False
     if vat_rate is None and not _has_vat_exemption_indicators(extracted_text):
@@ -1382,6 +1747,7 @@ def analyze_invoice(
             total_amount,
         )
 
+    logger.info("Fuente importes (%s): %s", filename, amount_source)
     logger.info(
         "Valores detectados (%s): proveedor=%s cliente=%s fecha=%s pago=%s base=%s iva_rate=%s iva_importe=%s total=%s",
         filename,
