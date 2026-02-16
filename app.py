@@ -800,7 +800,7 @@ def parse_amount(value):
         raw = raw.replace(",", ".")
     elif raw.count(".") >= 1 and raw.count(",") == 0:
         parts = raw.split(".")
-        if len(parts[-1]) == 2:
+        if len(parts[-1]) <= 2:
             raw = "".join(parts[:-1]) + "." + parts[-1]
         else:
             raw = raw.replace(".", "")
