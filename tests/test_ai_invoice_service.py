@@ -100,6 +100,10 @@ class TestAiInvoiceService(unittest.TestCase):
         self.assertAlmostEqual(svc._confidence_score_for_source("llm"), 0.85, places=2)
         self.assertAlmostEqual(svc._confidence_score_for_source("fallback"), 0.60, places=2)
 
+    def test_llm_amounts_trustworthy(self):
+        self.assertTrue(svc._is_llm_amounts_trustworthy(362.58, 21.0, 76.14, 438.72))
+        self.assertFalse(svc._is_llm_amounts_trustworthy(21.0, 21.0, 21.0, 61.98))
+
 
 if __name__ == "__main__":
     unittest.main()

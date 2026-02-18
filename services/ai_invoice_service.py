@@ -209,6 +209,25 @@ def _normalize_rate(value: Any) -> Optional[float]:
     return float(round(numeric, 2))
 
 
+def _is_llm_amounts_trustworthy(
+    base_amount: Optional[float],
+    vat_rate: Optional[float],
+    vat_amount: Optional[float],
+    total_amount: Optional[float],
+) -> bool:
+    if base_amount is None or vat_rate is None or vat_amount is None or total_amount is None:
+        return False
+    if vat_rate < 0 or vat_rate > 30:
+        return False
+    if base_amount < 0 or vat_amount < 0 or total_amount < 0:
+        return False
+    if total_amount < base_amount:
+        return False
+    if abs(total_amount - (base_amount + vat_amount)) > 0.02:
+        return False
+    return True
+
+
 def _pick_first_non_empty(*values: Any) -> Any:
     for value in values:
         if value is None:
@@ -326,6 +345,16 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
         return {"base": None, "vat": None, "total": None}
     lines = [line.strip() for line in text.splitlines() if line.strip()]
 
+    def pick_best_amount(numbers: List[str]) -> Optional[float]:
+        values = [_normalize_amount(value) for value in numbers]
+        values = [value for value in values if value is not None]
+        if not values:
+            return None
+        large_values = [value for value in values if value > 30]
+        if large_values:
+            return max(large_values)
+        return values[-1]
+
     def find_amount_for_keywords(
         keywords: List[str],
         *,
@@ -346,7 +375,7 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
                 if require_single_amount and len(numbers) > 1:
                     continue
                 if numbers:
-                    amount = _normalize_amount(numbers[-1])
+                    amount = pick_best_amount(numbers)
                 if amount is None and idx + 1 < len(lines):
                     candidates = []
                     for offset in range(1, 8):
@@ -362,10 +391,10 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
                         has_currency = "€" in next_line or "EUR" in next_line.upper()
                         candidates.append((has_currency, numbers, next_line))
                         if has_currency:
-                            amount = _normalize_amount(numbers[-1])
+                            amount = pick_best_amount(numbers)
                             break
                     if amount is None and candidates:
-                        amount = _normalize_amount(candidates[0][1][0])
+                        amount = pick_best_amount(candidates[0][1])
                 if amount is not None:
                     return amount
         return None
@@ -1731,14 +1760,26 @@ def analyze_invoice(
         or data.get("vat_lines")
         or data.get("iva_lines")
     )
-    if not vat_breakdown:
-        vat_breakdown = _extract_vat_breakdown_from_text(extracted_text)
     breakdown_summary = _summarize_vat_breakdown(vat_breakdown)
     if breakdown_summary:
         base_amount, vat_amount, total_amount = breakdown_summary
         if vat_rate is None:
             if len({line.get("rate") for line in vat_breakdown if line.get("rate") is not None}) == 1:
                 vat_rate = vat_breakdown[0].get("rate")
+
+    llm_trustworthy = _is_llm_amounts_trustworthy(
+        base_amount, vat_rate, vat_amount, total_amount
+    )
+    logger.info("Importes LLM confiables (%s): %s", filename, llm_trustworthy)
+
+    if not vat_breakdown and not llm_trustworthy:
+        vat_breakdown = _extract_vat_breakdown_from_text(extracted_text)
+        breakdown_summary = _summarize_vat_breakdown(vat_breakdown)
+        if breakdown_summary:
+            base_amount, vat_amount, total_amount = breakdown_summary
+            if vat_rate is None:
+                if len({line.get("rate") for line in vat_breakdown if line.get("rate") is not None}) == 1:
+                    vat_rate = vat_breakdown[0].get("rate")
 
     if company_names is None:
         company_names = []
@@ -1773,24 +1814,25 @@ def analyze_invoice(
     payment_date = payment_dates[0] if payment_dates else None
 
     amount_source = "llm" if data else "fallback"
-    (
-        base_amount,
-        vat_amount,
-        total_amount,
-        vat_rate,
-        tax_source,
-    ) = _apply_tax_summary_override(
-        extracted_text, base_amount, vat_amount, total_amount, vat_rate, tax_summary
-    )
-    if tax_source == "regex_tax_summary":
-        amount_source = tax_source
-    else:
-        before_values = (base_amount, vat_amount, total_amount)
-        base_amount, vat_amount, total_amount = _maybe_override_amounts_from_text(
-            extracted_text, base_amount, vat_amount, total_amount, vat_rate
+    if not llm_trustworthy:
+        (
+            base_amount,
+            vat_amount,
+            total_amount,
+            vat_rate,
+            tax_source,
+        ) = _apply_tax_summary_override(
+            extracted_text, base_amount, vat_amount, total_amount, vat_rate, tax_summary
         )
-        if (base_amount, vat_amount, total_amount) != before_values and amount_source != "llm":
-            amount_source = "fallback"
+        if tax_source == "regex_tax_summary":
+            amount_source = tax_source
+        else:
+            before_values = (base_amount, vat_amount, total_amount)
+            base_amount, vat_amount, total_amount = _maybe_override_amounts_from_text(
+                extracted_text, base_amount, vat_amount, total_amount, vat_rate
+            )
+            if (base_amount, vat_amount, total_amount) != before_values and amount_source != "llm":
+                amount_source = "fallback"
 
     assumed_vat = False
     if vat_rate is None and not _has_vat_exemption_indicators(extracted_text):
