@@ -126,6 +126,22 @@ def _extract_first_date(text: str) -> Optional[str]:
     return None
 
 
+def extract_payment_terms_days(text: str) -> Optional[int]:
+    if not text:
+        return None
+    match = re.search(
+        r"RECIBO\s+(\d+)\s+DIAS\s+FECHA\s+FACTURA",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+    return None
+
+
 def _find_payment_date_by_keywords(text: str) -> Optional[str]:
     if not text:
         return None
@@ -1268,6 +1284,123 @@ def _confidence_score_for_source(source: Optional[str]) -> Optional[float]:
     return mapping.get(source)
 
 
+def _group_standard_vat_rate(rate: Optional[float], tolerance: float = 0.25) -> Optional[float]:
+    if rate is None:
+        return None
+    for standard in (0.0, 4.0, 10.0, 21.0):
+        if abs(rate - standard) <= tolerance:
+            return standard
+    return rate
+
+
+def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
+    result = dict(extracted or {})
+    totals_payload = result.get("totals") if isinstance(result.get("totals"), dict) else {}
+
+    base_amount = _normalize_amount(
+        totals_payload.get("base")
+        or totals_payload.get("base_amount")
+        or result.get("base_amount")
+    )
+    vat_amount = _normalize_amount(
+        totals_payload.get("vat")
+        or totals_payload.get("vat_amount")
+        or result.get("vat_amount")
+    )
+    total_amount = _normalize_amount(
+        totals_payload.get("total")
+        or totals_payload.get("total_amount")
+        or result.get("total_amount")
+    )
+    vat_rate = _normalize_rate(result.get("vat_rate"))
+
+    raw_breakdown = result.get("vat_breakdown") or []
+    if isinstance(raw_breakdown, str):
+        try:
+            raw_breakdown = json.loads(raw_breakdown)
+        except json.JSONDecodeError:
+            raw_breakdown = []
+    if isinstance(raw_breakdown, dict):
+        raw_breakdown = [raw_breakdown]
+
+    normalized_breakdown: List[Dict[str, Any]] = []
+    for line in raw_breakdown:
+        if not isinstance(line, dict):
+            continue
+        base_line = _normalize_amount(line.get("base") or line.get("base_amount"))
+        vat_line = _normalize_amount(line.get("vat_amount") or line.get("vat"))
+        if base_line is None or vat_line is None:
+            continue
+        rate_calc = round((vat_line / base_line) * 100, 2) if base_line > 0 else None
+        rate_final = _group_standard_vat_rate(rate_calc)
+        line_total = round(base_line + vat_line, 2)
+        normalized_breakdown.append(
+            {
+                "base": _round_amount(base_line),
+                "vat_amount": _round_amount(vat_line),
+                "rate": rate_final,
+                "total": _round_amount(line_total),
+            }
+        )
+
+    amount_source = "llm"
+    if normalized_breakdown:
+        base_sum = round(sum(line["base"] or 0 for line in normalized_breakdown), 2)
+        vat_sum = round(sum(line["vat_amount"] or 0 for line in normalized_breakdown), 2)
+        total_sum = round(base_sum + vat_sum, 2)
+
+        def totals_match(a: Optional[float], b: Optional[float]) -> bool:
+            if a is None or b is None:
+                return False
+            return abs(a - b) <= 0.02
+
+        if (
+            base_amount is None
+            or vat_amount is None
+            or total_amount is None
+            or not totals_match(base_amount, base_sum)
+            or not totals_match(vat_amount, vat_sum)
+            or not totals_match(total_amount, total_sum)
+        ):
+            base_amount = base_sum
+            vat_amount = vat_sum
+            total_amount = total_sum
+
+    analysis_status = result.get("analysis_status") or "ok"
+    if (
+        base_amount is None
+        or vat_amount is None
+        or total_amount is None
+        or abs((base_amount + vat_amount) - total_amount) > 0.02
+    ):
+        analysis_status = "partial"
+        base_amount = None
+        vat_amount = None
+        total_amount = None
+        vat_rate = None
+        normalized_breakdown = []
+        amount_source = "fallback"
+
+    if normalized_breakdown:
+        if len(normalized_breakdown) == 1:
+            vat_rate = normalized_breakdown[0].get("rate")
+        else:
+            vat_rate = None
+
+    result.update(
+        {
+            "base_amount": _round_amount(base_amount),
+            "vat_amount": _round_amount(vat_amount),
+            "total_amount": _round_amount(total_amount),
+            "vat_rate": vat_rate,
+            "vat_breakdown": normalized_breakdown,
+            "analysis_status": analysis_status,
+            "amount_source": amount_source,
+        }
+    )
+    return result
+
+
 def _has_vat_exemption_indicators(text: str) -> bool:
     if not text:
         return False
@@ -1637,25 +1770,19 @@ def analyze_invoice(
             "validation": {"is_consistent": None, "difference": None},
         }
 
-    tax_summary = _extract_tax_summary_from_text(extracted_text)
-    if tax_summary.get("found"):
-        logger.info(
-            "Resumen impuestos detectado (%s): base=%s iva=%s total=%s rate=%s",
-            filename,
-            tax_summary.get("base_amount"),
-            tax_summary.get("vat_amount"),
-            tax_summary.get("total_amount"),
-            tax_summary.get("vat_rate"),
-        )
-
     is_income = document_type == "income"
     if is_income:
         prompt = (
             "Analiza el siguiente texto extraido de una factura emitida (ingreso). "
             "Devuelve SOLO JSON valido con estas claves: "
-            "client, invoice_date, payment_dates, base_amount, vat_rate, vat_amount, total_amount, vat_breakdown. "
-            "vat_breakdown es una lista opcional de lineas IVA con {rate, base, vat_amount, total}. "
-            "payment_dates debe ser una lista de fechas (YYYY-MM-DD) y puede estar vacia. "
+            "client, invoice_date, payment_terms_days, payment_dates, totals, vat_breakdown. "
+            "totals es un objeto con {base, vat, total} (pueden ser null). "
+            "vat_breakdown es una lista de lineas IVA con {base, vat_amount} y opcional {rate}. "
+            "Si hay varias lineas IVA, NO rellenes un vat_rate unico (deja rate en cada linea o null). "
+            "payment_terms_days es el numero de dias si aparece una condicion tipo "
+            "\"RECIBO X DIAS FECHA FACTURA\". "
+            "Si hay payment_terms_days y invoice_date, devuelve payment_dates con invoice_date + X dias. "
+            "payment_dates debe ser una lista (YYYY-MM-DD) y puede estar vacia. "
             "Usa null si no puedes inferir un dato con seguridad. "
             "No incluyas texto adicional fuera del JSON.\n\n"
             f"TEXTO_FACTURA:\n{extracted_text}"
@@ -1664,10 +1791,15 @@ def analyze_invoice(
         prompt = (
             "Analiza el siguiente texto extraido de una factura recibida (gasto). "
             "Devuelve SOLO JSON valido con estas claves: "
-            "supplier, invoice_date, payment_dates, base_amount, vat_rate, vat_amount, total_amount, vat_breakdown. "
-            "vat_breakdown es una lista opcional de lineas IVA con {rate, base, vat_amount, total}. "
+            "supplier, invoice_date, payment_terms_days, payment_dates, totals, vat_breakdown. "
+            "totals es un objeto con {base, vat, total} (pueden ser null). "
+            "vat_breakdown es una lista de lineas IVA con {base, vat_amount} y opcional {rate}. "
+            "Si hay varias lineas IVA, NO rellenes un vat_rate unico (deja rate en cada linea o null). "
             "El supplier debe ser la razon social del emisor (forma juridica si aparece) "
             "y no debe ser el cliente/receptor. "
+            "payment_terms_days es el numero de dias si aparece una condicion tipo "
+            "\"RECIBO X DIAS FECHA FACTURA\". "
+            "Si hay payment_terms_days y invoice_date, devuelve payment_dates con invoice_date + X dias. "
             "payment_dates debe ser una lista de fechas (YYYY-MM-DD) y puede estar vacia. "
             "Usa null si no puedes inferir un dato con seguridad. "
             "No incluyas texto adicional fuera del JSON.\n\n"
@@ -1680,6 +1812,8 @@ def analyze_invoice(
         model=DEFAULT_MODEL,
         max_tokens=MAX_OUTPUT_TOKENS,
         temperature=0,
+        top_p=1,
+        seed=42,
         messages=[
             {"role": "user", "content": prompt},
         ],
@@ -1711,6 +1845,12 @@ def analyze_invoice(
     )
     if invoice_date is None:
         invoice_date = _extract_invoice_date_from_text(extracted_text)
+    payment_terms_days = data.get("payment_terms_days") or data.get("payment_terms")
+    try:
+        payment_terms_days = int(payment_terms_days) if payment_terms_days is not None else None
+    except (TypeError, ValueError):
+        payment_terms_days = None
+
     payment_dates: List[str] = []
     raw_payment_dates = (
         data.get("payment_dates")
@@ -1737,8 +1877,13 @@ def analyze_invoice(
     )
     if single_payment_date:
         payment_dates.append(single_payment_date)
+    totals_payload = data.get("totals") if isinstance(data.get("totals"), dict) else {}
     base_amount = _normalize_amount(
-        data.get("base_amount") or data.get("base_imponible") or data.get("base")
+        totals_payload.get("base")
+        or totals_payload.get("base_amount")
+        or data.get("base_amount")
+        or data.get("base_imponible")
+        or data.get("base")
     )
     vat_rate = _normalize_rate(
         _pick_first_non_empty(
@@ -1749,37 +1894,26 @@ def analyze_invoice(
         )
     )
     vat_amount = _normalize_amount(
-        data.get("vat_amount") or data.get("importe_iva") or data.get("iva_importe")
+        totals_payload.get("vat")
+        or totals_payload.get("vat_amount")
+        or data.get("vat_amount")
+        or data.get("importe_iva")
+        or data.get("iva_importe")
     )
     total_amount = _normalize_amount(
-        data.get("total_amount") or data.get("total_factura") or data.get("total")
+        totals_payload.get("total")
+        or totals_payload.get("total_amount")
+        or data.get("total_amount")
+        or data.get("total_factura")
+        or data.get("total")
     )
-    vat_breakdown = _normalize_vat_breakdown(
+    vat_breakdown = (
         data.get("vat_breakdown")
         or data.get("iva_breakdown")
         or data.get("vat_lines")
         or data.get("iva_lines")
+        or []
     )
-    breakdown_summary = _summarize_vat_breakdown(vat_breakdown)
-    if breakdown_summary:
-        base_amount, vat_amount, total_amount = breakdown_summary
-        if vat_rate is None:
-            if len({line.get("rate") for line in vat_breakdown if line.get("rate") is not None}) == 1:
-                vat_rate = vat_breakdown[0].get("rate")
-
-    llm_trustworthy = _is_llm_amounts_trustworthy(
-        base_amount, vat_rate, vat_amount, total_amount
-    )
-    logger.info("Importes LLM confiables (%s): %s", filename, llm_trustworthy)
-
-    if not vat_breakdown and not llm_trustworthy:
-        vat_breakdown = _extract_vat_breakdown_from_text(extracted_text)
-        breakdown_summary = _summarize_vat_breakdown(vat_breakdown)
-        if breakdown_summary:
-            base_amount, vat_amount, total_amount = breakdown_summary
-            if vat_rate is None:
-                if len({line.get("rate") for line in vat_breakdown if line.get("rate") is not None}) == 1:
-                    vat_rate = vat_breakdown[0].get("rate")
 
     if company_names is None:
         company_names = []
@@ -1808,70 +1942,45 @@ def analyze_invoice(
                 heuristic_supplier = None
             provider_name = heuristic_supplier
 
+    if not payment_dates and payment_terms_days is None:
+        payment_terms_days = extract_payment_terms_days(extracted_text)
+    if not payment_dates and payment_terms_days is not None and invoice_date:
+        try:
+            base_date = date.fromisoformat(invoice_date)
+            payment_dates = [
+                (base_date + timedelta(days=payment_terms_days)).isoformat()
+            ]
+        except ValueError:
+            payment_dates = []
     if not payment_dates:
         payment_dates = _find_payment_dates_by_keywords(extracted_text, invoice_date)
     payment_dates = sorted({d for d in payment_dates if d})
     payment_date = payment_dates[0] if payment_dates else None
 
-    amount_source = "llm" if data else "fallback"
-    if not llm_trustworthy:
-        (
-            base_amount,
-            vat_amount,
-            total_amount,
-            vat_rate,
-            tax_source,
-        ) = _apply_tax_summary_override(
-            extracted_text, base_amount, vat_amount, total_amount, vat_rate, tax_summary
-        )
-        if tax_source == "regex_tax_summary":
-            amount_source = tax_source
-        else:
-            before_values = (base_amount, vat_amount, total_amount)
-            base_amount, vat_amount, total_amount = _maybe_override_amounts_from_text(
-                extracted_text, base_amount, vat_amount, total_amount, vat_rate
-            )
-            if (base_amount, vat_amount, total_amount) != before_values and amount_source != "llm":
-                amount_source = "fallback"
+    normalized = normalize_and_validate_amounts(
+        {
+            "analysis_status": analysis_status,
+            "base_amount": base_amount,
+            "vat_amount": vat_amount,
+            "total_amount": total_amount,
+            "vat_rate": vat_rate,
+            "vat_breakdown": vat_breakdown,
+            "totals": totals_payload,
+        }
+    )
 
-    assumed_vat = False
-    if vat_rate is None and not _has_vat_exemption_indicators(extracted_text):
-        vat_rate = 21.0
-        assumed_vat = True
-        if base_amount is not None:
-            vat_amount = round(base_amount * 0.21, 2)
-            total_amount = round(base_amount + vat_amount, 2)
-        elif total_amount is not None:
-            base_amount = round(total_amount / 1.21, 2)
-            vat_amount = round(total_amount - base_amount, 2)
-
-    base_amount = _round_amount(base_amount)
-    vat_amount = _round_amount(vat_amount)
-    total_amount = _round_amount(total_amount)
+    analysis_status = normalized.get("analysis_status") or analysis_status
+    base_amount = normalized.get("base_amount")
+    vat_amount = normalized.get("vat_amount")
+    total_amount = normalized.get("total_amount")
+    vat_rate = normalized.get("vat_rate")
+    vat_breakdown = normalized.get("vat_breakdown") or []
+    amount_source = normalized.get("amount_source") or ("llm" if data else "fallback")
 
     validation = _validate_math(base_amount, vat_amount, total_amount)
 
-    if assumed_vat:
-        logger.info(
-            "IVA asumido automaticamente (%s): rate=%s base=%s iva=%s total=%s",
-            filename,
-            vat_rate,
-            base_amount,
-            vat_amount,
-            total_amount,
-        )
-
     confidence_score = _confidence_score_for_source(amount_source)
     logger.info("Fuente importes (%s): %s", filename, amount_source)
-
-    vat_breakdown = _reconcile_vat_breakdown(
-        vat_breakdown,
-        base_amount,
-        vat_amount,
-        total_amount,
-        vat_rate,
-        amount_source,
-    )
     logger.info(
         "Valores detectados (%s): proveedor=%s cliente=%s fecha=%s pago=%s base=%s iva_rate=%s iva_importe=%s total=%s",
         filename,
@@ -1891,6 +2000,7 @@ def analyze_invoice(
         "provider_name": provider_name,
         "client_name": client_name,
         "invoice_date": invoice_date,
+        "payment_terms_days": payment_terms_days,
         "payment_dates": payment_dates,
         "payment_date": payment_date,
         "base_amount": base_amount,

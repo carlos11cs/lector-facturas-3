@@ -104,6 +104,53 @@ class TestAiInvoiceService(unittest.TestCase):
         self.assertTrue(svc._is_llm_amounts_trustworthy(362.58, 21.0, 76.14, 438.72))
         self.assertFalse(svc._is_llm_amounts_trustworthy(21.0, 21.0, 21.0, 61.98))
 
+    def test_normalize_multivat_rates_by_math(self):
+        extracted = {
+            "vat_breakdown": [
+                {"base": 18.86, "vat_amount": 3.96, "rate": 4},
+                {"base": 8.40, "vat_amount": 0.84, "rate": 21},
+            ],
+            "totals": {"base": None, "vat": None, "total": None},
+        }
+        normalized = svc.normalize_and_validate_amounts(extracted)
+        breakdown = normalized["vat_breakdown"]
+        self.assertEqual(len(breakdown), 2)
+        rates = sorted([line["rate"] for line in breakdown])
+        self.assertEqual(rates, [10.0, 21.0])
+        self.assertIsNone(normalized["vat_rate"])
+        self.assertAlmostEqual(normalized["base_amount"], 27.26, places=2)
+        self.assertAlmostEqual(normalized["vat_amount"], 4.8, places=2)
+        self.assertAlmostEqual(normalized["total_amount"], 32.06, places=2)
+
+    def test_totals_reconciled_from_breakdown(self):
+        extracted = {
+            "totals": {"base": 100.0, "vat": 10.0, "total": 110.0},
+            "vat_breakdown": [
+                {"base": 50.0, "vat_amount": 10.5},
+                {"base": 60.0, "vat_amount": 12.6},
+            ],
+        }
+        normalized = svc.normalize_and_validate_amounts(extracted)
+        self.assertAlmostEqual(normalized["base_amount"], 110.0, places=2)
+        self.assertAlmostEqual(normalized["vat_amount"], 23.1, places=2)
+        self.assertAlmostEqual(normalized["total_amount"], 133.1, places=2)
+
+    def test_partial_when_totals_incoherent(self):
+        extracted = {"totals": {"base": 100.0, "vat": 10.0, "total": 50.0}}
+        normalized = svc.normalize_and_validate_amounts(extracted)
+        self.assertEqual(normalized["analysis_status"], "partial")
+        self.assertIsNone(normalized["base_amount"])
+        self.assertIsNone(normalized["vat_amount"])
+        self.assertIsNone(normalized["total_amount"])
+
+    def test_payment_terms_15_days(self):
+        text = "RECIBO 15 DIAS FECHA FACTURA"
+        terms = svc.extract_payment_terms_days(text)
+        self.assertEqual(terms, 15)
+        invoice_date = "2020-02-26"
+        payment_date = (svc.date.fromisoformat(invoice_date) + svc.timedelta(days=terms)).isoformat()
+        self.assertEqual(payment_date, "2020-03-12")
+
 
 if __name__ == "__main__":
     unittest.main()
