@@ -21,6 +21,11 @@ let currentDeductibleExpenses = 0;
 let annualBillingBaseTotal = 0;
 let annualDeductibleExpenses = 0;
 let annualLoanInterestTotal = 0;
+let pnlInvoices = [];
+let pnlNoInvoiceExpenses = [];
+let pnlLoanInstallments = [];
+let pnlIncomeInvoices = [];
+let pnlDataReady = false;
 let currentPayments = null;
 let selectedPaymentDay = null;
 let calendarMonth = null;
@@ -3973,7 +3978,13 @@ function refreshAnnualTaxData() {
         0
       );
     annualDeductibleExpenses = annualInvoices + annualNoInvoice + annualLoanInterestTotal;
+    pnlInvoices = invoices;
+    pnlNoInvoiceExpenses = expenses;
+    pnlLoanInstallments = loanInstallments;
+    pnlIncomeInvoices = incomeInvoices;
+    pnlDataReady = true;
     updateTaxSummary();
+    updatePnlSummary();
   });
 }
 
@@ -5638,40 +5649,47 @@ function updateTaxSummary() {
 }
 
 function updatePnlSummary() {
-  const incomeInvoicesBase = currentIncomeInvoices.reduce(
+  const useAnnual = pnlDataReady;
+  const sourceInvoices = useAnnual ? pnlInvoices : currentInvoices;
+  const sourceNoInvoice = useAnnual ? pnlNoInvoiceExpenses : currentNoInvoiceExpenses;
+  const sourceLoans = useAnnual ? pnlLoanInstallments : currentLoanInstallments;
+  const sourceIncome = useAnnual ? pnlIncomeInvoices : currentIncomeInvoices;
+
+  const incomeInvoicesBase = sourceIncome.reduce(
     (sum, invoice) => sum + (Number(invoice.base_amount) || 0),
     0
   );
-  const incomeTotal = billingBaseTotal + incomeInvoicesBase;
-  const expensesTotal = currentDeductibleExpenses;
-  const loanInterest = currentNoInvoiceExpenses.reduce((sum, expense) => {
+  const incomeTotal = useAnnual
+    ? annualBillingBaseTotal
+    : billingBaseTotal + incomeInvoicesBase;
+  const loanInterest = sourceNoInvoice.reduce((sum, expense) => {
     if (expense.expense_type === "prestamo") {
       return sum + (Number(expense.interest_amount) || 0);
     }
     return sum;
-  }, 0) + currentLoanInstallments.reduce(
+  }, 0) + sourceLoans.reduce(
     (sum, installment) => sum + (Number(installment.interest_amount) || 0),
     0
   );
-  const invoiceExpenses = currentInvoices.reduce((sum, invoice) => {
+  const invoiceExpenses = sourceInvoices.reduce((sum, invoice) => {
     if (invoice.expense_category === "non_deductible") {
       return sum;
     }
     return sum + (Number(invoice.base_amount) || 0);
   }, 0);
-  const payrollExpenses = currentNoInvoiceExpenses.reduce((sum, expense) => {
+  const payrollExpenses = sourceNoInvoice.reduce((sum, expense) => {
     if (expense.expense_type === "nomina" || expense.expense_type === "seguridad_social") {
       return sum + getNoInvoiceDeductibleAmount(expense);
     }
     return sum;
   }, 0);
-  const amortizationExpenses = currentNoInvoiceExpenses.reduce((sum, expense) => {
+  const amortizationExpenses = sourceNoInvoice.reduce((sum, expense) => {
     if (expense.expense_type === "amortizacion") {
       return sum + getNoInvoiceDeductibleAmount(expense);
     }
     return sum;
   }, 0);
-  const otherOperatingExpenses = currentNoInvoiceExpenses.reduce((sum, expense) => {
+  const otherOperatingExpenses = sourceNoInvoice.reduce((sum, expense) => {
     if (expense.expense_type === "kilometraje" || expense.expense_type === "otro") {
       return sum + getNoInvoiceDeductibleAmount(expense);
     }
