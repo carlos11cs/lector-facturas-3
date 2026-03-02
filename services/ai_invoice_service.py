@@ -1296,6 +1296,8 @@ def _confidence_score_for_source(source: Optional[str]) -> Optional[float]:
     mapping = {
         "regex_tax_summary": 0.98,
         "llm": 0.85,
+        "text_total": 0.90,
+        "breakdown": 0.70,
         "fallback": 0.60,
     }
     return mapping.get(source)
@@ -1378,9 +1380,17 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
         )
         breakdown_consistent = abs((base_sum + vat_sum) - total_sum) <= 0.02
 
-        # If totals come from text/summary and are coherent, do NOT override with breakdown.
-        if llm_consistent and incoming_source in {"regex_tax_summary", "text_total"}:
-            amount_source = incoming_source
+        # If totals come from text/summary, do NOT let breakdown override a lower explicit total.
+        if incoming_source in {"regex_tax_summary", "text_total"} and total_amount is not None:
+            if total_sum > total_amount + 0.02:
+                # Keep explicit total, drop breakdown (likely OCR noise).
+                normalized_breakdown = []
+                amount_source = incoming_source
+            elif llm_consistent:
+                amount_source = incoming_source
+            else:
+                # Keep explicit total even if base/vat are incomplete.
+                amount_source = incoming_source
         # If LLM totals are present and coherent, do NOT override with breakdown.
         elif llm_consistent:
             amount_source = amount_source or "llm"
@@ -1396,23 +1406,21 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
                 amount_source = amount_source or "llm"
 
     analysis_status = result.get("analysis_status") or "ok"
-    if (
-        total_amount is None
-        or (
-            base_amount is not None
-            and vat_amount is not None
-            and abs((base_amount + vat_amount) - total_amount) > 0.02
-        )
-    ):
+    mismatch = (
+        base_amount is not None
+        and vat_amount is not None
+        and total_amount is not None
+        and abs((base_amount + vat_amount) - total_amount) > 0.02
+    )
+    if total_amount is None or mismatch or base_amount is None or vat_amount is None:
         analysis_status = "partial"
-        # Keep whatever is reliable (e.g. total factura) but mark partial.
-        if base_amount is None or vat_amount is None:
-            vat_rate = None
-        if total_amount is None:
+        # Keep total if present, but drop inconsistent base/IVA.
+        if mismatch or base_amount is None or vat_amount is None:
             base_amount = None
             vat_amount = None
             vat_rate = None
             normalized_breakdown = []
+        if total_amount is None:
             amount_source = "fallback"
 
     if normalized_breakdown:
