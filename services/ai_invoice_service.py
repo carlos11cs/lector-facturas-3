@@ -1313,6 +1313,7 @@ def _group_standard_vat_rate(rate: Optional[float], tolerance: float = 0.25) -> 
 def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
     result = dict(extracted or {})
     totals_payload = result.get("totals") if isinstance(result.get("totals"), dict) else {}
+    incoming_source = result.get("amount_source") or "llm"
 
     base_amount = _normalize_amount(
         totals_payload.get("base")
@@ -1360,7 +1361,7 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
 
-    amount_source = "llm"
+    amount_source = incoming_source or "llm"
     if normalized_breakdown:
         base_sum = round(sum(line["base"] or 0 for line in normalized_breakdown), 2)
         vat_sum = round(sum(line["vat_amount"] or 0 for line in normalized_breakdown), 2)
@@ -1371,32 +1372,48 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
                 return False
             return abs(a - b) <= 0.02
 
-        if (
-            base_amount is None
-            or vat_amount is None
-            or total_amount is None
-            or not totals_match(base_amount, base_sum)
-            or not totals_match(vat_amount, vat_sum)
-            or not totals_match(total_amount, total_sum)
-        ):
-            base_amount = base_sum
-            vat_amount = vat_sum
-            total_amount = total_sum
+        llm_has_totals = base_amount is not None and vat_amount is not None and total_amount is not None
+        llm_consistent = (
+            llm_has_totals and abs((base_amount + vat_amount) - total_amount) <= 0.02
+        )
+        breakdown_consistent = abs((base_sum + vat_sum) - total_sum) <= 0.02
+
+        # If totals come from text/summary and are coherent, do NOT override with breakdown.
+        if llm_consistent and incoming_source in {"regex_tax_summary", "text_total"}:
+            amount_source = incoming_source
+        # If LLM totals are present and coherent, do NOT override with breakdown.
+        elif llm_consistent:
+            amount_source = amount_source or "llm"
+        else:
+            # If LLM totals are missing or inconsistent, only use breakdown if it is coherent.
+            if breakdown_consistent:
+                base_amount = base_sum
+                vat_amount = vat_sum
+                total_amount = total_sum
+                amount_source = "breakdown"
+            else:
+                # Keep LLM totals if they exist; otherwise fall back later.
+                amount_source = amount_source or "llm"
 
     analysis_status = result.get("analysis_status") or "ok"
     if (
-        base_amount is None
-        or vat_amount is None
-        or total_amount is None
-        or abs((base_amount + vat_amount) - total_amount) > 0.02
+        total_amount is None
+        or (
+            base_amount is not None
+            and vat_amount is not None
+            and abs((base_amount + vat_amount) - total_amount) > 0.02
+        )
     ):
         analysis_status = "partial"
-        base_amount = None
-        vat_amount = None
-        total_amount = None
-        vat_rate = None
-        normalized_breakdown = []
-        amount_source = "fallback"
+        # Keep whatever is reliable (e.g. total factura) but mark partial.
+        if base_amount is None or vat_amount is None:
+            vat_rate = None
+        if total_amount is None:
+            base_amount = None
+            vat_amount = None
+            vat_rate = None
+            normalized_breakdown = []
+            amount_source = "fallback"
 
     if normalized_breakdown:
         if len(normalized_breakdown) == 1:
@@ -1931,6 +1948,7 @@ def analyze_invoice(
         or data.get("iva_lines")
         or []
     )
+    amount_source = "llm" if data else "fallback"
 
     if company_names is None:
         company_names = []
@@ -1976,6 +1994,31 @@ def analyze_invoice(
     payment_dates = sorted({d for d in payment_dates if d})
     payment_date = payment_dates[0] if payment_dates else None
 
+    tax_summary = _extract_tax_summary_from_text(extracted_text)
+    base_amount, vat_amount, total_amount, vat_rate, summary_source = _apply_tax_summary_override(
+        extracted_text,
+        base_amount,
+        vat_amount,
+        total_amount,
+        vat_rate,
+        tax_summary,
+    )
+    if summary_source != "llm":
+        amount_source = summary_source
+
+    # Fallback to explicit amounts in text (e.g., "Total factura") if present.
+    text_amounts = _extract_amounts_from_text(extracted_text)
+    text_total = text_amounts.get("total")
+    if text_total is not None:
+        if total_amount is None or text_total <= (total_amount + 0.02):
+            total_amount = text_total
+            if amount_source == "llm":
+                amount_source = "text_total"
+        if text_amounts.get("base") is not None and base_amount is None:
+            base_amount = text_amounts.get("base")
+        if text_amounts.get("vat") is not None and vat_amount is None:
+            vat_amount = text_amounts.get("vat")
+
     normalized = normalize_and_validate_amounts(
         {
             "analysis_status": analysis_status,
@@ -1985,6 +2028,7 @@ def analyze_invoice(
             "vat_rate": vat_rate,
             "vat_breakdown": vat_breakdown,
             "totals": totals_payload,
+            "amount_source": amount_source,
         }
     )
 
@@ -1994,7 +2038,7 @@ def analyze_invoice(
     total_amount = normalized.get("total_amount")
     vat_rate = normalized.get("vat_rate")
     vat_breakdown = normalized.get("vat_breakdown") or []
-    amount_source = normalized.get("amount_source") or ("llm" if data else "fallback")
+    amount_source = normalized.get("amount_source") or amount_source or ("llm" if data else "fallback")
 
     validation = _validate_math(base_amount, vat_amount, total_amount)
 
