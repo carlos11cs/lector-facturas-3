@@ -39,6 +39,7 @@ let staffMembers = [];
 let selectedLoanPlanFile = null;
 let loanPlanDraft = [];
 const lowQualityDismissedIds = new Set();
+const vatWarningDismissedIds = new Set();
 let billingLastSource = "base";
 
 const monthNames = [
@@ -75,6 +76,8 @@ const ANALYSIS_ERROR_MESSAGE =
   "No se ha podido analizar la factura automáticamente. Puedes introducir los datos manualmente.";
 const LOW_QUALITY_SCAN_MESSAGE =
   "La calidad de la factura escaneada no es óptima. No se puede leer correctamente. Por favor, introduce los datos manualmente.";
+const VAT_WARNING_MESSAGE =
+  "Puede que la calidad de la imagen o la información sea dudosa. Por favor, revisa siempre las cantidades y los tipos de IVA.";
 
 function showLowQualityModal() {
   const modal = document.getElementById("lowQualityModal");
@@ -88,6 +91,26 @@ function showLowQualityModal() {
 
 function hideLowQualityModal() {
   const modal = document.getElementById("lowQualityModal");
+  if (!modal) {
+    return;
+  }
+  modal.classList.remove("is-visible");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+function showVatWarningModal() {
+  const modal = document.getElementById("vatWarningModal");
+  if (!modal) {
+    return;
+  }
+  modal.classList.add("is-visible");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+}
+
+function hideVatWarningModal() {
+  const modal = document.getElementById("vatWarningModal");
   if (!modal) {
     return;
   }
@@ -2491,6 +2514,13 @@ function analyzeIncomeForItem(item) {
         item.vatBreakdown = extractedBreakdown;
         item.vatBreakdownOpen = extractedBreakdown.length > 1;
       }
+      if (extracted.breakdown_warning) {
+        item.analysisWarning = VAT_WARNING_MESSAGE;
+        if (!vatWarningDismissedIds.has(item.id)) {
+          showVatWarningModal();
+          vatWarningDismissedIds.add(item.id);
+        }
+      }
       if (extracted.analysis_status === "low_quality_scan") {
         item.analysisPending = false;
         item.analysisError = true;
@@ -2730,6 +2760,13 @@ function analyzeInvoiceForItem(item) {
       if (extractedBreakdown.length) {
         item.vatBreakdown = extractedBreakdown;
         item.vatBreakdownOpen = extractedBreakdown.length > 1;
+      }
+      if (extracted.breakdown_warning) {
+        item.analysisWarning = VAT_WARNING_MESSAGE;
+        if (!vatWarningDismissedIds.has(item.id)) {
+          showVatWarningModal();
+          vatWarningDismissedIds.add(item.id);
+        }
       }
       if (extracted.analysis_status === "low_quality_scan") {
         item.analysisPending = false;
@@ -6429,6 +6466,15 @@ function bindEvents() {
   }
   if (lowQualityClose) {
     lowQualityClose.addEventListener("click", hideLowQualityModal);
+  }
+
+  const vatWarningAccept = document.getElementById("vatWarningAccept");
+  const vatWarningClose = document.getElementById("vatWarningClose");
+  if (vatWarningAccept) {
+    vatWarningAccept.addEventListener("click", hideVatWarningModal);
+  }
+  if (vatWarningClose) {
+    vatWarningClose.addEventListener("click", hideVatWarningModal);
   }
   if (paymentPrevMonth) {
     paymentPrevMonth.addEventListener("click", () => shiftCalendarMonth(-1));

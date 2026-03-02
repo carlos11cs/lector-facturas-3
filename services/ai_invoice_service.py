@@ -1312,6 +1312,63 @@ def _group_standard_vat_rate(rate: Optional[float], tolerance: float = 0.25) -> 
     return rate
 
 
+def _adjust_breakdown_to_targets(
+    lines: List[Dict[str, Any]],
+    base_target: Optional[float],
+    vat_target: Optional[float],
+    total_target: Optional[float],
+) -> List[Dict[str, Any]]:
+    if not lines:
+        return []
+    base_sum = sum(line.get("base") or 0 for line in lines)
+    vat_sum = sum(line.get("vat_amount") or 0 for line in lines)
+    total_sum = base_sum + vat_sum
+    if total_target is not None:
+        if base_target is None and vat_target is None and total_sum > 0:
+            factor = total_target / total_sum
+            base_target = round(base_sum * factor, 2)
+            vat_target = round(vat_sum * factor, 2)
+        elif base_target is not None and vat_target is None:
+            vat_target = round(total_target - base_target, 2)
+        elif vat_target is not None and base_target is None:
+            base_target = round(total_target - vat_target, 2)
+    if base_target is None or vat_target is None:
+        return lines
+
+    base_factor = base_target / base_sum if base_sum > 0 else 1
+    vat_factor = vat_target / vat_sum if vat_sum > 0 else 1
+    adjusted: List[Dict[str, Any]] = []
+    for line in lines:
+        base = _round_amount((line.get("base") or 0) * base_factor)
+        vat = _round_amount((line.get("vat_amount") or 0) * vat_factor)
+        rate_calc = round((vat / base) * 100, 2) if base > 0 else None
+        rate_final = _group_standard_vat_rate(rate_calc)
+        adjusted.append(
+            {
+                "base": base,
+                "vat_amount": vat,
+                "rate": rate_final,
+                "total": _round_amount(base + vat),
+            }
+        )
+
+    # Fix rounding deltas on last line.
+    base_delta = _round_amount(base_target - sum(line["base"] or 0 for line in adjusted))
+    vat_delta = _round_amount(vat_target - sum(line["vat_amount"] or 0 for line in adjusted))
+    if adjusted:
+        last = adjusted[-1]
+        last_base = _round_amount((last.get("base") or 0) + base_delta)
+        last_vat = _round_amount((last.get("vat_amount") or 0) + vat_delta)
+        last_rate = round((last_vat / last_base) * 100, 2) if last_base > 0 else None
+        adjusted[-1] = {
+            "base": last_base,
+            "vat_amount": last_vat,
+            "rate": _group_standard_vat_rate(last_rate),
+            "total": _round_amount(last_base + last_vat),
+        }
+    return adjusted
+
+
 def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
     result = dict(extracted or {})
     totals_payload = result.get("totals") if isinstance(result.get("totals"), dict) else {}
@@ -1344,6 +1401,7 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
         raw_breakdown = [raw_breakdown]
 
     normalized_breakdown: List[Dict[str, Any]] = []
+    breakdown_warning = False
     for line in raw_breakdown:
         if not isinstance(line, dict):
             continue
@@ -1383,8 +1441,16 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
         # If totals come from text/summary, do NOT let breakdown override a lower explicit total.
         if incoming_source in {"regex_tax_summary", "text_total"} and total_amount is not None:
             if total_sum > total_amount + 0.02:
-                # Keep explicit total, drop breakdown (likely OCR noise).
-                normalized_breakdown = []
+                # Keep explicit total, adjust breakdown to match it (likely OCR noise).
+                breakdown_warning = True
+                normalized_breakdown = _adjust_breakdown_to_targets(
+                    normalized_breakdown,
+                    base_amount,
+                    vat_amount,
+                    total_amount,
+                )
+                base_amount = round(sum(line["base"] or 0 for line in normalized_breakdown), 2)
+                vat_amount = round(sum(line["vat_amount"] or 0 for line in normalized_breakdown), 2)
                 amount_source = incoming_source
             elif llm_consistent:
                 amount_source = incoming_source
@@ -1416,10 +1482,11 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
         analysis_status = "partial"
         # Keep total if present, but drop inconsistent base/IVA.
         if mismatch or base_amount is None or vat_amount is None:
-            base_amount = None
-            vat_amount = None
-            vat_rate = None
-            normalized_breakdown = []
+            if not breakdown_warning:
+                base_amount = None
+                vat_amount = None
+                vat_rate = None
+                normalized_breakdown = []
         if total_amount is None:
             amount_source = "fallback"
 
@@ -1438,6 +1505,7 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
             "vat_breakdown": normalized_breakdown,
             "analysis_status": analysis_status,
             "amount_source": amount_source,
+            "breakdown_warning": breakdown_warning,
         }
     )
     return result
@@ -2046,6 +2114,7 @@ def analyze_invoice(
     total_amount = normalized.get("total_amount")
     vat_rate = normalized.get("vat_rate")
     vat_breakdown = normalized.get("vat_breakdown") or []
+    breakdown_warning = normalized.get("breakdown_warning")
     amount_source = normalized.get("amount_source") or amount_source or ("llm" if data else "fallback")
 
     validation = _validate_math(base_amount, vat_amount, total_amount)
@@ -2079,6 +2148,7 @@ def analyze_invoice(
         "vat_amount": vat_amount,
         "total_amount": total_amount,
         "vat_breakdown": vat_breakdown,
+        "breakdown_warning": breakdown_warning,
         "extraction_source": amount_source,
         "confidence_score": confidence_score,
         "analysis_text": raw_text[:500],
