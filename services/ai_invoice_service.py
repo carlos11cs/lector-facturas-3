@@ -1000,12 +1000,16 @@ def _is_valid_supplier(
     if contains_forbidden_keyword(value):
         return False
     has_form = has_legal_form(value)
+    inline_tax = _has_tax_id(value) or _has_iban(value) or "iban" in value.lower()
     has_tax = bool(text and _supplier_has_near_tax_id_or_iban(text, value))
     if not has_form:
-        return False
+        # Allow suppliers without legal form only if they include a tax id/IBAN inline
+        # (e.g., autónomos o entidades con NIF explícito en el nombre).
+        if not inline_tax:
+            return False
     if _is_same_entity(value, company_names):
         return False
-    if require_tax_id and text and not has_tax:
+    if require_tax_id and text and not (has_tax or inline_tax):
         return False
     return True
 
