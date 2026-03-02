@@ -1082,6 +1082,19 @@ def _supplier_has_near_tax_id_or_iban(text: str, supplier: str, window: int = 4)
     return False
 
 
+def _strip_inline_tax_id(value: str) -> str:
+    if not value:
+        return value
+    cleaned = value
+    cleaned = re.sub(r"(cif|nif|dni|vat|iva)\s*[:#-]?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b[A-HJ-NP-SUVW]\s?-?\d{7}\s?-?[0-9A-J]\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b\d{8}\s?-?[A-Z]\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b[A-Z]{2}\s?-?\d{6,12}\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+-\s+", " ", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return cleaned.strip(" -–—|")
+
+
 def _extract_supplier_candidates(text: str, company_names=None) -> List[Tuple[str, int]]:
     if not text:
         return []
@@ -1230,7 +1243,7 @@ def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
     candidates.sort(key=lambda item: item[1], reverse=True)
     best, score = candidates[0]
     if _is_valid_supplier(best, company_names, text):
-        return best
+        return _strip_inline_tax_id(best)
     return None
 
 
@@ -1925,6 +1938,8 @@ def analyze_invoice(
     if document_type != "income":
         supplier_source_text = embedded_text if pdf_kind == "original" else extracted_text
         provider_name = provider_name.strip() if isinstance(provider_name, str) else provider_name
+        if isinstance(provider_name, str):
+            provider_name = _strip_inline_tax_id(provider_name)
         if provider_name is not None and not _is_valid_supplier(
             provider_name, company_names, supplier_source_text, require_tax_id=False
         ):
