@@ -776,19 +776,48 @@ function parseVatBreakdown(value) {
 }
 
 function normalizeBreakdownLine(line) {
-  const rateValue = normalizeVatRateValue(line.rate);
   const baseValue = parseNumberInput(line.base);
-  if (rateValue === null || baseValue === null) {
+  const vatValue = parseNumberInput(line.vat_amount);
+  const totalValue = parseNumberInput(line.total);
+  const rateValue = normalizeVatRateValue(line.rate);
+
+  if (baseValue === null && totalValue === null) {
     return null;
   }
-  const rate = Number(rateValue);
-  const vatAmount = roundAmount(baseValue * (rate / 100));
-  const total = roundAmount(baseValue + vatAmount);
+
+  let base = baseValue;
+  let vatAmount = vatValue;
+  let total = totalValue;
+  let rate = rateValue !== null ? Number(rateValue) : null;
+
+  if (base !== null && vatAmount === null && total !== null) {
+    vatAmount = roundAmount(total - base);
+  }
+  if (base !== null && vatAmount !== null && total === null) {
+    total = roundAmount(base + vatAmount);
+  }
+  if (base === null && total !== null && vatAmount !== null) {
+    base = roundAmount(total - vatAmount);
+  }
+  if (rate === null && base !== null && vatAmount !== null && base > 0) {
+    rate = roundAmount((vatAmount / base) * 100);
+  }
+  if (rate !== null && base !== null && vatAmount === null) {
+    vatAmount = roundAmount(base * (rate / 100));
+    if (total === null) {
+      total = roundAmount(base + vatAmount);
+    }
+  }
+
+  if (base === null || vatAmount === null || total === null) {
+    return null;
+  }
+
   return {
     rate,
-    base: roundAmount(baseValue),
-    vat_amount: vatAmount,
-    total,
+    base: roundAmount(base),
+    vat_amount: roundAmount(vatAmount),
+    total: roundAmount(total),
   };
 }
 
@@ -848,7 +877,13 @@ function getPrimaryVatRateFromBreakdown(lines, fallback = "21") {
   if (!normalized.length) {
     return fallback;
   }
-  return String(normalized[0].rate);
+  const rates = new Set(
+    normalized.map((line) => line.rate).filter((rate) => rate !== null && rate !== undefined)
+  );
+  if (rates.size !== 1) {
+    return null;
+  }
+  return String([...rates][0]);
 }
 
 function getVatDisplayFromInvoice(invoice) {
@@ -2532,6 +2567,9 @@ function analyzeIncomeForItem(item) {
         renderIncomeTable();
         return;
       }
+      if (extracted.is_rectificativa) {
+        item.isRectificativa = true;
+      }
       const detectedClient = extracted.client_name || extracted.provider_name;
 
       if (!item.touched.client && detectedClient) {
@@ -2608,10 +2646,14 @@ function validateIncomePending() {
     if (baseValue === null && totalValue === null) {
       errors.push(`Base imponible o total obligatorio: ${item.file.name}`);
     }
-    if (baseValue !== null && baseValue < 0) {
+    const isRectificativa =
+      item.isRectificativa ||
+      (baseValue !== null && baseValue < 0) ||
+      (totalValue !== null && totalValue < 0);
+    if (baseValue !== null && baseValue < 0 && !isRectificativa) {
       errors.push(`Base imponible inválida: ${item.file.name}`);
     }
-    if (totalValue !== null && totalValue < 0) {
+    if (totalValue !== null && totalValue < 0 && !isRectificativa) {
       errors.push(`Total inválido: ${item.file.name}`);
     }
     if (!item.date) {
@@ -2654,6 +2696,7 @@ function uploadIncomePending() {
         paymentDate: computePaymentDate(item.date, item.paymentDate),
         paymentDates: item.paymentDates || [],
         analysisStatus: item.analysisStatus || "ok",
+        isRectificativa: item.isRectificativa || false,
         client: item.client.trim(),
         base: breakdownTotals ? breakdownTotals.base : normalized.base || item.base,
         vat: breakdownPayload.length
@@ -2716,10 +2759,14 @@ function validatePending() {
     if (baseValue === null && totalValue === null) {
       errors.push(`Base imponible o total obligatorio: ${item.file.name}`);
     }
-    if (baseValue !== null && baseValue < 0) {
+    const isRectificativa =
+      item.isRectificativa ||
+      (baseValue !== null && baseValue < 0) ||
+      (totalValue !== null && totalValue < 0);
+    if (baseValue !== null && baseValue < 0 && !isRectificativa) {
       errors.push(`Base imponible inválida: ${item.file.name}`);
     }
-    if (totalValue !== null && totalValue < 0) {
+    if (totalValue !== null && totalValue < 0 && !isRectificativa) {
       errors.push(`Total inválido: ${item.file.name}`);
     }
     if (!item.date) {
@@ -2778,6 +2825,9 @@ function analyzeInvoiceForItem(item) {
         }
         renderTable();
         return;
+      }
+      if (extracted.is_rectificativa) {
+        item.isRectificativa = true;
       }
 
       if (!item.touched.supplier && extracted.provider_name) {
@@ -2886,6 +2936,7 @@ function uploadPending() {
         analysisStatus: item.analysisStatus || "ok",
         companyId: getSelectedCompanyId(),
         supplier: item.supplier.trim(),
+        isRectificativa: item.isRectificativa || false,
         base: breakdownTotals ? breakdownTotals.base : normalized.base || item.base,
         vat: breakdownPayload.length
           ? getPrimaryVatRateFromBreakdown(breakdownPayload)

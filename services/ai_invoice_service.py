@@ -275,6 +275,13 @@ def parse_eu_amount(value: Any) -> Optional[float]:
         return None
 
 
+def _normalize_ocr_amount_text(text: str) -> str:
+    if not text:
+        return text
+    # Fix OCR patterns like "1,042 79" -> "1.042,79"
+    return re.sub(r"(\d{1,3})[.,](\d{3})\s(\d{2})", r"\1.\2,\3", text)
+
+
 def _normalize_amount(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -359,10 +366,18 @@ def _normalize_vat_breakdown(raw_value: Any) -> List[Dict[str, Any]]:
 def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
     if not text:
         return {"base": None, "vat": None, "total": None}
+    text = _normalize_ocr_amount_text(text)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
 
     def pick_best_amount(numbers: List[str]) -> Optional[float]:
-        values = [_normalize_amount(value) for value in numbers]
+        if not numbers:
+            return None
+        # Prefer amounts with explicit decimals.
+        decimal_numbers = [
+            n for n in numbers if re.search(r"[,.]\d{2}$", n.strip())
+        ]
+        candidates = decimal_numbers or numbers
+        values = [_normalize_amount(value) for value in candidates]
         values = [value for value in values if value is not None]
         if not values:
             return None
@@ -392,6 +407,12 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
                     continue
                 if numbers:
                     amount = pick_best_amount(numbers)
+                if amount is None:
+                    # OCR may drop decimal separators; try to rebuild from plain digits.
+                    raw_digits = re.findall(r"\b\d{4,6}\b", line)
+                    if raw_digits:
+                        candidate = raw_digits[-1]
+                        amount = parse_eu_amount(candidate[:-2] + "," + candidate[-2:])
                 if amount is None and idx + 1 < len(lines):
                     candidates = []
                     for offset in range(1, 8):
@@ -473,6 +494,7 @@ def _extract_invoice_date_from_text(text: str) -> Optional[str]:
 def _extract_tax_summary_from_text(text: str) -> Dict[str, Any]:
     if not text:
         return {"found": False}
+    text = _normalize_ocr_amount_text(text)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return {"found": False}
@@ -1003,9 +1025,9 @@ def _is_valid_supplier(
     inline_tax = _has_tax_id(value) or _has_iban(value) or "iban" in value.lower()
     has_tax = bool(text and _supplier_has_near_tax_id_or_iban(text, value))
     if not has_form:
-        # Allow suppliers without legal form only if they include a tax id/IBAN inline
-        # (e.g., autónomos o entidades con NIF explícito en el nombre).
-        if not inline_tax:
+        # Allow suppliers without legal form if they have tax id/IBAN inline
+        # or near the supplier line (autónomos / entidades sin forma jurídica).
+        if not (inline_tax or has_tax):
             return False
     if _is_same_entity(value, company_names):
         return False
@@ -1158,6 +1180,13 @@ def _extract_supplier_candidates(text: str, company_names=None) -> List[Tuple[st
             score += 80
         if _has_tax_id(line):
             score += 30
+        if not _contains_legal_form(line) and not _has_tax_id(line) and not _has_iban(line):
+            for offset in (1, 2):
+                if idx + offset < len(lines):
+                    neighbor = lines[idx + offset]
+                    if _has_tax_id(neighbor) or _has_iban(neighbor):
+                        score += 25
+                        break
         if line_counts.get(_normalize_entity_name(line), 0) > 1:
             score += 10
         if any(keyword in lowered for keyword in supplier_keywords):
@@ -2118,6 +2147,7 @@ def analyze_invoice(
     amount_source = normalized.get("amount_source") or amount_source or ("llm" if data else "fallback")
 
     validation = _validate_math(base_amount, vat_amount, total_amount)
+    is_rectificativa = bool((base_amount is not None and base_amount < 0) or (total_amount is not None and total_amount < 0))
 
     confidence_score = _confidence_score_for_source(amount_source)
     logger.info("Fuente importes (%s): %s", filename, amount_source)
@@ -2148,6 +2178,7 @@ def analyze_invoice(
         "vat_amount": vat_amount,
         "total_amount": total_amount,
         "vat_breakdown": vat_breakdown,
+        "is_rectificativa": is_rectificativa,
         "breakdown_warning": breakdown_warning,
         "extraction_source": amount_source,
         "confidence_score": confidence_score,

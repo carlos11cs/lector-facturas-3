@@ -982,26 +982,32 @@ def parse_vat_breakdown(raw_value):
         if not isinstance(entry, dict):
             continue
         rate_raw = str(entry.get("rate") or entry.get("vat_rate") or entry.get("vat") or "").strip()
-        try:
-            rate = int(float(rate_raw))
-        except ValueError:
-            continue
-        if rate not in {0, 4, 10, 21}:
+        rate = None
+        if rate_raw:
+            try:
+                rate = float(rate_raw)
+            except ValueError:
+                rate = None
+        if rate is not None and rate < 0:
             continue
         base_amount = parse_amount(str(entry.get("base") or entry.get("base_amount") or ""))
         vat_amount = parse_amount(str(entry.get("vat_amount") or entry.get("iva") or ""))
         total_amount = parse_amount(str(entry.get("total") or entry.get("total_amount") or ""))
-        if base_amount is None and total_amount is None:
+        if base_amount is None and total_amount is None and vat_amount is None:
             continue
-        if base_amount is None and total_amount is not None:
+        if base_amount is None and total_amount is not None and vat_amount is not None:
+            base_amount = round(total_amount - vat_amount, 2)
+        if base_amount is None and total_amount is not None and vat_amount is None and rate is not None:
             base_amount = round(total_amount / (1 + rate / 100), 2)
-        if base_amount is not None and vat_amount is None:
+        if base_amount is not None and vat_amount is None and total_amount is not None:
+            vat_amount = round(total_amount - base_amount, 2)
+        if base_amount is not None and vat_amount is None and rate is not None:
             vat_amount = round(base_amount * (rate / 100), 2)
         if base_amount is not None and total_amount is None and vat_amount is not None:
             total_amount = round(base_amount + vat_amount, 2)
         lines.append(
             {
-                "rate": rate,
+                "rate": round(rate, 2) if rate is not None else None,
                 "base": base_amount,
                 "vat_amount": vat_amount,
                 "total": total_amount,
@@ -2103,6 +2109,7 @@ def upload_invoices():
                 vat_rate_raw = vat_rate_to_str(entry.get("vat"))
                 vat_amount = parse_amount(str(entry.get("vatAmount") or ""))
                 total_amount = parse_amount(str(entry.get("total") or ""))
+                is_rectificativa = bool(entry.get("isRectificativa"))
                 vat_breakdown = parse_vat_breakdown(
                     entry.get("vatBreakdown") or entry.get("vat_breakdown")
                 )
@@ -2134,7 +2141,12 @@ def upload_invoices():
                     )
 
                 if vat_breakdown:
-                    vat_rate_int = vat_breakdown[0]["rate"]
+                    rates = {line.get("rate") for line in vat_breakdown if line.get("rate") is not None}
+                    vat_rate_int = None
+                    if len(rates) == 1:
+                        vat_rate_int = int(list(rates)[0])
+                    elif rates:
+                        vat_rate_int = -1
                     summary = summarize_vat_breakdown(vat_breakdown)
                     if summary:
                         base_amount, vat_amount, total_amount = summary
@@ -2150,11 +2162,14 @@ def upload_invoices():
                 if expense_category not in {"with_invoice", "without_invoice", "non_deductible"}:
                     errors.append(f"Tipo de gasto inválido para {original_name}.")
                     continue
-                if base_amount is None or base_amount < 0:
+                if base_amount is None:
                     errors.append(f"Base imponible inválida para {original_name}.")
                     continue
-                if total_amount is None or total_amount < 0:
+                if total_amount is None:
                     errors.append(f"Total inválido para {original_name}.")
+                    continue
+                if (base_amount < 0 or total_amount < 0) and not is_rectificativa:
+                    errors.append(f"Factura rectificativa no indicada en {original_name}.")
                     continue
                 if supplier and is_supplier_same_as_company(supplier, company_id, conn):
                     errors.append(
@@ -2162,7 +2177,7 @@ def upload_invoices():
                     )
                     continue
 
-                if not is_manual:
+                if not is_manual and vat_rate_int is not None and vat_rate_int >= 0:
                     base_amount, vat_amount, total_amount = normalize_vat_amounts(
                         base_amount, vat_rate_int, vat_amount, total_amount
                     )
@@ -2258,6 +2273,7 @@ def upload_invoices():
             vat_rate = vats[idx].strip() if vats[idx] else ""
             vat_amount = parse_amount(vat_amounts[idx])
             total_amount = parse_amount(totals[idx])
+            is_rectificativa = base_amount is not None and base_amount < 0 or total_amount is not None and total_amount < 0
 
             if not supplier:
                 app.logger.info("Proveedor vacío para %s. Se permite guardado manual.", original_name)
@@ -2269,11 +2285,14 @@ def upload_invoices():
             if vat_rate_int not in {0, 4, 10, 21}:
                 errors.append(f"Tipo de IVA inválido para {original_name}.")
                 continue
-            if base_amount is None or base_amount < 0:
+            if base_amount is None:
                 errors.append(f"Base imponible inválida para {original_name}.")
                 continue
-            if total_amount is None or total_amount < 0:
+            if total_amount is None:
                 errors.append(f"Total inválido para {original_name}.")
+                continue
+            if (base_amount < 0 or total_amount < 0) and not is_rectificativa:
+                errors.append(f"Factura rectificativa no indicada en {original_name}.")
                 continue
             if supplier and is_supplier_same_as_company(supplier, company_id, conn):
                 errors.append(
@@ -2569,7 +2588,7 @@ def list_invoices():
             or compute_payment_date(row["invoice_date"], row["payment_date"]),
             "supplier": row["supplier"],
             "base_amount": float(row["base_amount"]),
-            "vat_rate": int(row["vat_rate"]),
+            "vat_rate": int(row["vat_rate"]) if row["vat_rate"] is not None and row["vat_rate"] >= 0 else None,
             "vat_amount": float(row["vat_amount"]) if row["vat_amount"] is not None else None,
             "total_amount": float(row["total_amount"]),
             "vat_breakdown": row["vat_breakdown"],
@@ -2741,7 +2760,7 @@ def list_payments():
                     "payment_dates": payment_dates,
                     "invoice_date": row["invoice_date"],
                     "base_amount": float(row["base_amount"] or 0),
-                    "vat_rate": int(row["vat_rate"] or 0),
+            "vat_rate": int(row["vat_rate"]) if row["vat_rate"] is not None and row["vat_rate"] >= 0 else None,
                     "vat_amount": float(row["vat_amount"] or 0)
                     if row["vat_amount"] is not None
                     else None,
@@ -2859,7 +2878,7 @@ def list_payments():
                     "payment_dates": payment_dates,
                     "invoice_date": row["invoice_date"],
                     "base_amount": float(row["base_amount"] or 0),
-                    "vat_rate": int(row["vat_rate"] or 0),
+                    "vat_rate": int(row["vat_rate"]) if row["vat_rate"] is not None and row["vat_rate"] >= 0 else None,
                     "vat_amount": float(row["vat_amount"] or 0)
                     if row["vat_amount"] is not None
                     else None,
@@ -3217,6 +3236,8 @@ def update_invoice(invoice_id):
     vat_rate_raw = vat_rate_to_str(payload.get("vat_rate"))
     vat_amount = parse_amount(str(payload.get("vat_amount") or ""))
     total_amount = parse_amount(str(payload.get("total_amount") or ""))
+    is_rectificativa = bool(payload.get("is_rectificativa") or payload.get("isRectificativa"))
+    is_rectificativa = bool(payload.get("is_rectificativa") or payload.get("isRectificativa"))
     vat_breakdown = parse_vat_breakdown(
         payload.get("vat_breakdown") or payload.get("vatBreakdown")
     )
@@ -3234,12 +3255,12 @@ def update_invoice(invoice_id):
                 errors.append("El proveedor no puede ser la empresa activa.")
     if base_amount is None and total_amount is None:
         errors.append("Base imponible o total obligatorio.")
-    if base_amount is not None and base_amount < 0:
-        errors.append("Base imponible inválida.")
-    if total_amount is not None and total_amount < 0:
-        errors.append("Total inválido.")
+    if base_amount is not None and total_amount is not None:
+        if (base_amount < 0 or total_amount < 0) and not is_rectificativa:
+            errors.append("Factura rectificativa no indicada.")
     if vat_breakdown:
-        vat_rate = vat_breakdown[0]["rate"]
+        rates = {line.get("rate") for line in vat_breakdown if line.get("rate") is not None}
+        vat_rate = int(list(rates)[0]) if len(rates) == 1 else (-1 if rates else None)
         summary = summarize_vat_breakdown(vat_breakdown)
         if summary:
             base_amount, vat_amount, total_amount = summary
@@ -3256,9 +3277,10 @@ def update_invoice(invoice_id):
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
 
-    base_amount, vat_amount, total_amount = normalize_vat_amounts(
-        base_amount, vat_rate, vat_amount, total_amount
-    )
+    if vat_rate is not None and vat_rate >= 0:
+        base_amount, vat_amount, total_amount = normalize_vat_amounts(
+            base_amount, vat_rate, vat_amount, total_amount
+        )
 
     updates = {
         "invoice_date": invoice_date,
@@ -3380,7 +3402,7 @@ def list_income_invoices():
             or compute_payment_date(row["invoice_date"], row["payment_date"]),
             "client": row["client"],
             "base_amount": float(row["base_amount"]),
-            "vat_rate": int(row["vat_rate"]),
+            "vat_rate": int(row["vat_rate"]) if row["vat_rate"] is not None else None,
             "vat_amount": float(row["vat_amount"]) if row["vat_amount"] is not None else None,
             "total_amount": float(row["total_amount"]),
             "vat_breakdown": row["vat_breakdown"],
@@ -3418,6 +3440,7 @@ def create_income_invoices():
             vat_rate_raw = vat_rate_to_str(entry.get("vat"))
             vat_amount = parse_amount(str(entry.get("vatAmount") or ""))
             total_amount = parse_amount(str(entry.get("total") or ""))
+            is_rectificativa = bool(entry.get("isRectificativa"))
             vat_breakdown = parse_vat_breakdown(
                 entry.get("vatBreakdown") or entry.get("vat_breakdown")
             )
@@ -3444,7 +3467,12 @@ def create_income_invoices():
                 errors.append(f"Cliente obligatorio para {original_name}.")
                 continue
             if vat_breakdown:
-                vat_rate_int = vat_breakdown[0]["rate"]
+                rates = {line.get("rate") for line in vat_breakdown if line.get("rate") is not None}
+                vat_rate_int = None
+                if len(rates) == 1:
+                    vat_rate_int = int(list(rates)[0])
+                elif rates:
+                    vat_rate_int = -1
                 summary = summarize_vat_breakdown(vat_breakdown)
                 if summary:
                     base_amount, vat_amount, total_amount = summary
@@ -3462,16 +3490,15 @@ def create_income_invoices():
                     f"Base imponible o total obligatorio para {original_name}."
                 )
                 continue
-            if base_amount is not None and base_amount < 0:
-                errors.append(f"Base imponible inválida para {original_name}.")
-                continue
-            if total_amount is not None and total_amount < 0:
-                errors.append(f"Total inválido para {original_name}.")
-                continue
+            if base_amount is not None and total_amount is not None:
+                if (base_amount < 0 or total_amount < 0) and not is_rectificativa:
+                    errors.append(f"Factura rectificativa no indicada para {original_name}.")
+                    continue
 
-            base_amount, vat_amount, total_amount = normalize_vat_amounts(
-                base_amount, vat_rate_int, vat_amount, total_amount
-            )
+            if vat_rate_int is not None and vat_rate_int >= 0:
+                base_amount, vat_amount, total_amount = normalize_vat_amounts(
+                    base_amount, vat_rate_int, vat_amount, total_amount
+                )
 
             stored_value = (
                 stored_name
@@ -3558,12 +3585,12 @@ def update_income_invoice(invoice_id):
         errors.append("Cliente obligatorio.")
     if base_amount is None and total_amount is None:
         errors.append("Base imponible o total obligatorio.")
-    if base_amount is not None and base_amount < 0:
-        errors.append("Base imponible inválida.")
-    if total_amount is not None and total_amount < 0:
-        errors.append("Total inválido.")
+    if base_amount is not None and total_amount is not None:
+        if (base_amount < 0 or total_amount < 0) and not is_rectificativa:
+            errors.append("Factura rectificativa no indicada.")
     if vat_breakdown:
-        vat_rate = vat_breakdown[0]["rate"]
+        rates = {line.get("rate") for line in vat_breakdown if line.get("rate") is not None}
+        vat_rate = int(list(rates)[0]) if len(rates) == 1 else (-1 if rates else None)
         summary = summarize_vat_breakdown(vat_breakdown)
         if summary:
             base_amount, vat_amount, total_amount = summary
@@ -3578,9 +3605,10 @@ def update_income_invoice(invoice_id):
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
 
-    base_amount, vat_amount, total_amount = normalize_vat_amounts(
-        base_amount, vat_rate, vat_amount, total_amount
-    )
+    if vat_rate is not None and vat_rate >= 0:
+        base_amount, vat_amount, total_amount = normalize_vat_amounts(
+            base_amount, vat_rate, vat_amount, total_amount
+        )
 
     updates = {
         "invoice_date": invoice_date,
