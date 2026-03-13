@@ -6,6 +6,7 @@
   <title>Ledged — Control fiscal para gestorías</title>
   <meta name="description" content="Plataforma B2B para gestorías: análisis de facturas, IVA, tesorería por vencimientos, P&G (PGC España) e informes trimestrales." />
   <meta name="theme-color" content="#0f766e" />
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230f766e'/%3E%3Crect x='16' y='18' width='10' height='10' rx='2' fill='white'/%3E%3Crect x='30' y='18' width='10' height='10' rx='2' fill='white'/%3E%3Crect x='16' y='32' width='10' height='10' rx='2' fill='white'/%3E%3Crect x='30' y='32' width='10' height='10' rx='2' fill='white'/%3E%3C/svg%3E" />
   <style>
     @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap");
     :root{
@@ -41,9 +42,20 @@
     .nav{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 0}
     .brand{display:flex;align-items:center;gap:10px;font-weight:800}
     .logo{
-      width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg, rgba(15,118,110,1), rgba(22,163,74,1));
+      width:34px;height:34px;border-radius:10px;background:#0f766e;
       box-shadow:0 12px 28px rgba(15,118,110,.25);
+      position:relative;
     }
+    .logo::before,
+    .logo::after{
+      content:"";
+      position:absolute;
+      width:7px;height:7px;border-radius:2px;background:#fff;
+      top:8px;
+      box-shadow:0 12px 0 #fff;
+    }
+    .logo::before{left:9px}
+    .logo::after{left:18px}
     .nav-links{display:flex;align-items:center;gap:18px;color:var(--muted);font-weight:600}
     .nav-links a:hover{color:var(--text)}
     .nav-cta{display:flex;align-items:center;gap:10px}
@@ -99,6 +111,18 @@
     .mini-table th,.mini-table td{padding:6px 6px;border-bottom:1px solid rgba(15,31,27,.08);text-align:left}
     .mini-table th{color:var(--muted);font-weight:600}
     .tagline{font-size:.78rem;color:var(--muted)}
+    .calendar-grid{
+      display:grid;grid-template-columns:repeat(7,1fr);gap:6px;
+      border:1px solid rgba(15,31,27,.08);border-radius:14px;padding:10px;background:#fff;
+      font-size:.78rem;
+    }
+    .calendar-head{font-weight:700;color:var(--muted);text-align:center}
+    .calendar-cell{
+      min-height:44px;border-radius:10px;border:1px solid rgba(15,31,27,.06);
+      padding:6px;background:#f9fbfa;
+    }
+    .calendar-cell b{display:block;font-size:.78rem}
+    .calendar-cell span{color:var(--muted)}
     /* SECTIONS */
     section{padding:56px 0}
     .section-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:18px}
@@ -234,7 +258,7 @@
           <div class="mock-header">
             <div>
               <div class="tagline">Panel fiscal · Febrero 2026</div>
-              <div class="mock-title">Control contable — Clínica Sebastián</div>
+              <div class="mock-title">Control contable — Vértice Salud SL</div>
             </div>
             <div class="mock-filters">
               <span class="mock-pill">Mensual</span>
@@ -340,8 +364,38 @@
             <div class="mock-title">Calendario de pagos</div>
             <span class="mock-pill">Marzo 2026</span>
           </div>
-          <div class="mock-chart" aria-hidden="true"></div>
-          <figcaption class="shot-caption">Tesorería por vencimientos con prorrateo.</figcaption>
+          <div class="calendar-grid" aria-hidden="true">
+            <div class="calendar-head">L</div><div class="calendar-head">M</div><div class="calendar-head">X</div><div class="calendar-head">J</div><div class="calendar-head">V</div><div class="calendar-head">S</div><div class="calendar-head">D</div>
+            <div class="calendar-cell"><b>1</b><span>0,00 €</span></div>
+            <div class="calendar-cell"><b>2</b><span>622,85 €</span></div>
+            <div class="calendar-cell"><b>3</b><span>0,00 €</span></div>
+            <div class="calendar-cell"><b>4</b><span>363,00 €</span></div>
+            <div class="calendar-cell"><b>5</b><span>1.158,78 €</span></div>
+            <div class="calendar-cell"><b>6</b><span>2.030,83 €</span></div>
+            <div class="calendar-cell"><b>7</b><span>0,00 €</span></div>
+            <div class="calendar-cell"><b>8</b><span>0,00 €</span></div>
+            <div class="calendar-cell"><b>9</b><span>999,72 €</span></div>
+            <div class="calendar-cell"><b>10</b><span>2.155,04 €</span></div>
+            <div class="calendar-cell"><b>11</b><span>1.446,00 €</span></div>
+            <div class="calendar-cell"><b>12</b><span>183,92 €</span></div>
+            <div class="calendar-cell"><b>13</b><span>0,00 €</span></div>
+            <div class="calendar-cell"><b>14</b><span>0,00 €</span></div>
+            <div class="calendar-cell"><b>15</b><span>0,00 €</span></div>
+            <div class="calendar-cell"><b>16</b><span>226,84 €</span></div>
+            <div class="calendar-cell"><b>17</b><span>366,57 €</span></div>
+            <div class="calendar-cell"><b>18</b><span>21,56 €</span></div>
+            <div class="calendar-cell"><b>19</b><span>2.377,79 €</span></div>
+            <div class="calendar-cell"><b>20</b><span>0,00 €</span></div>
+            <div class="calendar-cell"><b>21</b><span>877,57 €</span></div>
+            <div class="calendar-cell"><b>22</b><span>0,00 €</span></div>
+            <div class="calendar-cell"><b>23</b><span>0,00 €</span></div>
+            <div class="calendar-cell"><b>24</b><span>158,27 €</span></div>
+            <div class="calendar-cell"><b>25</b><span>2.298,59 €</span></div>
+            <div class="calendar-cell"><b>26</b><span>722,75 €</span></div>
+            <div class="calendar-cell"><b>27</b><span>2.155,35 €</span></div>
+            <div class="calendar-cell"><b>28</b><span>0,00 €</span></div>
+          </div>
+          <figcaption class="shot-caption">Tesorería por vencimientos con prorrateo diario.</figcaption>
         </figure>
 
         <figure class="shot mock">
@@ -351,7 +405,7 @@
           </div>
           <table class="mini-table">
             <tbody>
-              <tr><td>Cliente</td><td>Clínica Nova SL</td></tr>
+              <tr><td>Cliente</td><td>Estudio Nébula SL</td></tr>
               <tr><td>Base</td><td>1.580,00 €</td></tr>
               <tr><td>IVA</td><td>331,80 €</td></tr>
               <tr><td>Total</td><td>1.911,80 €</td></tr>
