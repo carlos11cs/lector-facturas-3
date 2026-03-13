@@ -2570,7 +2570,7 @@ function analyzeIncomeForItem(item) {
       if (extracted.is_rectificativa) {
         item.isRectificativa = true;
       }
-      const detectedClient = extracted.client_name || extracted.provider_name;
+      const detectedClient = extracted.client_name || extracted.client;
 
       if (!item.touched.client && detectedClient) {
         item.client = detectedClient;

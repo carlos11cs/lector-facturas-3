@@ -1006,6 +1006,33 @@ def contains_forbidden_keyword(name: Optional[str]) -> bool:
     return any(keyword in lowered for keyword in forbidden)
 
 
+def _is_valid_client(
+    candidate: Optional[str],
+    company_names,
+    text: Optional[str] = None,
+) -> bool:
+    if candidate is None:
+        return False
+    value = str(candidate).strip()
+    if not value:
+        return False
+    if contains_forbidden_keyword(value):
+        return False
+    if _looks_like_metadata(value):
+        return False
+    if _is_same_entity(value, company_names):
+        return False
+    has_form = has_legal_form(value)
+    inline_tax = _has_tax_id(value) or _has_iban(value) or "iban" in value.lower()
+    has_tax = bool(text and _supplier_has_near_tax_id_or_iban(text, value))
+    if looks_like_person(value):
+        return inline_tax or has_tax
+    if not has_form and not (inline_tax or has_tax):
+        # Allow non-legal-form clients only if tax id/IBAN is present.
+        return False
+    return True
+
+
 def _is_valid_supplier(
     candidate: Optional[str],
     company_names,
@@ -1199,6 +1226,87 @@ def _extract_supplier_candidates(text: str, company_names=None) -> List[Tuple[st
     return candidates
 
 
+def _extract_client_candidates(text: str, company_names=None) -> List[Tuple[str, int]]:
+    if not text:
+        return []
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return []
+
+    client_keywords = [
+        "cliente",
+        "facturado a",
+        "destinatario",
+        "receptor",
+        "enviado a",
+        "bill to",
+        "ship to",
+    ]
+    supplier_keywords = [
+        "expedido por",
+        "emisor",
+        "proveedor",
+        "facturado por",
+        "en nombre de",
+        "issued by",
+        "seller",
+    ]
+    operational_keywords = [
+        "transporte",
+        "envío",
+        "envio",
+        "logística",
+        "logistica",
+        "shipping",
+    ]
+
+    header_lines = lines[:8]
+    line_counts = {}
+    for line in lines:
+        key = _normalize_entity_name(line)
+        if key:
+            line_counts[key] = line_counts.get(key, 0) + 1
+
+    candidates: List[Tuple[str, int]] = []
+    for idx, line in enumerate(lines):
+        lowered = line.lower()
+        if any(keyword in lowered for keyword in supplier_keywords):
+            continue
+        if any(keyword in lowered for keyword in operational_keywords) and not _contains_legal_form(line):
+            continue
+        if _looks_like_metadata(line):
+            continue
+        if _is_same_entity(line, company_names):
+            continue
+        if contains_forbidden_keyword(line):
+            continue
+
+        score = 0
+        if line in header_lines:
+            score += 10
+        if _contains_legal_form(line):
+            score += 70
+        if _has_tax_id(line):
+            score += 35
+        if not _contains_legal_form(line) and not _has_tax_id(line) and not _has_iban(line):
+            for offset in (1, 2):
+                if idx + offset < len(lines):
+                    neighbor = lines[idx + offset]
+                    if _has_tax_id(neighbor) or _has_iban(neighbor):
+                        score += 20
+                        break
+        if line_counts.get(_normalize_entity_name(line), 0) > 1:
+            score += 8
+        if any(keyword in lowered for keyword in client_keywords):
+            score += 35
+
+        if score <= 0:
+            continue
+        candidates.append((line, score))
+
+    return candidates
+
+
 def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
     if not text:
         return None
@@ -1278,6 +1386,59 @@ def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
 
 def _extract_supplier_from_text(text: str, company_names=None) -> Optional[str]:
     return _select_best_supplier(text, company_names)
+
+
+def _select_best_client(text: str, company_names=None) -> Optional[str]:
+    if not text:
+        return None
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    client_keywords = [
+        "cliente",
+        "facturado a",
+        "destinatario",
+        "receptor",
+        "enviado a",
+        "bill to",
+        "ship to",
+    ]
+    supplier_keywords = [
+        "expedido por",
+        "emisor",
+        "proveedor",
+        "facturado por",
+        "en nombre de",
+        "issued by",
+        "seller",
+    ]
+
+    for idx, line in enumerate(lines):
+        lowered = line.lower()
+        if any(keyword in lowered for keyword in supplier_keywords):
+            continue
+        if any(keyword in lowered for keyword in client_keywords):
+            parts = re.split(r"cliente|facturado a|destinatario|receptor|enviado a|bill to|ship to", line, flags=re.IGNORECASE)
+            if len(parts) > 1:
+                candidate = parts[1].strip(" :-")
+                if _is_valid_client(candidate, company_names, text):
+                    return _strip_inline_tax_id(candidate)
+            for offset in (1, 2):
+                if idx + offset < len(lines):
+                    candidate = lines[idx + offset].strip()
+                    if _is_valid_client(candidate, company_names, text):
+                        return _strip_inline_tax_id(candidate)
+
+    candidates = _extract_client_candidates(text, company_names)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[1], reverse=True)
+    best, score = candidates[0]
+    if _is_valid_client(best, company_names, text):
+        return _strip_inline_tax_id(best)
+    return None
+
+
+def _extract_client_from_text(text: str, company_names=None) -> Optional[str]:
+    return _select_best_client(text, company_names)
 
 
 def _match_known_supplier(text: str, known_suppliers: Optional[List[str]], company_names=None) -> Optional[str]:
@@ -2083,6 +2244,25 @@ def analyze_invoice(
             ):
                 heuristic_supplier = None
             provider_name = heuristic_supplier
+    else:
+        client_source_text = embedded_text if pdf_kind == "original" else extracted_text
+        client_name = client_name.strip() if isinstance(client_name, str) else client_name
+        if isinstance(client_name, str):
+            client_name = _strip_inline_tax_id(client_name)
+        if client_name is not None and not _is_valid_client(
+            client_name, company_names, client_source_text
+        ):
+            client_name = None
+        if client_name is None and analysis_status == "ok":
+            heuristic_client = _extract_client_from_text(
+                client_source_text,
+                company_names,
+            )
+            if heuristic_client is not None and not _is_valid_client(
+                heuristic_client, company_names, client_source_text
+            ):
+                heuristic_client = None
+            client_name = heuristic_client
 
     if not payment_dates and payment_terms_days is None:
         payment_terms_days = extract_payment_terms_days(extracted_text)
@@ -2169,6 +2349,7 @@ def analyze_invoice(
         "supplier": provider_name,
         "provider_name": provider_name,
         "client_name": client_name,
+        "client": client_name,
         "invoice_date": invoice_date,
         "payment_terms_days": payment_terms_days,
         "payment_dates": payment_dates,
