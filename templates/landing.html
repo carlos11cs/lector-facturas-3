@@ -1,169 +1,533 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="es">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Ledged · SaaS para gestorías</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Ledged — Control fiscal para gestorías</title>
+  <meta name="description" content="Plataforma B2B para gestorías: análisis de facturas, IVA, tesorería por vencimientos, P&G (PGC España) e informes trimestrales." />
+  <meta name="theme-color" content="#0f766e" />
+  <style>
+    @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap");
+    :root{
+      --bg:#f6faf8;
+      --panel:#ffffff;
+      --muted:#5b6b66;
+      --text:#0f1f1b;
+      --brand:#0f766e;
+      --brand-2:#16a34a;
+      --line:rgba(15,31,27,.10);
+      --shadow:0 16px 40px rgba(15,31,27,.08);
+      --radius:18px;
+      --max:1120px;
+      --font: "Manrope", "Segoe UI", system-ui, -apple-system, sans-serif;
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;padding:0;font-family:var(--font);color:var(--text);background:radial-gradient(1200px 600px at 70% -10%, rgba(15,118,110,.14), transparent 60%), var(--bg);}
+    a{color:inherit;text-decoration:none}
+    .container{max-width:var(--max);margin:0 auto;padding:0 20px}
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:.55rem;border-radius:999px;padding:.85rem 1.05rem;font-weight:650;border:1px solid transparent;cursor:pointer;transition:.15s transform, .15s opacity, .15s background}
+    .btn:active{transform:translateY(1px)}
+    .btn.primary{background:var(--brand);color:#fff}
+    .btn.primary:hover{opacity:.95}
+    .btn.ghost{background:transparent;border-color:var(--line);color:var(--text)}
+    .btn.ghost:hover{background:rgba(15,31,27,.03)}
+    .pill{display:inline-flex;align-items:center;gap:.5rem;border:1px solid var(--line);background:rgba(255,255,255,.70);backdrop-filter: blur(10px);padding:.35rem .65rem;border-radius:999px;color:var(--muted);font-size:.85rem}
+    header{
+      position:sticky;top:0;z-index:50;
+      background:rgba(246,250,248,.75);
+      backdrop-filter: blur(10px);
+      border-bottom:1px solid rgba(15,31,27,.06);
+    }
+    .nav{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 0}
+    .brand{display:flex;align-items:center;gap:10px;font-weight:800}
+    .logo{
+      width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg, rgba(15,118,110,1), rgba(22,163,74,1));
+      box-shadow:0 12px 28px rgba(15,118,110,.25);
+    }
+    .nav-links{display:flex;align-items:center;gap:18px;color:var(--muted);font-weight:600}
+    .nav-links a:hover{color:var(--text)}
+    .nav-cta{display:flex;align-items:center;gap:10px}
+    .menu-btn{display:none}
+    /* HERO */
+    .hero{padding:54px 0 24px}
+    .hero-grid{display:grid;grid-template-columns: 1.1fr .9fr;gap:28px;align-items:center}
+    h1{font-size:44px;line-height:1.05;margin:14px 0 12px;letter-spacing:-.02em}
+    .lead{color:var(--muted);font-size:1.08rem;line-height:1.5;margin:0 0 18px}
+    .hero-actions{display:flex;gap:10px;flex-wrap:wrap}
+    .trust{display:flex;gap:14px;flex-wrap:wrap;margin-top:18px;color:var(--muted);font-size:.92rem}
+    .trust span{display:inline-flex;align-items:center;gap:8px}
+    .dot{width:8px;height:8px;border-radius:999px;background:rgba(15,118,110,.35)}
+    .shot{
+      border-radius:var(--radius);
+      background:linear-gradient(180deg, rgba(255,255,255,.9), rgba(255,255,255,.7));
+      border:1px solid rgba(15,31,27,.10);
+      box-shadow:var(--shadow);
+      overflow:hidden;
+    }
+    .shot img{display:block;width:100%;height:auto}
+    .shot-caption{padding:12px 14px;border-top:1px solid rgba(15,31,27,.06);color:var(--muted);font-size:.9rem}
+    .mock{
+      padding:14px;
+    }
+    .mock-header{
+      display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;
+    }
+    .mock-title{
+      font-weight:800;font-size:1rem;letter-spacing:-.01em
+    }
+    .mock-filters{display:flex;gap:6px;flex-wrap:wrap}
+    .mock-pill{
+      padding:.25rem .55rem;border-radius:999px;border:1px solid rgba(15,31,27,.10);font-size:.78rem;color:var(--muted);background:#f4f9f7;
+    }
+    .mock-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px}
+    .mock-card{
+      border:1px solid rgba(15,31,27,.08);border-radius:14px;padding:10px;background:#fff;
+    }
+    .mock-card b{display:block;font-size:1.05rem}
+    .mock-card span{color:var(--muted);font-size:.78rem}
+    .mock-chart{
+      height:120px;border-radius:14px;border:1px solid rgba(15,31,27,.08);
+      background:linear-gradient(180deg, rgba(15,118,110,.10), rgba(15,118,110,0));
+      position:relative;overflow:hidden;
+    }
+    .mock-chart::after{
+      content:"";position:absolute;inset:0;
+      background:linear-gradient(120deg, rgba(15,118,110,.4), rgba(15,118,110,0) 60%);
+      clip-path:polygon(0 75%, 20% 55%, 45% 62%, 65% 40%, 85% 45%, 100% 20%, 100% 100%, 0 100%);
+    }
+    .mini-table{width:100%;border-collapse:collapse;font-size:.82rem}
+    .mini-table th,.mini-table td{padding:6px 6px;border-bottom:1px solid rgba(15,31,27,.08);text-align:left}
+    .mini-table th{color:var(--muted);font-weight:600}
+    .tagline{font-size:.78rem;color:var(--muted)}
+    /* SECTIONS */
+    section{padding:56px 0}
+    .section-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:18px}
+    .section-head h2{margin:0;font-size:28px;letter-spacing:-.01em}
+    .section-head p{margin:0;color:var(--muted);max-width:60ch}
+    .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+    .card{
+      background:var(--panel);
+      border:1px solid rgba(15,31,27,.10);
+      border-radius:var(--radius);
+      padding:16px 16px 14px;
+      box-shadow:0 8px 22px rgba(15,31,27,.04);
+    }
+    .card h3{margin:8px 0 6px;font-size:1.02rem}
+    .card p{margin:0;color:var(--muted);line-height:1.45;font-size:.96rem}
+    .icon{
+      width:38px;height:38px;border-radius:12px;
+      background:rgba(15,118,110,.10);
+      border:1px solid rgba(15,118,110,.20);
+      display:grid;place-items:center;
+    }
+    .icon svg{width:20px;height:20px;fill:var(--brand)}
+    /* SCREENSHOTS */
+    .shots-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+    .shots-grid .shot{height:100%}
+    /* PRICING */
+    .pricing-wrap{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:14px}
+    .toggle{
+      display:flex;align-items:center;gap:10px;color:var(--muted);font-weight:650
+    }
+    .switch{
+      width:52px;height:30px;border-radius:999px;background:rgba(15,31,27,.10);position:relative;cursor:pointer;border:1px solid rgba(15,31,27,.12)
+    }
+    .knob{
+      width:24px;height:24px;border-radius:999px;background:#fff;position:absolute;top:2px;left:2px;box-shadow:0 10px 18px rgba(0,0,0,.12);transition:.18s left
+    }
+    .switch.on{background:rgba(15,118,110,.25);border-color:rgba(15,118,110,.25)}
+    .switch.on .knob{left:26px}
+    .plans{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+    .plan{padding:18px;border-radius:var(--radius);border:1px solid rgba(15,31,27,.12);background:rgba(255,255,255,.88);box-shadow:0 10px 28px rgba(15,31,27,.05)}
+    .plan.featured{border-color:rgba(15,118,110,.35);box-shadow:0 18px 44px rgba(15,118,110,.12)}
+    .plan .tag{display:inline-flex;align-items:center;gap:8px;font-size:.85rem;color:var(--muted);margin-bottom:10px}
+    .tag b{color:var(--text)}
+    .price{display:flex;align-items:flex-end;gap:6px;margin:6px 0 12px}
+    .price .num{font-size:38px;letter-spacing:-.02em;font-weight:850}
+    .price .per{color:var(--muted);padding-bottom:6px}
+    .ul{list-style:none;padding:0;margin:12px 0 0}
+    .ul li{display:flex;gap:10px;align-items:flex-start;margin:10px 0;color:var(--muted)}
+    .check{width:18px;height:18px;border-radius:6px;background:rgba(22,163,74,.12);border:1px solid rgba(22,163,74,.25);display:grid;place-items:center;flex:0 0 auto;margin-top:2px}
+    .check svg{width:12px;height:12px;fill:var(--brand-2)}
+    /* FAQ */
+    details{background:var(--panel);border:1px solid rgba(15,31,27,.10);border-radius:14px;padding:14px 14px;box-shadow:0 8px 18px rgba(15,31,27,.03)}
+    details+details{margin-top:10px}
+    summary{cursor:pointer;font-weight:750}
+    details p{margin:10px 0 0;color:var(--muted);line-height:1.5}
+    /* FOOTER */
+    footer{padding:38px 0;border-top:1px solid rgba(15,31,27,.08);color:var(--muted)}
+    .footer-grid{display:flex;justify-content:space-between;gap:18px;flex-wrap:wrap}
+    .small{font-size:.92rem}
+    /* MOBILE */
+    @media (max-width: 920px){
+      h1{font-size:36px}
+      .hero-grid{grid-template-columns:1fr;gap:16px}
+      .grid3{grid-template-columns:1fr}
+      .shots-grid{grid-template-columns:1fr}
+      .plans{grid-template-columns:1fr}
+      .nav-links{display:none}
+      .menu-btn{display:inline-flex}
+      .mobile-panel{display:none}
+      .mobile-panel.open{display:block;border-top:1px solid rgba(15,31,27,.06);padding:10px 0 14px}
+      .mobile-panel a{display:block;padding:10px 0;color:var(--muted);font-weight:650}
+      .mobile-panel a:hover{color:var(--text)}
+    }
+  </style>
 </head>
-<body class="landing-page">
-  <header class="landing-header">
-    <div class="brand">
-      <span class="brand-mark" aria-hidden="true">
-        <svg viewBox="0 0 40 40" role="img" focusable="false">
-          <rect x="4" y="4" width="32" height="32" rx="8"></rect>
-          <rect x="12" y="10" width="6" height="6" rx="2" fill="var(--panel)"></rect>
-          <rect x="12" y="20" width="6" height="6" rx="2" fill="var(--panel)"></rect>
-          <rect x="22" y="10" width="12" height="16" rx="3" fill="var(--panel)"></rect>
-        </svg>
-      </span>
+<body>
+<header>
+  <div class="container">
+    <div class="nav">
+      <a class="brand" href="#top" aria-label="Ledged">
+        <span class="logo" aria-hidden="true"></span>
+        <span>Ledged</span>
+      </a>
+
+      <nav class="nav-links" aria-label="Navegación">
+        <a href="#producto">Producto</a>
+        <a href="#capturas">Capturas</a>
+        <a href="#pricing">Precios</a>
+        <a href="#faq">FAQ</a>
+      </nav>
+
+      <div class="nav-cta">
+        <a class="btn ghost" href="/login">Acceder</a>
+        <a class="btn primary" href="/register">Crear cuenta</a>
+        <button class="btn ghost menu-btn" id="menuBtn" aria-expanded="false" aria-controls="mobilePanel">Menú</button>
+      </div>
+    </div>
+
+    <div class="mobile-panel" id="mobilePanel">
+      <a href="#producto">Producto</a>
+      <a href="#capturas">Capturas</a>
+      <a href="#pricing">Precios</a>
+      <a href="#faq">FAQ</a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+  <div class="hero">
+    <div class="container">
+      <div class="hero-grid">
+        <div>
+          <span class="pill">B2B · Exclusivo para gestorías</span>
+          <h1>Control fiscal y contable, con lectura de facturas y reporting trimestral.</h1>
+          <p class="lead">
+            Ledged centraliza varias empresas por gestoría, calcula IVA por tipo, tesorería por vencimientos y una P&G alineada con el PGC.
+            Diseñado para uso real, con validaciones matemáticas y corrección manual cuando hace falta.
+          </p>
+
+          <div class="hero-actions">
+            <a class="btn primary" href="/register">Empezar ahora</a>
+            <a class="btn ghost" href="#capturas">Ver capturas</a>
+          </div>
+
+          <div class="trust">
+            <span><span class="dot"></span> Multiempresa + multiusuario (staff)</span>
+            <span><span class="dot"></span> IVA soportado / repercutido</span>
+            <span><span class="dot"></span> Calendario por vencimientos</span>
+          </div>
+        </div>
+
+        <figure class="shot mock" aria-label="Vista del panel (demo)">
+          <div class="mock-header">
+            <div>
+              <div class="tagline">Panel fiscal · Febrero 2026</div>
+              <div class="mock-title">Control contable — Clínica Sebastián</div>
+            </div>
+            <div class="mock-filters">
+              <span class="mock-pill">Mensual</span>
+              <span class="mock-pill">IVA 21%</span>
+              <span class="mock-pill">IS 25%</span>
+            </div>
+          </div>
+          <div class="mock-cards">
+            <div class="mock-card"><span>Gastos totales</span><b>17.784,22 €</b></div>
+            <div class="mock-card"><span>IVA deducible</span><b>1.552,31 €</b></div>
+            <div class="mock-card"><span>Ingresos brutos</span><b>26.480,10 €</b></div>
+          </div>
+          <div class="mock-chart" aria-hidden="true"></div>
+          <figcaption class="shot-caption">Datos inventados para demo. Vista de IVA, IS y tesorería por vencimientos.</figcaption>
+        </figure>
+      </div>
+    </div>
+  </div>
+
+  <section id="producto">
+    <div class="container">
+      <div class="section-head">
+        <div>
+          <h2>Hecho para gestorías, no para “pymes que prueban apps”.</h2>
+          <p>Flujo de trabajo real: OCR + IA, validación matemática, IVA/IRPF/IS, balance de situación y envío de informes por email.</p>
+        </div>
+      </div>
+
+      <div class="grid3">
+        <div class="card">
+          <div class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10l6-6V5a2 2 0 0 0-2-2Zm-2 14h4l-4 4v-4ZM7 7h10v2H7V7Zm0 4h10v2H7v-2Zm0 4h6v2H7v-2Z"/></svg>
+          </div>
+          <h3>Facturas (recibidas y emitidas)</h3>
+          <p>OCR + IA con validación fiscal. Multi‑IVA, rectificativas y edición rápida con coherencia matemática.</p>
+        </div>
+
+        <div class="card">
+          <div class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 10 10A10.01 10.01 0 0 0 12 2Zm1 11h5v-2h-4V6h-2v7Z"/></svg>
+          </div>
+          <h3>Tesorería por vencimientos</h3>
+          <p>0/1/múltiples vencimientos. Se guardan todos y se reparten importes: la vista mensual refleja pagos reales previstos.</p>
+        </div>
+
+        <div class="card">
+          <div class="icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M4 4h16v2H4V4Zm0 14h16v2H4v-2Zm2-2h12V8H6v8Zm2-6h8v4H8v-4Z"/></svg>
+          </div>
+          <h3>P&amp;G + Balance + Modelos</h3>
+          <p>PGC España: cuenta de pérdidas y ganancias, balance de situación, IRPF/IS e informes trimestrales por email.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="capturas">
+    <div class="container">
+      <div class="section-head">
+        <div>
+          <h2>Capturas del producto (datos anonimizados)</h2>
+          <p>Interfaz limpia y orientada a gestoría: tablas grandes, filtros claros y exportación a PDF / email.</p>
+        </div>
+      </div>
+
+      <div class="shots-grid">
+        <figure class="shot mock">
+          <div class="mock-header">
+            <div class="mock-title">Resumen de IVA</div>
+            <span class="mock-pill">Q1 2026</span>
+          </div>
+          <table class="mini-table">
+            <thead>
+              <tr><th>Tipo</th><th>Base (€)</th><th>IVA (€)</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>21%</td><td>48.320,90</td><td>10.147,39</td></tr>
+              <tr><td>10%</td><td>6.210,00</td><td>621,00</td></tr>
+              <tr><td>0%</td><td>4.650,00</td><td>0,00</td></tr>
+            </tbody>
+          </table>
+          <figcaption class="shot-caption">IVA soportado y repercutido con cierre trimestral.</figcaption>
+        </figure>
+
+        <figure class="shot mock">
+          <div class="mock-header">
+            <div class="mock-title">Cuenta de P&amp;G (PGC)</div>
+            <span class="mock-pill">YTD</span>
+          </div>
+          <table class="mini-table">
+            <tbody>
+              <tr><td>Cifra de negocios</td><td>92.840,12 €</td></tr>
+              <tr><td>Aprovisionamientos</td><td>-31.240,40 €</td></tr>
+              <tr><td>Gastos de personal</td><td>-22.880,00 €</td></tr>
+              <tr><td>Resultado explotación</td><td>28.719,72 €</td></tr>
+            </tbody>
+          </table>
+          <figcaption class="shot-caption">Estructura PGC con IS estimado automático.</figcaption>
+        </figure>
+
+        <figure class="shot mock">
+          <div class="mock-header">
+            <div class="mock-title">Calendario de pagos</div>
+            <span class="mock-pill">Marzo 2026</span>
+          </div>
+          <div class="mock-chart" aria-hidden="true"></div>
+          <figcaption class="shot-caption">Tesorería por vencimientos con prorrateo.</figcaption>
+        </figure>
+
+        <figure class="shot mock">
+          <div class="mock-header">
+            <div class="mock-title">OCR + IA</div>
+            <span class="mock-pill">Facturas emitidas</span>
+          </div>
+          <table class="mini-table">
+            <tbody>
+              <tr><td>Cliente</td><td>Clínica Nova SL</td></tr>
+              <tr><td>Base</td><td>1.580,00 €</td></tr>
+              <tr><td>IVA</td><td>331,80 €</td></tr>
+              <tr><td>Total</td><td>1.911,80 €</td></tr>
+            </tbody>
+          </table>
+          <figcaption class="shot-caption">Lectura automática con validación matemática.</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <section id="pricing">
+    <div class="container">
+      <div class="pricing-wrap">
+        <div>
+          <h2 style="margin:0 0 6px;font-size:28px;letter-spacing:-.01em">Precios pensados para gestorías</h2>
+          <p style="margin:0;color:var(--muted)">Escala por nº de empresas y usuarios staff. Sin sorpresas.</p>
+        </div>
+
+        <div class="toggle" aria-label="Selector mensual/anual">
+          <span>Mensual</span>
+          <div class="switch" id="billingSwitch" role="switch" aria-checked="false" tabindex="0">
+            <div class="knob" aria-hidden="true"></div>
+          </div>
+          <span>Anual <span class="pill" style="margin-left:6px">-15%</span></span>
+        </div>
+      </div>
+
+      <div class="plans" id="plans">
+        <div class="plan">
+          <div class="tag"><b>Starter</b> · Para empezar</div>
+          <div class="price"><div class="num" data-month="49" data-year="41">49€</div><div class="per">/ mes</div></div>
+          <a class="btn primary" href="/register" style="width:100%">Elegir Starter</a>
+          <ul class="ul">
+            <li><span class="check"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12 3.4 13.4 9 19 21 7 19.6 5.6 9 16.2Z"/></svg></span>Hasta <b>5 empresas</b></li>
+            <li><span class="check"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12 3.4 13.4 9 19 21 7 19.6 5.6 9 16.2Z"/></svg></span>Hasta <b>2 usuarios staff</b></li>
+            <li><span class="check"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12 3.4 13.4 9 19 21 7 19.6 5.6 9 16.2Z"/></svg></span>IVA + tesorería por vencimientos</li>
+            <li><span class="check"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12 3.4 13.4 9 19 21 7 19.6 5.6 9 16.2Z"/></svg></span>Exportación de informes</li>
+          </ul>
+        </div>
+
+        <div class="plan featured">
+          <div class="tag"><b>Pro</b> · Más popular</div>
+          <div class="price"><div class="num" data-month="119" data-year="101">119€</div><div class="per">/ mes</div></div>
+          <a class="btn primary" href="/register" style="width:100%">Elegir Pro</a>
+          <ul class="ul">
+            <li><span class="check"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12 3.4 13.4 9 19 21 7 19.6 5.6 9 16.2Z"/></svg></span>Hasta <b>25 empresas</b></li>
+            <li><span class="check"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12 3.4 13.4 9 19 21 7 19.6 5.6 9 16.2Z"/></svg></span>Hasta <b>8 usuarios staff</b></li>
+            <li><span class="check"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12 3.4 13.4 9 19 21 7 19.6 5.6 9 16.2Z"/></svg></span>Multi‑IVA con validación matemática</li>
+            <li><span class="check"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12 3.4 13.4 9 19 21 7 19.6 5.6 9 16.2Z"/></svg></span>Envío de informes por email</li>
+            <li><span class="check"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12 3.4 13.4 9 19 21 7 19.6 5.6 9 16.2Z"/></svg></span>Soporte prioritario</li>
+          </ul>
+        </div>
+
+        <div class="plan">
+          <div class="tag"><b>Business</b> · Equipos medianos</div>
+          <div class="price"><div class="num" data-month="249" data-year="212">249€</div><div class="per">/ mes</div></div>
+          <a class="btn primary" href="/register" style="width:100%">Elegir Business</a>
+          <ul class="ul">
+            <li><span class="check"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12 3.4 13.4 9 19 21 7 19.6 5.6 9 16.2Z"/></svg></span>Hasta <b>75 empresas</b></li>
+            <li><span class="check"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12 3.4 13.4 9 19 21 7 19.6 5.6 9 16.2Z"/></svg></span>Hasta <b>20 usuarios staff</b></li>
+            <li><span class="check"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12 3.4 13.4 9 19 21 7 19.6 5.6 9 16.2Z"/></svg></span>Roles y permisos avanzados</li>
+            <li><span class="check"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12 3.4 13.4 9 19 21 7 19.6 5.6 9 16.2Z"/></svg></span>Soporte prioritario + onboarding</li>
+          </ul>
+        </div>
+      </div>
+
+      <p class="small" style="margin:14px 0 0;color:var(--muted)">
+        ¿Necesitas más empresas o usuarios? Puedes ampliar por add‑ons o pedir Enterprise.
+      </p>
+    </div>
+  </section>
+
+  <section id="faq">
+    <div class="container">
+      <div class="section-head">
+        <div>
+          <h2>FAQ</h2>
+          <p>Preguntas típicas de gestoría antes de activar un SaaS.</p>
+        </div>
+      </div>
+
+      <details>
+        <summary>¿Guardáis los PDFs de las facturas?</summary>
+        <p>No. Ledged extrae y almacena únicamente los datos relevantes para contabilidad e impuestos.</p>
+      </details>
+
+      <details>
+        <summary>¿Qué pasa si una factura escaneada se lee mal?</summary>
+        <p>La app no se rompe: se marca el análisis como parcial/baja calidad y puedes introducir o corregir los datos manualmente.</p>
+      </details>
+
+      <details>
+        <summary>¿Soporta varios tipos de IVA en la misma factura?</summary>
+        <p>Sí. El desglose se guarda por tipo (0/4/10/21 y otros si apareciesen), con validación aritmética.</p>
+      </details>
+
+      <details>
+        <summary>¿Puedo tener varios usuarios dentro de la misma gestoría?</summary>
+        <p>Sí. Cada gestoría puede crear usuarios staff y asignar empresas cliente a un miembro del equipo.</p>
+      </details>
+    </div>
+  </section>
+
+  <section>
+    <div class="container">
+      <div class="card" style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap">
+        <div>
+          <h2 style="margin:0 0 6px;font-size:26px">¿Listo para probar Ledged con tu equipo?</h2>
+          <p style="margin:0;color:var(--muted)">Crea la cuenta de gestoría y añade usuarios staff en minutos.</p>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <a class="btn primary" href="/register">Crear cuenta</a>
+          <a class="btn ghost" href="mailto:soporte@ledged.app">Contactar soporte</a>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="footer-grid">
       <div>
-        <span class="brand-title">Ledged</span>
-        <span class="brand-subtitle">Plataforma fiscal para gestorías</span>
+        <div class="brand"><span class="logo" aria-hidden="true"></span><span>Ledged</span></div>
+        <p class="small" style="margin:10px 0 0">Software B2B para gestorías · Valencia</p>
+      </div>
+      <div class="small">
+        <div style="font-weight:800;color:var(--text);margin-bottom:8px">Legal</div>
+        <div><a href="/legal">Aviso legal</a></div>
+        <div><a href="/privacy">Política de privacidad</a></div>
+        <div><a href="/cookies">Cookies</a></div>
+      </div>
+      <div class="small">
+        <div style="font-weight:800;color:var(--text);margin-bottom:8px">Contacto</div>
+        <div><a href="mailto:soporte@ledged.app">soporte@ledged.app</a></div>
+        <div><a href="/login">Acceso</a> · <a href="/register">Registro</a></div>
       </div>
     </div>
-    <nav class="landing-nav">
-      <a href="#beneficios">Beneficios</a>
-      <a href="#pricing">Pricing</a>
-      <a href="{{ url_for('login') }}" class="button ghost">Acceder</a>
-    </nav>
-  </header>
+    <p class="small" style="margin:18px 0 0">© <span id="year"></span> Ledged.</p>
+  </div>
+</footer>
 
-  <main>
-    <section class="hero">
-      <div class="hero-content">
-        <h1>La forma más simple de gestionar facturas, impuestos y clientes desde una gestoría</h1>
-        <p class="hero-subtitle">Ledged automatiza la lectura de facturas, el control fiscal y la comunicación con tus empresas.</p>
-        <div class="hero-actions">
-          <a href="{{ url_for('register') }}" class="button primary">Empieza hoy mismo</a>
-          <a href="{{ url_for('login') }}" class="button ghost">Solicita acceso</a>
-        </div>
-        <p class="hero-note">Registro abierto exclusivamente para gestorías.</p>
-      </div>
-      <div class="hero-card">
-        <h3>¿Qué puedes automatizar?</h3>
-        <ul>
-          <li>Lectura de facturas recibidas y emitidas con OCR + IA</li>
-          <li>Calendario de pagos y cobros</li>
-          <li>Informes trimestrales listos para enviar</li>
-          <li>Multiempresa y usuarios por trabajador</li>
-        </ul>
-      </div>
-    </section>
+<script>
+  // Mobile menu
+  const btn = document.getElementById('menuBtn');
+  const panel = document.getElementById('mobilePanel');
+  if(btn){
+    btn.addEventListener('click', () => {
+      const open = panel.classList.toggle('open');
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
 
-    <section class="product-preview">
-      <div>
-        <h2>Un panel pensado para gestorías</h2>
-        <p>Visualiza cartera de empresas, facturas, pagos y resultados fiscales en un solo lugar.</p>
-        <ul class="preview-list">
-          <li>Panel fiscal con indicadores clave</li>
-          <li>Seguimiento de IVA por trimestre</li>
-          <li>Alertas de vencimientos y cobros</li>
-        </ul>
-      </div>
-      <div class="mockup">
-        <div class="mockup-header">
-          <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-        </div>
-        <div class="mockup-body">
-          <div class="mockup-row"></div>
-          <div class="mockup-row wide"></div>
-          <div class="mockup-row"></div>
-          <div class="mockup-row wide"></div>
-        </div>
-      </div>
-    </section>
+  // Pricing toggle
+  const sw = document.getElementById('billingSwitch');
+  const nums = Array.from(document.querySelectorAll('.price .num'));
+  const pers = Array.from(document.querySelectorAll('.price .per'));
+  function setBilling(isYear){
+    sw.classList.toggle('on', isYear);
+    sw.setAttribute('aria-checked', String(isYear));
+    nums.forEach((n) => {
+      const v = isYear ? n.dataset.year : n.dataset.month;
+      n.textContent = v + "€";
+    });
+    pers.forEach((p) => p.textContent = isYear ? "/ mes (anual)" : "/ mes");
+  }
+  if(sw){
+    sw.addEventListener('click', () => setBilling(!sw.classList.contains('on')));
+    sw.addEventListener('keydown', (e) => {
+      if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); setBilling(!sw.classList.contains('on')); }
+    });
+  }
+  setBilling(false);
 
-    <section id="beneficios" class="benefits">
-      <h2>Beneficios clave para gestorías</h2>
-      <div class="benefit-grid">
-        <div class="benefit-card">
-          <h3>OCR + IA listo para producción</h3>
-          <p>Automatiza facturas recibidas y emitidas sin depender del cliente.</p>
-        </div>
-        <div class="benefit-card">
-          <h3>Multiempresa real</h3>
-          <p>Gestiona varias empresas por gestoría con permisos por trabajador.</p>
-        </div>
-        <div class="benefit-card">
-          <h3>Calendario fiscal</h3>
-          <p>Controla pagos, cobros y vencimientos en un mismo panel.</p>
-        </div>
-        <div class="benefit-card">
-          <h3>Informes trimestrales</h3>
-          <p>Genera y envía informes por email con un clic.</p>
-        </div>
-        <div class="benefit-card">
-          <h3>Comunicación gestoría ↔ empresa</h3>
-          <p>Emails de informes con respuesta directa al gestor.</p>
-        </div>
-        <div class="benefit-card">
-          <h3>Seguridad europea</h3>
-          <p>Datos alojados en la UE con cumplimiento GDPR.</p>
-        </div>
-      </div>
-    </section>
-
-    <section id="pricing" class="pricing">
-      <h2>Planes para gestorías</h2>
-      <p class="pricing-subtitle">Escala tu cartera de clientes con planes claros según el número de empresas que gestionas.</p>
-      <div class="pricing-grid">
-        <div class="price-card">
-          <span class="plan-icon">🧾</span>
-          <h3>Starter</h3>
-          <p class="price">Hasta 10 empresas</p>
-          <ul class="check-list">
-            <li>✔️ 1 usuario</li>
-            <li>✔️ OCR automático</li>
-            <li>✔️ Informes y calendario fiscal</li>
-          </ul>
-          <a href="{{ url_for('register') }}" class="button ghost">Empieza hoy mismo</a>
-        </div>
-        <div class="price-card highlight">
-          <span class="plan-badge">⭐ Más elegido</span>
-          <span class="plan-icon">📊</span>
-          <h3>Pro</h3>
-          <p class="price">Hasta 50 empresas</p>
-          <ul class="check-list">
-            <li>✔️ Hasta 5 usuarios</li>
-            <li>✔️ Informes trimestrales por email</li>
-            <li>✔️ Soporte prioritario</li>
-          </ul>
-          <a href="{{ url_for('register') }}" class="button primary">Empieza hoy mismo</a>
-        </div>
-        <div class="price-card">
-          <span class="plan-icon">🏢</span>
-          <h3>Advanced</h3>
-          <p class="price">Empresas ilimitadas</p>
-          <ul class="check-list">
-            <li>✔️ Usuarios ilimitados</li>
-            <li>✔️ Informes personalizados</li>
-            <li>✔️ Prioridad máxima</li>
-          </ul>
-          <a href="{{ url_for('register') }}" class="button ghost">Solicita acceso</a>
-        </div>
-      </div>
-    </section>
-  </main>
-
-  <footer class="legal-footer">
-    <div class="footer-brand">
-      <span class="brand-mark" aria-hidden="true">
-        <svg viewBox="0 0 40 40" role="img" focusable="false">
-          <rect x="4" y="4" width="32" height="32" rx="8"></rect>
-          <rect x="12" y="10" width="6" height="6" rx="2" fill="var(--panel)"></rect>
-          <rect x="12" y="20" width="6" height="6" rx="2" fill="var(--panel)"></rect>
-          <rect x="22" y="10" width="12" height="16" rx="3" fill="var(--panel)"></rect>
-        </svg>
-      </span>
-      <span>© 2026 Ledged · Contacto: soporte@ledged.app</span>
-    </div>
-    <div class="legal-links">
-      <a href="{{ url_for('legal_notice') }}">Aviso legal</a>
-      <a href="{{ url_for('privacy') }}">Política de privacidad</a>
-      <a href="{{ url_for('cookies') }}">Política de cookies</a>
-      <a href="{{ url_for('terms') }}">Términos del servicio</a>
-    </div>
-  </footer>
+  document.getElementById('year').textContent = new Date().getFullYear();
+</script>
 </body>
 </html>
