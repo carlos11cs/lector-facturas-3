@@ -76,6 +76,8 @@ const ANALYSIS_ERROR_MESSAGE =
   "No se ha podido analizar la factura automáticamente. Puedes introducir los datos manualmente.";
 const LOW_QUALITY_SCAN_MESSAGE =
   "La calidad de la factura escaneada no es óptima. No se puede leer correctamente. Por favor, introduce los datos manualmente.";
+const TIMEOUT_MESSAGE =
+  "El análisis tardó demasiado y se detuvo. Puedes introducir los datos manualmente.";
 const VAT_WARNING_MESSAGE =
   "Puede que la calidad de la imagen o la información sea dudosa. Por favor, revisa siempre las cantidades y los tipos de IVA.";
 
@@ -2567,6 +2569,13 @@ function analyzeIncomeForItem(item) {
         renderIncomeTable();
         return;
       }
+      if (extracted.analysis_status === "timeout") {
+        item.analysisPending = false;
+        item.analysisError = true;
+        item.analysisErrorMessage = TIMEOUT_MESSAGE;
+        renderIncomeTable();
+        return;
+      }
       if (extracted.is_rectificativa) {
         item.isRectificativa = true;
       }
@@ -2823,6 +2832,13 @@ function analyzeInvoiceForItem(item) {
           showLowQualityModal();
           lowQualityDismissedIds.add(item.id);
         }
+        renderTable();
+        return;
+      }
+      if (extracted.analysis_status === "timeout") {
+        item.analysisPending = false;
+        item.analysisError = true;
+        item.analysisErrorMessage = TIMEOUT_MESSAGE;
         renderTable();
         return;
       }

@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import date, timedelta
 from typing import Any, Dict, Optional, List, Tuple
 
@@ -32,6 +33,8 @@ PDF_OCR_ZOOM = float(os.getenv("PDF_OCR_ZOOM", "2.0"))
 OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", "5"))
 OCR_MAX_SECONDS = int(os.getenv("OCR_MAX_SECONDS", "7"))
 OCR_MAX_DIM = int(os.getenv("OCR_MAX_DIM", "1600"))
+OCR_TIMEOUT_SECONDS = 60
+LLM_TIMEOUT_SECONDS = 60
 _client: Optional[OpenAI] = None
 _ocr_reader = None
 _EU_AMOUNT_RE = re.compile(r"\d{1,3}(?:[.\s]\d{3})*,\d{2}|\d+,\d{2}")
@@ -1972,6 +1975,15 @@ def _extract_image_text_ocr_from_bytes(data: bytes) -> str:
     return "\n".join(lines).strip()
 
 
+def _run_with_timeout(func, timeout: int, *args, **kwargs):
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(func, *args, **kwargs)
+        try:
+            return future.result(timeout=timeout), False
+        except FuturesTimeoutError:
+            return None, True
+
+
 def analyze_invoice(
     file_path: Optional[str] = None,
     file_bytes: Optional[bytes] = None,
@@ -2019,7 +2031,28 @@ def analyze_invoice(
         is_scanned = not is_significant
         ocr_text = ""
         if is_scanned:
-            ocr_text = _extract_pdf_text_ocr_from_bytes(file_bytes)
+            ocr_text, ocr_timed_out = _run_with_timeout(
+                _extract_pdf_text_ocr_from_bytes, OCR_TIMEOUT_SECONDS, file_bytes
+            )
+            if ocr_timed_out:
+                logger.warning("OCR timeout (%s). Se devuelve estado timeout.", filename)
+                return {
+                    "analysis_status": "timeout",
+                    "supplier": None,
+                    "provider_name": None,
+                    "client_name": None,
+                    "invoice_date": None,
+                    "payment_dates": [],
+                    "payment_date": None,
+                    "base_amount": None,
+                    "vat_rate": None,
+                    "vat_amount": None,
+                    "total_amount": None,
+                    "extraction_source": None,
+                    "confidence_score": None,
+                    "analysis_text": "",
+                    "validation": {"is_consistent": None, "difference": None},
+                }
             extracted_text = ocr_text
             used_ocr = True
             pdf_kind = "scanned"
@@ -2032,7 +2065,28 @@ def analyze_invoice(
         logger.info("Longitud texto OCR (%s): %s", filename, len(ocr_text.strip()))
         logger.info("Texto PDF extraido (%s):\n%s", filename, extracted_text)
     elif is_image:
-        extracted_text = _extract_image_text_ocr_from_bytes(file_bytes)
+        extracted_text, ocr_timed_out = _run_with_timeout(
+            _extract_image_text_ocr_from_bytes, OCR_TIMEOUT_SECONDS, file_bytes
+        )
+        if ocr_timed_out:
+            logger.warning("OCR timeout (%s). Se devuelve estado timeout.", filename)
+            return {
+                "analysis_status": "timeout",
+                "supplier": None,
+                "provider_name": None,
+                "client_name": None,
+                "invoice_date": None,
+                "payment_dates": [],
+                "payment_date": None,
+                "base_amount": None,
+                "vat_rate": None,
+                "vat_amount": None,
+                "total_amount": None,
+                "extraction_source": None,
+                "confidence_score": None,
+                "analysis_text": "",
+                "validation": {"is_consistent": None, "difference": None},
+            }
         used_ocr = True
         pdf_kind = "image"
         logger.info("OCR aplicado a imagen (%s).", filename)
@@ -2108,16 +2162,39 @@ def analyze_invoice(
 
     logger.info("Prompt enviado (%s): %s", filename, prompt)
 
-    response = client.chat.completions.create(
-        model=DEFAULT_MODEL,
-        max_tokens=MAX_OUTPUT_TOKENS,
-        temperature=0,
-        top_p=1,
-        seed=42,
-        messages=[
-            {"role": "user", "content": prompt},
-        ],
-    )
+    def _call_llm():
+        return client.chat.completions.create(
+            model=DEFAULT_MODEL,
+            max_tokens=MAX_OUTPUT_TOKENS,
+            temperature=0,
+            top_p=1,
+            seed=42,
+            timeout=LLM_TIMEOUT_SECONDS,
+            messages=[
+                {"role": "user", "content": prompt},
+            ],
+        )
+
+    response, llm_timed_out = _run_with_timeout(_call_llm, LLM_TIMEOUT_SECONDS)
+    if llm_timed_out or response is None:
+        logger.warning("LLM timeout (%s). Se devuelve estado timeout.", filename)
+        return {
+            "analysis_status": "timeout",
+            "supplier": None,
+            "provider_name": None,
+            "client_name": None,
+            "invoice_date": None,
+            "payment_dates": [],
+            "payment_date": None,
+            "base_amount": None,
+            "vat_rate": None,
+            "vat_amount": None,
+            "total_amount": None,
+            "extraction_source": None,
+            "confidence_score": None,
+            "analysis_text": "",
+            "validation": {"is_consistent": None, "difference": None},
+        }
 
     raw_text = ""
     if response.choices:
