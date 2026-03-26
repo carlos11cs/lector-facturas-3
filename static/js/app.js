@@ -449,6 +449,34 @@ function computePaymentDate(invoiceDate, paymentDate) {
   return base.toISOString().slice(0, 10);
 }
 
+function addDaysToISO(dateStr, days) {
+  if (!dateStr) {
+    return "";
+  }
+  const base = new Date(`${dateStr}T00:00:00`);
+  if (Number.isNaN(base.getTime())) {
+    return "";
+  }
+  base.setDate(base.getDate() + Number(days || 0));
+  return base.toISOString().slice(0, 10);
+}
+
+function getEffectivePaymentDates(item) {
+  const dates = Array.isArray(item.paymentDates)
+    ? item.paymentDates.filter((d) => Boolean(d))
+    : [];
+  if (!dates.length && item.paymentDate) {
+    dates.push(item.paymentDate);
+  }
+  if (!dates.length && item.date) {
+    const fallback = computePaymentDate(item.date, item.paymentDate);
+    if (fallback) {
+      dates.push(fallback);
+    }
+  }
+  return dates;
+}
+
 function getCalendarMonthYear() {
   if (calendarMonth && calendarYear) {
     return { month: calendarMonth, year: calendarYear };
@@ -2144,6 +2172,91 @@ function renderTable() {
       });
     }
 
+    const paymentRow = document.createElement("tr");
+    paymentRow.className = "payment-dates-row";
+    const paymentCell = document.createElement("td");
+    paymentCell.colSpan = 8;
+    const paymentWrap = document.createElement("div");
+    paymentWrap.className = "payment-dates-wrap";
+    const paymentLabel = document.createElement("span");
+    paymentLabel.className = "field-label";
+    paymentLabel.textContent = "Fechas de pago";
+    paymentWrap.appendChild(paymentLabel);
+
+    const paymentInputs = document.createElement("div");
+    paymentInputs.className = "payment-dates-inputs";
+    const dates = getEffectivePaymentDates(item);
+    item.paymentDates = dates.slice();
+    item.paymentDate = dates[0] || "";
+
+    const renderPaymentInputs = () => {
+      paymentInputs.innerHTML = "";
+      (item.paymentDates || []).forEach((dateValue, idx) => {
+        const dateInput = document.createElement("input");
+        dateInput.type = "date";
+        dateInput.value = dateValue || "";
+        dateInput.disabled = item.analysisPending;
+        dateInput.addEventListener("change", () => {
+          item.paymentDates[idx] = dateInput.value;
+          item.paymentDate = item.paymentDates[0] || "";
+        });
+        paymentInputs.appendChild(dateInput);
+        if ((item.paymentDates || []).length > 1) {
+          const removeBtn = document.createElement("button");
+          removeBtn.type = "button";
+          removeBtn.className = "button ghost small";
+          removeBtn.textContent = "Quitar";
+          removeBtn.disabled = item.analysisPending;
+          removeBtn.addEventListener("click", () => {
+            item.paymentDates.splice(idx, 1);
+            item.paymentDate = item.paymentDates[0] || "";
+            renderPaymentInputs();
+          });
+          paymentInputs.appendChild(removeBtn);
+        }
+      });
+    };
+    renderPaymentInputs();
+
+    const quickActions = document.createElement("div");
+    quickActions.className = "payment-quick-actions";
+    [15, 30, 60, 90].forEach((days) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "button ghost small";
+      btn.textContent = `${days} días`;
+      btn.disabled = item.analysisPending;
+      btn.addEventListener("click", () => {
+        if (!item.date) {
+          alert("Selecciona primero la fecha de factura.");
+          return;
+        }
+        const newDate = addDaysToISO(item.date, days);
+        item.paymentDates = newDate ? [newDate] : [];
+        item.paymentDate = newDate || "";
+        renderPaymentInputs();
+      });
+      quickActions.appendChild(btn);
+    });
+
+    const addDateBtn = document.createElement("button");
+    addDateBtn.type = "button";
+    addDateBtn.className = "button ghost small";
+    addDateBtn.textContent = "Añadir fecha";
+    addDateBtn.disabled = item.analysisPending;
+    addDateBtn.addEventListener("click", () => {
+      item.paymentDates = item.paymentDates || [];
+      item.paymentDates.push("");
+      renderPaymentInputs();
+    });
+
+    paymentWrap.appendChild(paymentInputs);
+    paymentWrap.appendChild(quickActions);
+    paymentWrap.appendChild(addDateBtn);
+    paymentCell.appendChild(paymentWrap);
+    paymentRow.appendChild(paymentCell);
+    uploadTableBody.appendChild(paymentRow);
+
     updateSupplierWarning();
     const initialSource =
       parseNumberInput(baseInput.value) !== null ? "base" : "total";
@@ -2477,6 +2590,91 @@ function renderIncomeTable() {
         incomeUploadTableBody.appendChild(row);
       });
     }
+
+    const paymentRow = document.createElement("tr");
+    paymentRow.className = "payment-dates-row";
+    const paymentCell = document.createElement("td");
+    paymentCell.colSpan = 8;
+    const paymentWrap = document.createElement("div");
+    paymentWrap.className = "payment-dates-wrap";
+    const paymentLabel = document.createElement("span");
+    paymentLabel.className = "field-label";
+    paymentLabel.textContent = "Fechas de cobro";
+    paymentWrap.appendChild(paymentLabel);
+
+    const paymentInputs = document.createElement("div");
+    paymentInputs.className = "payment-dates-inputs";
+    const dates = getEffectivePaymentDates(item);
+    item.paymentDates = dates.slice();
+    item.paymentDate = dates[0] || "";
+
+    const renderPaymentInputs = () => {
+      paymentInputs.innerHTML = "";
+      (item.paymentDates || []).forEach((dateValue, idx) => {
+        const dateInput = document.createElement("input");
+        dateInput.type = "date";
+        dateInput.value = dateValue || "";
+        dateInput.disabled = item.analysisPending;
+        dateInput.addEventListener("change", () => {
+          item.paymentDates[idx] = dateInput.value;
+          item.paymentDate = item.paymentDates[0] || "";
+        });
+        paymentInputs.appendChild(dateInput);
+        if ((item.paymentDates || []).length > 1) {
+          const removeBtn = document.createElement("button");
+          removeBtn.type = "button";
+          removeBtn.className = "button ghost small";
+          removeBtn.textContent = "Quitar";
+          removeBtn.disabled = item.analysisPending;
+          removeBtn.addEventListener("click", () => {
+            item.paymentDates.splice(idx, 1);
+            item.paymentDate = item.paymentDates[0] || "";
+            renderPaymentInputs();
+          });
+          paymentInputs.appendChild(removeBtn);
+        }
+      });
+    };
+    renderPaymentInputs();
+
+    const quickActions = document.createElement("div");
+    quickActions.className = "payment-quick-actions";
+    [15, 30, 60, 90].forEach((days) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "button ghost small";
+      btn.textContent = `${days} días`;
+      btn.disabled = item.analysisPending;
+      btn.addEventListener("click", () => {
+        if (!item.date) {
+          alert("Selecciona primero la fecha de factura.");
+          return;
+        }
+        const newDate = addDaysToISO(item.date, days);
+        item.paymentDates = newDate ? [newDate] : [];
+        item.paymentDate = newDate || "";
+        renderPaymentInputs();
+      });
+      quickActions.appendChild(btn);
+    });
+
+    const addDateBtn = document.createElement("button");
+    addDateBtn.type = "button";
+    addDateBtn.className = "button ghost small";
+    addDateBtn.textContent = "Añadir fecha";
+    addDateBtn.disabled = item.analysisPending;
+    addDateBtn.addEventListener("click", () => {
+      item.paymentDates = item.paymentDates || [];
+      item.paymentDates.push("");
+      renderPaymentInputs();
+    });
+
+    paymentWrap.appendChild(paymentInputs);
+    paymentWrap.appendChild(quickActions);
+    paymentWrap.appendChild(addDateBtn);
+    paymentCell.appendChild(paymentWrap);
+    paymentRow.appendChild(paymentCell);
+    incomeUploadTableBody.appendChild(paymentRow);
 
     const initialSource =
       parseNumberInput(baseInput.value) !== null ? "base" : "total";
