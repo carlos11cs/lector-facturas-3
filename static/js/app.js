@@ -2075,15 +2075,17 @@ function renderTable() {
         const vatLineInput = document.createElement("input");
         vatLineInput.type = "text";
         vatLineInput.min = "0";
-        vatLineInput.readOnly = true;
+        vatLineInput.readOnly = false;
         vatLineInput.value = line.vat_amount || "";
+        vatLineInput.disabled = item.analysisPending;
         vatCell.appendChild(vatLineInput);
 
         const totalLineInput = document.createElement("input");
         totalLineInput.type = "text";
         totalLineInput.min = "0";
-        totalLineInput.readOnly = true;
+        totalLineInput.readOnly = false;
         totalLineInput.value = line.total || "";
+        totalLineInput.disabled = item.analysisPending;
         totalCell.appendChild(totalLineInput);
 
         const removeLineBtn = document.createElement("button");
@@ -2103,6 +2105,8 @@ function renderTable() {
         const syncLine = () => {
           line.rate = rateSelect.value;
           line.base = baseLineInput.value;
+          line.vat_amount = vatLineInput.value;
+          line.total = totalLineInput.value;
           const normalized = normalizeBreakdownLine(line);
           if (normalized) {
             line.vat_amount = formatAmountInput(normalized.vat_amount);
@@ -2127,6 +2131,8 @@ function renderTable() {
         };
         rateSelect.addEventListener("change", syncLine);
         baseLineInput.addEventListener("input", syncLine);
+        vatLineInput.addEventListener("input", syncLine);
+        totalLineInput.addEventListener("input", syncLine);
         syncLine();
 
         row.appendChild(baseCell);
@@ -2403,15 +2409,17 @@ function renderIncomeTable() {
         const vatLineInput = document.createElement("input");
         vatLineInput.type = "text";
         vatLineInput.min = "0";
-        vatLineInput.readOnly = true;
+        vatLineInput.readOnly = false;
         vatLineInput.value = line.vat_amount || "";
+        vatLineInput.disabled = item.analysisPending;
         vatCell.appendChild(vatLineInput);
 
         const totalLineInput = document.createElement("input");
         totalLineInput.type = "text";
         totalLineInput.min = "0";
-        totalLineInput.readOnly = true;
+        totalLineInput.readOnly = false;
         totalLineInput.value = line.total || "";
+        totalLineInput.disabled = item.analysisPending;
         totalCell.appendChild(totalLineInput);
 
         const removeLineBtn = document.createElement("button");
@@ -2431,6 +2439,8 @@ function renderIncomeTable() {
         const syncLine = () => {
           line.rate = rateSelect.value;
           line.base = baseLineInput.value;
+          line.vat_amount = vatLineInput.value;
+          line.total = totalLineInput.value;
           const normalized = normalizeBreakdownLine(line);
           if (normalized) {
             line.vat_amount = formatAmountInput(normalized.vat_amount);
@@ -2455,6 +2465,8 @@ function renderIncomeTable() {
         };
         rateSelect.addEventListener("change", syncLine);
         baseLineInput.addEventListener("input", syncLine);
+        vatLineInput.addEventListener("input", syncLine);
+        totalLineInput.addEventListener("input", syncLine);
         syncLine();
 
         row.appendChild(baseCell);
