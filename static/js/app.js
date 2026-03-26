@@ -4170,7 +4170,7 @@ function renderInvoices(invoices) {
     tr.dataset.id = invoice.id;
 
     const dateTd = document.createElement("td");
-    dateTd.textContent = invoice.invoice_date;
+    dateTd.textContent = invoice.invoice_date || invoice.payment_date || "";
 
     const supplierTd = document.createElement("td");
     supplierTd.textContent = invoice.supplier;
@@ -4350,7 +4350,7 @@ function enterIncomeInvoiceEditMode(row, invoice) {
 
   const dateInput = document.createElement("input");
   dateInput.type = "date";
-  dateInput.value = invoice.invoice_date;
+  dateInput.value = invoice.invoice_date || invoice.payment_date || "";
 
   const clientInput = document.createElement("input");
   clientInput.type = "text";

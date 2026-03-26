@@ -3379,18 +3379,23 @@ def list_income_invoices():
                 income_invoices_table.c.id,
                 income_invoices_table.c.invoice_date,
                 income_invoices_table.c.payment_date,
+                income_invoices_table.c.payment_dates,
                 income_invoices_table.c.client,
                 income_invoices_table.c.base_amount,
                 income_invoices_table.c.vat_rate,
                 income_invoices_table.c.vat_amount,
                 income_invoices_table.c.total_amount,
+                income_invoices_table.c.vat_breakdown,
                 income_invoices_table.c.extraction_source,
                 income_invoices_table.c.confidence_score,
                 income_invoices_table.c.original_filename,
             )
             .where(income_invoices_table.c.user_id == data_owner_id)
             .where(income_invoices_table.c.company_id == company_id)
-            .where(income_invoices_table.c.invoice_date.between(start, end))
+            .where(
+                (income_invoices_table.c.invoice_date.between(start, end))
+                | (income_invoices_table.c.payment_date.between(start, end))
+            )
             .order_by(income_invoices_table.c.invoice_date.desc(), income_invoices_table.c.id.desc())
         ).mappings().all()
 
@@ -3400,12 +3405,13 @@ def list_income_invoices():
             "invoice_date": row["invoice_date"],
             "payment_date": row["payment_date"]
             or compute_payment_date(row["invoice_date"], row["payment_date"]),
+            "payment_dates": row.get("payment_dates"),
             "client": row["client"],
             "base_amount": float(row["base_amount"]),
             "vat_rate": int(row["vat_rate"]) if row["vat_rate"] is not None else None,
             "vat_amount": float(row["vat_amount"]) if row["vat_amount"] is not None else None,
             "total_amount": float(row["total_amount"]),
-            "vat_breakdown": row["vat_breakdown"],
+            "vat_breakdown": row.get("vat_breakdown"),
             "extraction_source": row.get("extraction_source"),
             "confidence_score": float(row["confidence_score"]) if row["confidence_score"] is not None else None,
             "original_filename": row["original_filename"],
