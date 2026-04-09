@@ -3470,7 +3470,14 @@ def create_income_invoices():
                 errors.append(f"Archivo faltante para {original_name}.")
                 continue
             if not client:
-                errors.append(f"Cliente obligatorio para {original_name}.")
+                app.logger.info(
+                    "Cliente vacío para %s. Se permite guardado manual.",
+                    original_name,
+                )
+            if client and is_supplier_same_as_company(client, company_id, conn):
+                errors.append(
+                    f"El cliente no puede ser la empresa activa ({original_name})."
+                )
                 continue
             if vat_breakdown:
                 rates = {line.get("rate") for line in vat_breakdown if line.get("rate") is not None}
@@ -3588,7 +3595,11 @@ def update_income_invoice(invoice_id):
     if not invoice_date:
         errors.append("Fecha obligatoria.")
     if not client:
-        errors.append("Cliente obligatorio.")
+        app.logger.info("Cliente vacío en actualización de factura emitida %s.", invoice_id)
+    if client and company_id:
+        with engine.connect() as conn:
+            if is_supplier_same_as_company(client, company_id, conn):
+                errors.append("El cliente no puede ser la empresa activa.")
     if base_amount is None and total_amount is None:
         errors.append("Base imponible o total obligatorio.")
     if base_amount is not None and total_amount is not None:

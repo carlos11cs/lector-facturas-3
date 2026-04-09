@@ -127,9 +127,13 @@ const currencyFormatter = new Intl.NumberFormat("es-ES", {
 });
 
 function formatCurrency(value) {
-  const number = Number(value);
+  let number = Number(value);
   if (!Number.isFinite(number)) {
-    return "0,00 €";
+    const parsed = parseNumberInput(value);
+    if (parsed === null) {
+      return "0,00 €";
+    }
+    number = parsed;
   }
   return `${currencyFormatter.format(number)} €`;
 }
@@ -172,10 +176,34 @@ function roundAmount(value) {
 }
 
 function formatAmountInput(value) {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+  if (value === null || value === undefined) {
     return "";
   }
-  return currencyFormatter.format(Number(value));
+  const parsed =
+    typeof value === "string" ? parseNumberInput(value) : Number(value);
+  if (parsed === null || Number.isNaN(parsed)) {
+    return "";
+  }
+  return currencyFormatter.format(parsed);
+}
+
+function attachAmountInputBehavior(input) {
+  if (!input) {
+    return;
+  }
+  input.addEventListener("focus", () => {
+    if (typeof input.select === "function") {
+      input.select();
+    }
+  });
+  input.addEventListener("blur", () => {
+    const parsed = parseNumberInput(input.value);
+    if (parsed === null) {
+      input.value = "";
+      return;
+    }
+    input.value = formatAmountInput(parsed);
+  });
 }
 
 function getPnlInputValue(id) {
@@ -649,6 +677,7 @@ const headerUserEmail = document.getElementById("headerUserEmail");
 const incomeUploadBtn = document.getElementById("incomeUploadBtn");
 const incomeDropZone = document.getElementById("incomeDropZone");
 const incomeFileInput = document.getElementById("incomeFileInput");
+const incomeFolderInput = document.getElementById("incomeFolderInput");
 const incomeUploadTableBody = document.querySelector("#incomeUploadTable tbody");
 const incomeEmptyMessage = document.getElementById("incomeEmptyMessage");
 const incomeInvoicesTableBody = document.querySelector("#incomeInvoicesTable tbody");
@@ -1946,6 +1975,7 @@ function renderTable() {
       Array.isArray(item.vatBreakdown) && item.vatBreakdown.length > 0;
     baseInput.disabled = item.analysisPending;
     baseInput.readOnly = breakdownActive;
+    attachAmountInputBehavior(baseInput);
     baseInput.addEventListener("input", () => {
       item.base = baseInput.value;
       item.touched.base = true;
@@ -2008,6 +2038,7 @@ function renderTable() {
     vatAmountInput.value = item.vatAmount;
     vatAmountInput.disabled = item.analysisPending;
     vatAmountInput.readOnly = breakdownActive;
+    attachAmountInputBehavior(vatAmountInput);
     vatAmountInput.addEventListener("input", () => {
       item.vatAmount = vatAmountInput.value;
       item.touched.vatAmount = true;
@@ -2028,6 +2059,7 @@ function renderTable() {
     totalInput.value = item.total;
     totalInput.disabled = item.analysisPending;
     totalInput.readOnly = breakdownActive;
+    attachAmountInputBehavior(totalInput);
     totalInput.addEventListener("input", () => {
       item.total = totalInput.value;
       item.touched.total = true;
@@ -2099,6 +2131,7 @@ function renderTable() {
         baseLineInput.value = line.base || "";
         baseLineInput.disabled = item.analysisPending;
         baseCell.appendChild(baseLineInput);
+        attachAmountInputBehavior(baseLineInput);
 
         const vatLineInput = document.createElement("input");
         vatLineInput.type = "text";
@@ -2107,6 +2140,7 @@ function renderTable() {
         vatLineInput.value = line.vat_amount || "";
         vatLineInput.disabled = item.analysisPending;
         vatCell.appendChild(vatLineInput);
+        attachAmountInputBehavior(vatLineInput);
 
         const totalLineInput = document.createElement("input");
         totalLineInput.type = "text";
@@ -2115,6 +2149,7 @@ function renderTable() {
         totalLineInput.value = line.total || "";
         totalLineInput.disabled = item.analysisPending;
         totalCell.appendChild(totalLineInput);
+        attachAmountInputBehavior(totalLineInput);
 
         const removeLineBtn = document.createElement("button");
         removeLineBtn.type = "button";
@@ -2354,11 +2389,34 @@ function renderIncomeTable() {
     clientInput.placeholder = "Cliente";
     clientInput.value = item.client;
     clientInput.disabled = item.analysisPending;
+    const clientWarning = document.createElement("div");
+    clientWarning.className = "field-warning";
+    const updateClientWarning = () => {
+      const value = clientInput.value.trim();
+      if (!value) {
+        clientWarning.textContent = "Cliente pendiente de completar.";
+        clientWarning.style.display = "block";
+        clientInput.classList.add("input-warning");
+        return;
+      }
+      if (isSupplierSameAsCompany(value)) {
+        clientWarning.textContent =
+          "El cliente no puede ser la empresa activa.";
+        clientWarning.style.display = "block";
+        clientInput.classList.add("input-warning");
+        return;
+      }
+      clientWarning.textContent = "";
+      clientWarning.style.display = "none";
+      clientInput.classList.remove("input-warning");
+    };
     clientInput.addEventListener("input", () => {
       item.client = clientInput.value;
       item.touched.client = true;
+      updateClientWarning();
     });
     clientTd.appendChild(clientInput);
+    clientTd.appendChild(clientWarning);
 
     const baseTd = document.createElement("td");
     const baseInput = document.createElement("input");
@@ -2366,7 +2424,11 @@ function renderIncomeTable() {
     baseInput.min = "0";
     baseInput.placeholder = "0,00";
     baseInput.value = item.base;
+    const breakdownActive =
+      Array.isArray(item.vatBreakdown) && item.vatBreakdown.length > 0;
     baseInput.disabled = item.analysisPending;
+    baseInput.readOnly = breakdownActive;
+    attachAmountInputBehavior(baseInput);
     baseInput.addEventListener("input", () => {
       item.base = baseInput.value;
       item.touched.base = true;
@@ -2427,6 +2489,7 @@ function renderIncomeTable() {
     vatAmountInput.value = item.vatAmount;
     vatAmountInput.disabled = item.analysisPending;
     vatAmountInput.readOnly = breakdownActive;
+    attachAmountInputBehavior(vatAmountInput);
     vatAmountInput.addEventListener("input", () => {
       item.vatAmount = vatAmountInput.value;
       item.touched.vatAmount = true;
@@ -2447,6 +2510,7 @@ function renderIncomeTable() {
     totalInput.value = item.total;
     totalInput.disabled = item.analysisPending;
     totalInput.readOnly = breakdownActive;
+    attachAmountInputBehavior(totalInput);
     totalInput.addEventListener("input", () => {
       item.total = totalInput.value;
       item.touched.total = true;
@@ -2518,6 +2582,7 @@ function renderIncomeTable() {
         baseLineInput.value = line.base || "";
         baseLineInput.disabled = item.analysisPending;
         baseCell.appendChild(baseLineInput);
+        attachAmountInputBehavior(baseLineInput);
 
         const vatLineInput = document.createElement("input");
         vatLineInput.type = "text";
@@ -2526,6 +2591,7 @@ function renderIncomeTable() {
         vatLineInput.value = line.vat_amount || "";
         vatLineInput.disabled = item.analysisPending;
         vatCell.appendChild(vatLineInput);
+        attachAmountInputBehavior(vatLineInput);
 
         const totalLineInput = document.createElement("input");
         totalLineInput.type = "text";
@@ -2534,6 +2600,7 @@ function renderIncomeTable() {
         totalLineInput.value = line.total || "";
         totalLineInput.disabled = item.analysisPending;
         totalCell.appendChild(totalLineInput);
+        attachAmountInputBehavior(totalLineInput);
 
         const removeLineBtn = document.createElement("button");
         removeLineBtn.type = "button";
@@ -2838,6 +2905,18 @@ function analyzeIncomeForItem(item) {
       }
 
       item.analysisPending = false;
+      const hasExtractedValue = [
+        detectedClient,
+        extracted.invoice_date,
+        extracted.base_amount,
+        extracted.vat_rate,
+        extracted.vat_amount,
+        extracted.total_amount,
+        extracted.vat_breakdown,
+        extracted.totals,
+      ].some((value) => value !== null && value !== undefined && value !== "");
+      item.analysisError = !hasExtractedValue && !item.analysisText;
+      item.analysisErrorMessage = item.analysisError ? ANALYSIS_ERROR_MESSAGE : "";
       renderIncomeTable();
     })
     .catch(() => {
@@ -2859,6 +2938,9 @@ function validateIncomePending() {
     }
     if (!item.client.trim()) {
       errors.push(`Cliente obligatorio: ${item.file.name}`);
+    }
+    if (item.client.trim() && isSupplierSameAsCompany(item.client)) {
+      errors.push(`El cliente no puede ser la empresa activa: ${item.file.name}`);
     }
     const baseValue = parseNumberInput(item.base);
     const totalValue = parseNumberInput(item.total);
@@ -4479,10 +4561,10 @@ function renderIncomeInvoices(invoices) {
     tr.dataset.id = invoice.id;
 
     const dateTd = document.createElement("td");
-    dateTd.textContent = invoice.invoice_date;
+    dateTd.textContent = invoice.invoice_date || invoice.payment_date || "";
 
     const clientTd = document.createElement("td");
-    clientTd.textContent = invoice.client;
+    clientTd.textContent = invoice.client || "Cliente pendiente";
 
     const baseTd = document.createElement("td");
     baseTd.textContent = formatCurrency(invoice.base_amount);
@@ -4557,19 +4639,19 @@ function enterIncomeInvoiceEditMode(row, invoice) {
   const baseInput = document.createElement("input");
   baseInput.type = "text";
   baseInput.min = "0";
-  baseInput.value = invoice.base_amount;
+  baseInput.value = formatAmountInput(invoice.base_amount);
 
   const vatSelect = createVatSelect(invoice.vat_rate);
 
   const vatAmountInput = document.createElement("input");
   vatAmountInput.type = "text";
   vatAmountInput.min = "0";
-  vatAmountInput.value = invoice.vat_amount || 0;
+  vatAmountInput.value = formatAmountInput(invoice.vat_amount || 0);
 
   const totalInput = document.createElement("input");
   totalInput.type = "text";
   totalInput.min = "0";
-  totalInput.value = invoice.total_amount;
+  totalInput.value = formatAmountInput(invoice.total_amount);
 
   const calcInputs = {
     base: baseInput,
@@ -4577,6 +4659,9 @@ function enterIncomeInvoiceEditMode(row, invoice) {
     vatAmount: vatAmountInput,
     total: totalInput,
   };
+  attachAmountInputBehavior(baseInput);
+  attachAmountInputBehavior(vatAmountInput);
+  attachAmountInputBehavior(totalInput);
   baseInput.addEventListener("input", () => {
     applyVatCalculation(invoice, calcInputs, "base");
   });
@@ -4732,19 +4817,19 @@ function enterInvoiceEditMode(row, invoice) {
   const baseInput = document.createElement("input");
   baseInput.type = "text";
   baseInput.min = "0";
-  baseInput.value = invoice.base_amount;
+  baseInput.value = formatAmountInput(invoice.base_amount);
 
   const vatSelect = createVatSelect(invoice.vat_rate);
 
   const vatAmountInput = document.createElement("input");
   vatAmountInput.type = "text";
   vatAmountInput.min = "0";
-  vatAmountInput.value = invoice.vat_amount || 0;
+  vatAmountInput.value = formatAmountInput(invoice.vat_amount || 0);
 
   const totalInput = document.createElement("input");
   totalInput.type = "text";
   totalInput.min = "0";
-  totalInput.value = invoice.total_amount;
+  totalInput.value = formatAmountInput(invoice.total_amount);
 
   const calcInputs = {
     base: baseInput,
@@ -4752,6 +4837,9 @@ function enterInvoiceEditMode(row, invoice) {
     vatAmount: vatAmountInput,
     total: totalInput,
   };
+  attachAmountInputBehavior(baseInput);
+  attachAmountInputBehavior(vatAmountInput);
+  attachAmountInputBehavior(totalInput);
   baseInput.addEventListener("input", () => {
     applyVatCalculation(invoice, calcInputs, "base");
   });
@@ -5341,6 +5429,7 @@ function renderLoanPlanPreview() {
     totalInput.type = "text";
     totalInput.min = "0";
     totalInput.value = formatAmountInput(item.total_amount);
+    attachAmountInputBehavior(totalInput);
     totalInput.addEventListener("input", () => {
       loanPlanDraft[index].total_amount = parseNumberInput(totalInput.value);
     });
@@ -5351,6 +5440,7 @@ function renderLoanPlanPreview() {
     interestInput.type = "text";
     interestInput.min = "0";
     interestInput.value = formatAmountInput(item.interest_amount);
+    attachAmountInputBehavior(interestInput);
     interestInput.addEventListener("input", () => {
       loanPlanDraft[index].interest_amount = parseNumberInput(interestInput.value);
     });
@@ -5361,6 +5451,7 @@ function renderLoanPlanPreview() {
     principalInput.type = "text";
     principalInput.min = "0";
     principalInput.value = formatAmountInput(item.principal_amount);
+    attachAmountInputBehavior(principalInput);
     principalInput.addEventListener("input", () => {
       loanPlanDraft[index].principal_amount = parseNumberInput(principalInput.value);
     });
@@ -6736,6 +6827,7 @@ function bindEvents() {
   const selectFilesBtn = document.getElementById("selectFiles");
   const selectFolderBtn = document.getElementById("selectFolder");
   const incomeSelectFilesBtn = document.getElementById("incomeSelectFiles");
+  const incomeSelectFolderBtn = document.getElementById("incomeSelectFolder");
   const lowQualityAccept = document.getElementById("lowQualityAccept");
   const lowQualityClose = document.getElementById("lowQualityClose");
   if (lowQualityAccept) {
@@ -6774,6 +6866,11 @@ function bindEvents() {
       incomeFileInput.click();
     });
   }
+  if (incomeFolderInput && incomeSelectFolderBtn) {
+    incomeSelectFolderBtn.addEventListener("click", () => {
+      incomeFolderInput.click();
+    });
+  }
   if (fileInput) {
     fileInput.addEventListener("change", (event) => {
       addFiles(event.target.files);
@@ -6790,6 +6887,12 @@ function bindEvents() {
     incomeFileInput.addEventListener("change", (event) => {
       addIncomeFiles(event.target.files);
       incomeFileInput.value = "";
+    });
+  }
+  if (incomeFolderInput) {
+    incomeFolderInput.addEventListener("change", (event) => {
+      addIncomeFiles(event.target.files);
+      incomeFolderInput.value = "";
     });
   }
 
@@ -6881,6 +6984,16 @@ function bindEvents() {
   if (incomeUploadBtn) {
     incomeUploadBtn.addEventListener("click", uploadIncomePending);
   }
+  attachAmountInputBehavior(billingBaseInput);
+  attachAmountInputBehavior(billingVatAmountInput);
+  attachAmountInputBehavior(billingTotalInput);
+  attachAmountInputBehavior(noInvoiceAmount);
+  attachAmountInputBehavior(noInvoiceInterest);
+  attachAmountInputBehavior(noInvoiceVatBase);
+  attachAmountInputBehavior(noInvoiceVatAmount);
+  attachAmountInputBehavior(loanTotalInput);
+  attachAmountInputBehavior(loanInterestInput);
+  attachAmountInputBehavior(loanPrincipalInput);
   if (companySaveBtn) {
     companySaveBtn.addEventListener("click", saveCompany);
   }
