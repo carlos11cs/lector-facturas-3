@@ -3392,10 +3392,7 @@ def list_income_invoices():
             )
             .where(income_invoices_table.c.user_id == data_owner_id)
             .where(income_invoices_table.c.company_id == company_id)
-            .where(
-                (income_invoices_table.c.invoice_date.between(start, end))
-                | (income_invoices_table.c.payment_date.between(start, end))
-            )
+            .where(income_invoices_table.c.invoice_date.between(start, end))
             .order_by(income_invoices_table.c.invoice_date.desc(), income_invoices_table.c.id.desc())
         ).mappings().all()
 
