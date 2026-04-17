@@ -7,3 +7,4 @@ data.db
 *.jpg
 *.png
 .DS_Store
+frontend/
