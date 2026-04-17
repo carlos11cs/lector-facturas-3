@@ -238,6 +238,22 @@ h1 {
   font-weight: 600;
 }
 
+.nav-link-external {
+  border: 1px solid transparent;
+  background: transparent;
+  text-align: left;
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 0.95rem;
+  color: var(--text);
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.nav-link-external:hover {
+  background: #eef4ef;
+}
+
 .sidebar-overlay {
   display: none;
 }
@@ -250,6 +266,38 @@ h1 {
 
 .page-section.active {
   display: flex;
+}
+
+.page-section.sub-hidden {
+  display: none !important;
+}
+
+.section-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 4px 0 18px;
+}
+
+.section-tab {
+  border: 1px solid var(--border);
+  background: #f7faf7;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 9px 14px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.section-tab.active {
+  background: #e1f1ea;
+  border-color: rgba(34, 124, 101, 0.25);
+  color: var(--accent-strong);
+}
+
+.compact-header {
+  margin-top: -4px;
 }
 
 .calendar-toolbar {
@@ -967,6 +1015,24 @@ h1 {
 .billing-form .button {
   align-self: end;
   justify-self: start;
+}
+
+.inline-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.inline-chip {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.inline-chip select {
+  width: 100%;
 }
 
 .billing-entries {

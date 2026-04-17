@@ -38,6 +38,10 @@ let currentIncomeInvoices = [];
 let staffMembers = [];
 let selectedLoanPlanFile = null;
 let loanPlanDraft = [];
+let currentExpenseSubview = "received";
+let currentExpenseMode = "other";
+let currentReportsSubview = "summary";
+let currentStatementsSubview = "pnl";
 const lowQualityDismissedIds = new Set();
 const vatWarningDismissedIds = new Set();
 let billingLastSource = "base";
@@ -64,6 +68,8 @@ const expenseCategoryLabels = {
 };
 
 const noInvoiceTypeLabels = {
+  alquiler_local: "Alquiler local",
+  alquiler_cabina: "Alquiler cabina",
   nomina: "Nómina",
   seguridad_social: "Seguridad Social",
   amortizacion: "Amortización",
@@ -582,6 +588,8 @@ const noInvoiceConcept = document.getElementById("noInvoiceConcept");
 const noInvoiceAmount = document.getElementById("noInvoiceAmount");
 const noInvoiceInterest = document.getElementById("noInvoiceInterest");
 const noInvoiceInterestField = document.getElementById("noInvoiceInterestField");
+const noInvoiceWithholding = document.getElementById("noInvoiceWithholding");
+const noInvoiceWithholdingField = document.getElementById("noInvoiceWithholdingField");
 const noInvoiceVatDeductible = document.getElementById("noInvoiceVatDeductible");
 const noInvoiceVatSelect = document.getElementById("noInvoiceVatSelect");
 const noInvoiceVatBase = document.getElementById("noInvoiceVatBase");
@@ -616,8 +624,9 @@ const dropZone = document.getElementById("dropZone");
 const uploadTableBody = document.querySelector("#uploadTable tbody");
 const emptyMessage = document.getElementById("emptyMessage");
 const uploadBtn = document.getElementById("uploadBtn");
-const navLinks = document.querySelectorAll(".nav-link");
+const navLinks = document.querySelectorAll(".nav-link[data-section]");
 const sections = document.querySelectorAll(".page-section");
+const sectionTabs = document.querySelectorAll(".section-tab[data-parent]");
 const sidebarToggle = document.getElementById("sidebarToggle");
 const sidebarOverlay = document.getElementById("sidebarOverlay");
 const exportPnlBtn = document.getElementById("exportPnlBtn");
@@ -663,6 +672,12 @@ const companyType = document.getElementById("companyType");
 const companyAssignedSelect = document.getElementById("companyAssignedSelect");
 const companyEmail = document.getElementById("companyEmail");
 const companyPhone = document.getElementById("companyPhone");
+const companyVatRegime = document.getElementById("companyVatRegime");
+const companyTaxPeriodicity = document.getElementById("companyTaxPeriodicity");
+const companyFilesModel111 = document.getElementById("companyFilesModel111");
+const companyFilesModel115 = document.getElementById("companyFilesModel115");
+const companyFilesModel130 = document.getElementById("companyFilesModel130");
+const companyFilesModel202 = document.getElementById("companyFilesModel202");
 const companySaveBtn = document.getElementById("companySaveBtn");
 const companiesTableBody = document.querySelector("#companiesTable tbody");
 const companiesEmpty = document.getElementById("companiesEmpty");
@@ -689,6 +704,7 @@ const reportEndMonthSelect = document.getElementById("reportEndMonthSelect");
 const reportDownloadBtn = document.getElementById("reportDownloadBtn");
 const reportEmailBtn = document.getElementById("reportEmailBtn");
 const reportStatus = document.getElementById("reportStatus");
+const fiscalModelsTableBody = document.getElementById("fiscalModelsTableBody");
 const currentUserRole = document.body ? document.body.dataset.userRole : null;
 const paymentCalendar = document.getElementById("paymentCalendar");
 const paymentCalendarTitle = document.getElementById("paymentCalendarTitle");
@@ -699,6 +715,9 @@ const paymentMonthEmpty = document.getElementById("paymentMonthEmpty");
 const paymentDayTitle = document.getElementById("paymentDayTitle");
 const paymentDayList = document.getElementById("paymentDayList");
 const paymentDayTotal = document.getElementById("paymentDayTotal");
+const expenseSectionTitle = document.getElementById("expenseSectionTitle");
+const expenseSectionDescription = document.getElementById("expenseSectionDescription");
+const loanPanel = document.getElementById("loanPanel");
 const pnlInputIds = [
   "pnlLine1",
   "pnlLine2",
@@ -1053,6 +1072,22 @@ function toggleLoanInterestField({
   }
 }
 
+function shouldShowWithholdingField(typeValue) {
+  return ["nomina", "alquiler_local", "alquiler_cabina", "otro"].includes(typeValue);
+}
+
+function toggleNoInvoiceWithholdingField({ typeValue, field = noInvoiceWithholdingField, input = noInvoiceWithholding }) {
+  if (!field || !input) {
+    return;
+  }
+  const visible = shouldShowWithholdingField(typeValue);
+  field.classList.toggle("is-hidden", !visible);
+  input.disabled = !visible;
+  if (!visible) {
+    input.value = "";
+  }
+}
+
 function toggleNoInvoiceVatFields({ typeValue, vatDeductibleValue }) {
   if (
     !noInvoiceVatRateField ||
@@ -1064,14 +1099,15 @@ function toggleNoInvoiceVatFields({ typeValue, vatDeductibleValue }) {
     return;
   }
   const isLoan = typeValue === "prestamo";
-  if (isLoan) {
+  const blocksVat = isLoan || ["nomina", "seguridad_social"].includes(typeValue);
+  if (blocksVat) {
     noInvoiceVatDeductible.value = "false";
     noInvoiceVatDeductible.disabled = true;
   } else {
     noInvoiceVatDeductible.disabled = false;
   }
   const isVatDeductible =
-    (vatDeductibleValue || noInvoiceVatDeductible.value) === "true" && !isLoan;
+    (vatDeductibleValue || noInvoiceVatDeductible.value) === "true" && !blocksVat;
 
   noInvoiceVatRateField.classList.toggle("is-hidden", !isVatDeductible);
   noInvoiceVatBaseField.classList.toggle("is-hidden", !isVatDeductible);
@@ -1082,7 +1118,10 @@ function toggleNoInvoiceVatFields({ typeValue, vatDeductibleValue }) {
     noInvoiceDeductible.disabled = true;
   } else {
     noInvoiceDeductible.disabled = isLoan;
-    if (!isLoan) {
+    if (!blocksVat) {
+      noInvoiceVatBase.value = "";
+      noInvoiceVatAmount.value = "";
+    } else {
       noInvoiceVatBase.value = "";
       noInvoiceVatAmount.value = "";
     }
@@ -1222,6 +1261,7 @@ function setCompanyOptions(list) {
   }
   applyCompanyTaxModules();
   updateHeaderContext();
+  renderFiscalModelsSummary();
 }
 
 function loadStaff() {
@@ -1325,6 +1365,7 @@ function loadCompanies() {
       applyCompanyTaxModules();
       updatePnlSummary();
       updateHeaderContext();
+      renderFiscalModelsSummary();
       return companies;
     });
 }
@@ -1361,6 +1402,11 @@ function renderCompaniesTable(list) {
     }
     const typeTd = document.createElement("td");
     typeTd.textContent = company.company_type === "individual" ? "Autónomo" : "Sociedad";
+    const periodicityTd = document.createElement("td");
+    periodicityTd.textContent =
+      company.tax_periodicity === "monthly" ? "Mensual" : "Trimestral";
+    const profileTd = document.createElement("td");
+    profileTd.textContent = formatCompanyFiscalProfile(company);
     const actionsTd = document.createElement("td");
     actionsTd.classList.add("billing-actions");
 
@@ -1397,6 +1443,8 @@ function renderCompaniesTable(list) {
     tr.appendChild(phoneTd);
     tr.appendChild(assignedTd);
     tr.appendChild(typeTd);
+    tr.appendChild(periodicityTd);
+    tr.appendChild(profileTd);
     tr.appendChild(actionsTd);
     companiesTableBody.appendChild(tr);
   });
@@ -1418,7 +1466,9 @@ function enterCompanyEditMode(row, company) {
   const phoneTd = row.children[4];
   const assignedTd = row.children[5];
   const typeTd = row.children[6];
-  const actionsTd = row.children[7];
+  const periodicityTd = row.children[7];
+  const profileTd = row.children[8];
+  const actionsTd = row.children[9];
 
   const displayInput = document.createElement("input");
   displayInput.type = "text";
@@ -1446,6 +1496,76 @@ function enterCompanyEditMode(row, company) {
   typeSelect.appendChild(optionIndividual);
   typeSelect.appendChild(optionCompany);
   typeSelect.value = company.company_type;
+  const periodicitySelect = document.createElement("select");
+  [
+    { value: "quarterly", label: "Trimestral" },
+    { value: "monthly", label: "Mensual" },
+  ].forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.value;
+    option.textContent = item.label;
+    periodicitySelect.appendChild(option);
+  });
+  periodicitySelect.value = company.tax_periodicity || "quarterly";
+  const profileText = document.createElement("div");
+  profileText.className = "inline-stack";
+  const vatRegimeSelect = document.createElement("select");
+  [
+    { value: "general", label: "IVA general" },
+    { value: "prorata", label: "IVA prorrata" },
+    { value: "exempt", label: "Exento" },
+  ].forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.value;
+    option.textContent = item.label;
+    vatRegimeSelect.appendChild(option);
+  });
+  vatRegimeSelect.value = company.vat_regime || "general";
+  const model111Select = document.createElement("select");
+  const model115Select = document.createElement("select");
+  const model130Select = document.createElement("select");
+  const model202Select = document.createElement("select");
+  [model111Select, model115Select, model130Select, model202Select].forEach((select) => {
+    const noOption = document.createElement("option");
+    noOption.value = "false";
+    noOption.textContent = "No";
+    const yesOption = document.createElement("option");
+    yesOption.value = "true";
+    yesOption.textContent = "Sí";
+    select.appendChild(noOption);
+    select.appendChild(yesOption);
+  });
+  model111Select.value = company.files_model_111 ? "true" : "false";
+  model115Select.value = company.files_model_115 ? "true" : "false";
+  model130Select.value = company.files_model_130 ? "true" : "false";
+  model202Select.value = company.files_model_202 ? "true" : "false";
+  [
+    { label: "IVA", node: vatRegimeSelect },
+    { label: "111", node: model111Select },
+    { label: "115", node: model115Select },
+    { label: "130", node: model130Select },
+    { label: "202", node: model202Select },
+  ].forEach((item) => {
+    const row = document.createElement("label");
+    row.className = "inline-chip";
+    const span = document.createElement("span");
+    span.textContent = item.label;
+    row.appendChild(span);
+    row.appendChild(item.node);
+    profileText.appendChild(row);
+  });
+  const syncInlineFiscalProfile = () => {
+    const isCompanyType = typeSelect.value === "company";
+    model130Select.disabled = isCompanyType;
+    model202Select.disabled = !isCompanyType;
+    if (isCompanyType) {
+      model130Select.value = "false";
+    } else {
+      model202Select.value = "false";
+    }
+  };
+  typeSelect.addEventListener("change", syncInlineFiscalProfile);
+  syncInlineFiscalProfile();
 
   displayTd.textContent = "";
   displayTd.appendChild(displayInput);
@@ -1461,6 +1581,10 @@ function enterCompanyEditMode(row, company) {
   assignedTd.appendChild(assignedSelect);
   typeTd.textContent = "";
   typeTd.appendChild(typeSelect);
+  periodicityTd.textContent = "";
+  periodicityTd.appendChild(periodicitySelect);
+  profileTd.textContent = "";
+  profileTd.appendChild(profileText);
 
   actionsTd.innerHTML = "";
   const saveBtn = document.createElement("button");
@@ -1476,6 +1600,13 @@ function enterCompanyEditMode(row, company) {
       phone: phoneInput.value,
       assigned_user_id: assignedSelect.value,
       company_type: typeSelect.value,
+      tax_periodicity: periodicitySelect.value,
+      vat_regime: vatRegimeSelect.value,
+      files_model_303: vatRegimeSelect.value !== "exempt",
+      files_model_111: model111Select.value === "true",
+      files_model_115: model115Select.value === "true",
+      files_model_130: model130Select.value === "true",
+      files_model_202: model202Select.value === "true",
     });
   });
   const cancelBtn = document.createElement("button");
@@ -1497,7 +1628,13 @@ function saveCompany() {
     !companyType ||
     !companyEmail ||
     !companyPhone ||
-    !companyAssignedSelect
+    !companyAssignedSelect ||
+    !companyVatRegime ||
+    !companyTaxPeriodicity ||
+    !companyFilesModel111 ||
+    !companyFilesModel115 ||
+    !companyFilesModel130 ||
+    !companyFilesModel202
   ) {
     return;
   }
@@ -1513,6 +1650,13 @@ function saveCompany() {
       email: companyEmail.value,
       phone: companyPhone.value,
       assigned_user_id: companyAssignedSelect.value,
+      vat_regime: companyVatRegime.value,
+      tax_periodicity: companyTaxPeriodicity.value,
+      files_model_303: companyVatRegime.value !== "exempt",
+      files_model_111: companyFilesModel111.value === "true",
+      files_model_115: companyFilesModel115.value === "true",
+      files_model_130: companyFilesModel130.value === "true",
+      files_model_202: companyFilesModel202.value === "true",
     }),
   })
     .then((res) => res.json())
@@ -1527,6 +1671,12 @@ function saveCompany() {
       companyEmail.value = "";
       companyPhone.value = "";
       companyAssignedSelect.value = "";
+      companyVatRegime.value = "general";
+      companyTaxPeriodicity.value = "quarterly";
+      companyFilesModel111.value = "false";
+      companyFilesModel115.value = "false";
+      companyFilesModel130.value = "false";
+      companyFilesModel202.value = "false";
       loadCompanies().then(() => {
         refreshAllData();
       });
@@ -1749,6 +1899,237 @@ function applyRoleVisibility() {
     if (staffPanel) {
       staffPanel.style.display = "none";
     }
+  }
+}
+
+function getCompanyFiscalModels(company) {
+  if (!company) {
+    return [];
+  }
+  const models = [];
+  if (company.files_model_303 !== false && company.vat_regime !== "exempt") {
+    models.push("303");
+    models.push("390");
+  }
+  if (company.files_model_111) {
+    models.push("111");
+    models.push("190");
+  }
+  if (company.files_model_115) {
+    models.push("115");
+    models.push("180");
+  }
+  if (company.company_type === "individual" && company.files_model_130) {
+    models.push("130");
+  }
+  if (company.company_type === "company") {
+    models.push("200");
+    if (company.files_model_202) {
+      models.push("202");
+    }
+  }
+  return models;
+}
+
+function formatCompanyFiscalProfile(company) {
+  const models = getCompanyFiscalModels(company);
+  return models.length ? models.join(" · ") : "Perfil pendiente";
+}
+
+function getExpenseModeForSubview(subview) {
+  if (subview === "rent") {
+    return "rent";
+  }
+  if (subview === "payroll") {
+    return "payroll";
+  }
+  return "other";
+}
+
+function setExpenseMode(mode) {
+  currentExpenseMode = mode;
+  if (expenseSectionTitle) {
+    expenseSectionTitle.textContent =
+      mode === "rent"
+        ? "Gastos de alquiler"
+        : mode === "payroll"
+          ? "Nóminas y Seguridad Social"
+          : "Otros gastos y financiación";
+  }
+  if (expenseSectionDescription) {
+    expenseSectionDescription.textContent =
+      mode === "rent"
+        ? "Registra alquileres del local o de cabinas con la misma lógica fiscal y fechas de pago."
+        : mode === "payroll"
+          ? "Centraliza nóminas y Seguridad Social con su fecha contable y vencimiento de pago."
+          : "Registra otros gastos sin factura y préstamos manteniendo calendario de pagos y coherencia contable.";
+  }
+  if (noInvoiceType) {
+    if (mode === "rent") {
+      noInvoiceType.value = "alquiler_local";
+    } else if (mode === "payroll") {
+      noInvoiceType.value = "nomina";
+    } else if (!["amortizacion", "kilometraje", "prestamo", "otro"].includes(noInvoiceType.value)) {
+      noInvoiceType.value = "otro";
+    }
+    toggleLoanInterestField({
+      typeValue: noInvoiceType.value,
+      interestField: noInvoiceInterestField,
+      interestInput: noInvoiceInterest,
+      deductibleSelect: noInvoiceDeductible,
+    });
+    toggleNoInvoiceWithholdingField({
+      typeValue: noInvoiceType.value,
+    });
+    toggleNoInvoiceVatFields({
+      typeValue: noInvoiceType.value,
+      vatDeductibleValue: noInvoiceVatDeductible?.value,
+    });
+  }
+  if (loanPanel) {
+    loanPanel.style.display = mode === "other" ? "" : "none";
+  }
+  renderNoInvoiceExpenses(currentNoInvoiceExpenses || []);
+}
+
+function setExpenseSubview(subview) {
+  currentExpenseSubview = subview;
+  localStorage.setItem("expensesSubview", subview);
+  document.querySelectorAll('.section-tab[data-parent="expenses"]').forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.subsection === subview);
+  });
+  document
+    .querySelectorAll('.page-section[data-group="expenses"]')
+    .forEach((section) => {
+      if (section.dataset.subsection === "received") {
+        section.classList.toggle("sub-hidden", subview !== "received");
+      } else {
+        section.classList.toggle("sub-hidden", subview === "received");
+      }
+    });
+  if (subview !== "received") {
+    setExpenseMode(getExpenseModeForSubview(subview));
+  }
+}
+
+function setGroupedSubview(parent, subsection) {
+  if (parent === "reports") {
+    currentReportsSubview = subsection;
+  } else if (parent === "statements") {
+    currentStatementsSubview = subsection;
+  }
+  localStorage.setItem(`${parent}Subview`, subsection);
+  document.querySelectorAll(`.section-tab[data-parent="${parent}"]`).forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.subsection === subsection);
+  });
+  document.querySelectorAll(`.page-section[data-group="${parent}"]`).forEach((section) => {
+    section.classList.toggle("sub-hidden", section.dataset.subsection !== subsection);
+  });
+}
+
+function ensureCompositeSectionState(sectionId) {
+  if (sectionId === "expenses") {
+    setExpenseSubview(localStorage.getItem("expensesSubview") || currentExpenseSubview || "received");
+    return;
+  }
+  if (sectionId === "reports") {
+    const storedSubview = localStorage.getItem("reportsSubview");
+    currentReportsSubview =
+      storedSubview && ["summary", "taxes"].includes(storedSubview)
+        ? storedSubview
+        : currentReportsSubview === "calendar"
+          ? "summary"
+          : currentReportsSubview || "summary";
+    setGroupedSubview("reports", currentReportsSubview);
+    return;
+  }
+  if (sectionId === "statements") {
+    currentStatementsSubview =
+      localStorage.getItem("statementsSubview") || currentStatementsSubview || "pnl";
+    setGroupedSubview("statements", currentStatementsSubview);
+  }
+}
+
+function renderFiscalModelsSummary() {
+  if (!fiscalModelsTableBody) {
+    return;
+  }
+  const company = getSelectedCompany();
+  if (!company) {
+    fiscalModelsTableBody.innerHTML = "";
+    return;
+  }
+  const { month, year } = getSelectedMonthYear();
+  const period = getSelectedPeriod();
+  const companyId = getSelectedCompanyId();
+  const suffix = companyId ? `&company_id=${companyId}` : "";
+  fiscalModelsTableBody.innerHTML = "";
+  const loadingRow = document.createElement("tr");
+  const loadingCell = document.createElement("td");
+  loadingCell.colSpan = 4;
+  loadingCell.textContent = "Calculando modelos…";
+  loadingRow.appendChild(loadingCell);
+  fiscalModelsTableBody.appendChild(loadingRow);
+
+  fetch(`/api/fiscal-models/summary?month=${month}&year=${year}&period=${period}${suffix}`)
+    .then((res) => res.json())
+    .then((data) => {
+      fiscalModelsTableBody.innerHTML = "";
+      const rows = data.rows || [];
+      if (!data.ok || !rows.length) {
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = 4;
+        td.textContent =
+          (data.errors && data.errors.join(" · ")) ||
+          "Configura el perfil fiscal de la empresa para ver sus modelos.";
+        tr.appendChild(td);
+        fiscalModelsTableBody.appendChild(tr);
+        return;
+      }
+      rows.forEach((row) => {
+        const tr = document.createElement("tr");
+        const values = [
+          row.model,
+          row.periodicity,
+          row.status,
+          typeof row.amount === "number" ? formatCurrency(row.amount) : row.amount || "0,00 €",
+        ];
+        values.forEach((value) => {
+          const td = document.createElement("td");
+          td.textContent = value;
+          tr.appendChild(td);
+        });
+        fiscalModelsTableBody.appendChild(tr);
+      });
+    })
+    .catch(() => {
+      fiscalModelsTableBody.innerHTML = "";
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 4;
+      td.textContent = "No se pudo calcular el resumen de modelos.";
+      tr.appendChild(td);
+      fiscalModelsTableBody.appendChild(tr);
+    });
+}
+
+function syncCompanyFiscalProfileInputs() {
+  if (
+    !companyType ||
+    !companyFilesModel130 ||
+    !companyFilesModel202 ||
+    !companyVatRegime
+  ) {
+    return;
+  }
+  const isCompany = companyType.value === "company";
+  companyFilesModel130.disabled = isCompany;
+  companyFilesModel202.disabled = !isCompany;
+  if (isCompany) {
+    companyFilesModel130.value = "false";
+  } else {
+    companyFilesModel202.value = "false";
   }
 }
 
@@ -3965,7 +4346,7 @@ function renderPaymentCalendar(month, year, data) {
     0
   );
   if (paymentMonthTotal) {
-    paymentMonthTotal.textContent = `Total a pagar del mes: ${formatCurrency(monthTotal)}`;
+    paymentMonthTotal.textContent = `Total previsto del mes: ${formatCurrency(monthTotal)}`;
   }
   if (paymentMonthEmpty) {
     paymentMonthEmpty.style.display = monthTotal > 0 ? "none" : "block";
@@ -4156,7 +4537,7 @@ function renderPaymentDayDetails(day) {
     Number(calendarMonthValue || monthSelect?.value),
     Number(calendarYearValue || yearSelect?.value)
   );
-  paymentDayTitle.textContent = `Pagos del ${day} ${monthLabel}`;
+  paymentDayTitle.textContent = `Movimientos del ${day} ${monthLabel}`;
 
   let total = 0;
   items.forEach((item) => {
@@ -4170,6 +4551,8 @@ function renderPaymentDayDetails(day) {
       label = "Concepto";
     } else if (item.type === "loan_installment") {
       label = "Préstamo";
+    } else if (item.type === "tax_obligation") {
+      label = "Organismo";
     }
     supplier.textContent = `${label}: ${item.counterparty || "-"}`;
     const concept = document.createElement("span");
@@ -4179,52 +4562,61 @@ function renderPaymentDayDetails(day) {
     const amount = document.createElement("span");
     const amountLabel =
       item.type === "income"
-        ? "Ingreso"
+        ? "Cobro"
         : item.type === "no_invoice"
-        ? "Gasto sin factura"
+        ? Number(item.withholding_amount || 0) > 0
+          ? "Pago neto"
+          : "Pago operativo"
         : item.type === "loan_installment"
         ? "Cuota préstamo"
+        : item.type === "tax_obligation"
+        ? `Modelo ${item.tax_model || ""}`.trim()
         : "Gasto";
     amount.textContent = `${formatCurrency(item.amount)} (${amountLabel})`;
-    const editBtn = document.createElement("button");
-    editBtn.type = "button";
-    editBtn.className = "button ghost small";
-    editBtn.textContent = "Editar fecha";
     const editContainer = document.createElement("div");
     editContainer.className = "payment-edit";
-    editBtn.addEventListener("click", () => {
-      editContainer.innerHTML = "";
-      const dateInput = document.createElement("input");
-      dateInput.type = "date";
-      dateInput.value = item.payment_date || "";
-      const saveBtn = document.createElement("button");
-      saveBtn.type = "button";
-      saveBtn.className = "button primary small";
-      saveBtn.textContent = "Guardar";
-      const cancelBtn = document.createElement("button");
-      cancelBtn.type = "button";
-      cancelBtn.className = "button ghost small";
-      cancelBtn.textContent = "Cancelar";
-      cancelBtn.addEventListener("click", () => {
+    let editBtn = null;
+    if (item.type !== "tax_obligation") {
+      editBtn = document.createElement("button");
+      editBtn.type = "button";
+      editBtn.className = "button ghost small";
+      editBtn.textContent = "Editar fecha";
+      editBtn.addEventListener("click", () => {
         editContainer.innerHTML = "";
+        const dateInput = document.createElement("input");
+        dateInput.type = "date";
+        dateInput.value = item.payment_date || "";
+        const saveBtn = document.createElement("button");
+        saveBtn.type = "button";
+        saveBtn.className = "button primary small";
+        saveBtn.textContent = "Guardar";
+        const cancelBtn = document.createElement("button");
+        cancelBtn.type = "button";
+        cancelBtn.className = "button ghost small";
+        cancelBtn.textContent = "Cancelar";
+        cancelBtn.addEventListener("click", () => {
+          editContainer.innerHTML = "";
+        });
+        saveBtn.addEventListener("click", () => {
+          updatePaymentDateFromCalendar(item, dateInput.value);
+        });
+        editContainer.appendChild(dateInput);
+        editContainer.appendChild(saveBtn);
+        editContainer.appendChild(cancelBtn);
       });
-      saveBtn.addEventListener("click", () => {
-        updatePaymentDateFromCalendar(item, dateInput.value);
-      });
-      editContainer.appendChild(dateInput);
-      editContainer.appendChild(saveBtn);
-      editContainer.appendChild(cancelBtn);
-    });
+    }
     row.appendChild(supplier);
     row.appendChild(concept);
     row.appendChild(dateLabel);
     row.appendChild(amount);
-    row.appendChild(editBtn);
+    if (editBtn) {
+      row.appendChild(editBtn);
+    }
     row.appendChild(editContainer);
     paymentDayList.appendChild(row);
     total += Number(item.amount || 0);
   });
-  paymentDayTotal.textContent = `Total del día: ${formatCurrency(total)}`;
+  paymentDayTotal.textContent = `Total previsto del día: ${formatCurrency(total)}`;
 }
 
 function fetchBillingEntries(month, year) {
@@ -4300,7 +4692,9 @@ function updateDashboardEmptyState() {
     Array.isArray(currentNoInvoiceExpenses) && currentNoInvoiceExpenses.length > 0;
   const hasLoans =
     Array.isArray(currentLoanInstallments) && currentLoanInstallments.length > 0;
-  const hasData = hasExpenses || hasBilling || hasNoInvoice || hasLoans;
+  const hasPayments =
+    Array.isArray(currentPayments?.items) && currentPayments.items.length > 0;
+  const hasData = hasExpenses || hasBilling || hasNoInvoice || hasLoans || hasPayments;
   emptyNode.style.display = hasData ? "none" : "block";
 }
 
@@ -4982,18 +5376,41 @@ function refreshNoInvoiceExpenses() {
     });
 }
 
+function getFilteredNoInvoiceExpenses(expenses) {
+  if (currentExpenseMode === "rent") {
+    return expenses.filter((expense) =>
+      ["alquiler_local", "alquiler_cabina"].includes(expense.expense_type)
+    );
+  }
+  if (currentExpenseMode === "payroll") {
+    return expenses.filter((expense) =>
+      ["nomina", "seguridad_social"].includes(expense.expense_type)
+    );
+  }
+  return expenses.filter(
+    (expense) => !["alquiler_local", "alquiler_cabina", "nomina", "seguridad_social"].includes(expense.expense_type)
+  );
+}
+
 function renderNoInvoiceExpenses(expenses) {
   noInvoiceTableBody.innerHTML = "";
   currentNoInvoiceExpenses = expenses;
-  if (!expenses.length) {
+  const filteredExpenses = getFilteredNoInvoiceExpenses(expenses);
+  if (!filteredExpenses.length) {
     noInvoiceEmpty.style.display = "block";
+    noInvoiceEmpty.textContent =
+      currentExpenseMode === "rent"
+        ? "No hay gastos de alquiler en este período."
+        : currentExpenseMode === "payroll"
+          ? "No hay nóminas o Seguridad Social en este período."
+          : "No hay otros gastos en este período.";
     updateTaxSummary();
     updateDashboardTotals();
     return;
   }
   noInvoiceEmpty.style.display = "none";
 
-  expenses.forEach((expense) => {
+  filteredExpenses.forEach((expense) => {
     const tr = document.createElement("tr");
     tr.dataset.id = expense.id;
 
@@ -5024,6 +5441,11 @@ function renderNoInvoiceExpenses(expenses) {
     const interestValue = Number(expense.interest_amount || 0);
     interestTd.textContent =
       expense.expense_type === "prestamo" ? formatCurrency(interestValue) : "-";
+
+    const withholdingTd = document.createElement("td");
+    const withholdingValue = Number(expense.withholding_amount || 0);
+    withholdingTd.textContent =
+      withholdingValue > 0 ? formatCurrency(withholdingValue) : "-";
 
     const typeTd = document.createElement("td");
     typeTd.textContent = formatNoInvoiceType(expense.expense_type);
@@ -5062,6 +5484,7 @@ function renderNoInvoiceExpenses(expenses) {
     tr.appendChild(vatRateTd);
     tr.appendChild(vatAmountTd);
     tr.appendChild(interestTd);
+    tr.appendChild(withholdingTd);
     tr.appendChild(typeTd);
     tr.appendChild(deductibleTd);
     tr.appendChild(actionsTd);
@@ -5538,9 +5961,10 @@ function enterNoInvoiceEditMode(row, expense) {
   const vatRateTd = row.children[3];
   const vatAmountTd = row.children[4];
   const interestTd = row.children[5];
-  const typeTd = row.children[6];
-  const deductibleTd = row.children[7];
-  const actionsTd = row.children[8];
+  const withholdingTd = row.children[6];
+  const typeTd = row.children[7];
+  const deductibleTd = row.children[8];
+  const actionsTd = row.children[9];
 
   const dateInput = document.createElement("input");
   dateInput.type = "date";
@@ -5580,6 +6004,12 @@ function enterNoInvoiceEditMode(row, expense) {
   interestInput.value =
     expense.expense_type === "prestamo" ? Number(expense.interest_amount || 0) : "";
 
+  const withholdingInput = document.createElement("input");
+  withholdingInput.type = "text";
+  withholdingInput.min = "0";
+  withholdingInput.value = formatAmountInput(expense.withholding_amount || 0);
+  attachAmountInputBehavior(withholdingInput);
+
   const typeSelect = createNoInvoiceTypeSelect(expense.expense_type);
   const deductibleSelect = createDeductibleSelect(expense.deductible);
 
@@ -5595,6 +6025,8 @@ function enterNoInvoiceEditMode(row, expense) {
   vatAmountTd.appendChild(vatAmountInput);
   interestTd.textContent = "";
   interestTd.appendChild(interestInput);
+  withholdingTd.textContent = "";
+  withholdingTd.appendChild(withholdingInput);
   typeTd.textContent = "";
   typeTd.appendChild(typeSelect);
   deductibleTd.textContent = "";
@@ -5606,10 +6038,15 @@ function enterNoInvoiceEditMode(row, expense) {
     interestInput,
     deductibleSelect,
   });
+  toggleNoInvoiceWithholdingField({
+    typeValue: typeSelect.value,
+    field: withholdingTd,
+    input: withholdingInput,
+  });
   const applyNoInvoiceVatEdit = () => {
-    const isLoan = typeSelect.value === "prestamo";
-    vatRateSelect.disabled = isLoan;
-    if (isLoan) {
+    const vatBlocked = ["prestamo", "nomina", "seguridad_social"].includes(typeSelect.value);
+    vatRateSelect.disabled = vatBlocked;
+    if (vatBlocked) {
       vatRateSelect.value = "";
       vatAmountInput.value = "";
       return;
@@ -5634,6 +6071,11 @@ function enterNoInvoiceEditMode(row, expense) {
       interestField: interestTd,
       interestInput,
       deductibleSelect,
+    });
+    toggleNoInvoiceWithholdingField({
+      typeValue: typeSelect.value,
+      field: withholdingTd,
+      input: withholdingInput,
     });
     applyNoInvoiceVatEdit();
   });
@@ -5663,6 +6105,7 @@ function enterNoInvoiceEditMode(row, expense) {
       vat_amount: calculated.vatAmount,
       base_amount: calculated.base,
       interest_amount: interestInput.value,
+      withholding_amount: withholdingInput.value,
       expense_type: typeSelect.value,
       deductible: deductibleSelect.value === "true",
     });
@@ -5692,6 +6135,9 @@ function saveNoInvoiceExpense() {
   const deductibleValue = noInvoiceDeductible.value === "true";
   const vatDeductibleValue = noInvoiceVatDeductible?.value === "true";
   const interestValue = noInvoiceInterest ? noInvoiceInterest.value : "";
+  const withholdingValue = noInvoiceWithholding ? noInvoiceWithholding.value : "";
+  const amountNumeric = parseNumberInput(amountValue);
+  const withholdingNumeric = parseNumberInput(withholdingValue) || 0;
 
   if (!dateValue) {
     alert("Fecha obligatoria.");
@@ -5706,7 +6152,6 @@ function saveNoInvoiceExpense() {
     return;
   }
   if (typeValue === "prestamo") {
-    const amountNumeric = parseNumberInput(amountValue);
     const interestNumeric = parseNumberInput(interestValue) || 0;
     if (interestNumeric < 0) {
       alert("Interés inválido.");
@@ -5716,6 +6161,10 @@ function saveNoInvoiceExpense() {
       alert("El interés no puede superar el importe.");
       return;
     }
+  }
+  if (withholdingNumeric < 0 || (amountNumeric !== null && withholdingNumeric > amountNumeric)) {
+    alert("La retención no puede superar el importe.");
+    return;
   }
 
   let vatRateValue = null;
@@ -5753,6 +6202,7 @@ function saveNoInvoiceExpense() {
       vat_amount: vatAmountValue,
       base_amount: baseAmountValue,
       interest_amount: interestValue,
+      withholding_amount: withholdingValue,
       expense_type: typeValue,
       deductible: deductibleValue,
     }),
@@ -5767,6 +6217,9 @@ function saveNoInvoiceExpense() {
       noInvoiceAmount.value = "";
       if (noInvoiceInterest) {
         noInvoiceInterest.value = "";
+      }
+      if (noInvoiceWithholding) {
+        noInvoiceWithholding.value = "";
       }
       if (noInvoiceVatDeductible) {
         noInvoiceVatDeductible.value = "false";
@@ -5784,7 +6237,7 @@ function saveNoInvoiceExpense() {
         typeValue: noInvoiceType?.value,
         vatDeductibleValue: noInvoiceVatDeductible?.value,
       });
-      refreshNoInvoiceExpenses();
+      Promise.all([refreshNoInvoiceExpenses(), refreshPayments()]);
     })
     .catch(() => {
       alert("No se pudo guardar el gasto.");
@@ -5812,7 +6265,7 @@ function updateNoInvoiceExpense(expenseId, payload) {
         alert((data.errors || ["Error al actualizar."]).join("\n"));
         return;
       }
-      refreshNoInvoiceExpenses();
+      Promise.all([refreshNoInvoiceExpenses(), refreshPayments()]);
     })
     .catch(() => {
       alert("No se pudo actualizar el gasto.");
@@ -5830,7 +6283,7 @@ function deleteNoInvoiceExpense(expenseId) {
         alert((data.errors || ["Error al eliminar."]).join("\n"));
         return;
       }
-      refreshNoInvoiceExpenses();
+      Promise.all([refreshNoInvoiceExpenses(), refreshPayments()]);
     })
     .catch(() => {
       alert("No se pudo eliminar el gasto.");
@@ -6051,6 +6504,7 @@ function updateTaxSummary() {
 
   updatePnlSummary();
   updateNetChart();
+  renderFiscalModelsSummary();
 }
 
 function updatePnlSummary() {
@@ -6095,7 +6549,12 @@ function updatePnlSummary() {
     return sum;
   }, 0);
   const otherOperatingExpenses = sourceNoInvoice.reduce((sum, expense) => {
-    if (expense.expense_type === "kilometraje" || expense.expense_type === "otro") {
+    if (
+      expense.expense_type === "kilometraje" ||
+      expense.expense_type === "otro" ||
+      expense.expense_type === "alquiler_local" ||
+      expense.expense_type === "alquiler_cabina"
+    ) {
       return sum + getNoInvoiceDeductibleAmount(expense);
     }
     return sum;
@@ -6792,11 +7251,19 @@ function setActiveSection(sectionId) {
     link.classList.toggle("active", link.dataset.section === sectionId);
   });
   localStorage.setItem("activeSection", sectionId);
+  ensureCompositeSectionState(sectionId);
   document.body.classList.remove("sidebar-open");
 }
 
 function initNavigation() {
-  const storedSection = localStorage.getItem("activeSection");
+  const legacySectionMap = {
+    invoices: "expenses",
+    payments: "dashboard",
+    taxes: "reports",
+    pnl: "statements",
+    balance: "statements",
+  };
+  const storedSection = legacySectionMap[localStorage.getItem("activeSection")] || localStorage.getItem("activeSection");
   const availableSections = Array.from(sections || []).map(
     (section) => section.dataset.section
   );
@@ -6808,6 +7275,18 @@ function initNavigation() {
   navLinks.forEach((link) => {
     link.addEventListener("click", () => {
       setActiveSection(link.dataset.section);
+    });
+  });
+
+  sectionTabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const parent = tab.dataset.parent;
+      const subsection = tab.dataset.subsection;
+      if (parent === "expenses") {
+        setExpenseSubview(subsection);
+        return;
+      }
+      setGroupedSubview(parent, subsection);
     });
   });
 
@@ -6989,6 +7468,7 @@ function bindEvents() {
   attachAmountInputBehavior(billingTotalInput);
   attachAmountInputBehavior(noInvoiceAmount);
   attachAmountInputBehavior(noInvoiceInterest);
+  attachAmountInputBehavior(noInvoiceWithholding);
   attachAmountInputBehavior(noInvoiceVatBase);
   attachAmountInputBehavior(noInvoiceVatAmount);
   attachAmountInputBehavior(loanTotalInput);
@@ -6996,6 +7476,10 @@ function bindEvents() {
   attachAmountInputBehavior(loanPrincipalInput);
   if (companySaveBtn) {
     companySaveBtn.addEventListener("click", saveCompany);
+  }
+  if (companyType) {
+    companyType.addEventListener("change", syncCompanyFiscalProfileInputs);
+    syncCompanyFiscalProfileInputs();
   }
   if (staffSaveBtn) {
     staffSaveBtn.addEventListener("click", saveStaff);
@@ -7038,6 +7522,7 @@ function bindEvents() {
       applyCompanyTaxModules();
       updatePnlSummary();
       updateHeaderContext();
+      renderFiscalModelsSummary();
       calendarOverride = false;
       syncCalendarWithFilters();
       renderTable();
@@ -7073,6 +7558,9 @@ function bindEvents() {
         interestInput: noInvoiceInterest,
         deductibleSelect: noInvoiceDeductible,
       });
+      toggleNoInvoiceWithholdingField({
+        typeValue: noInvoiceType.value,
+      });
       toggleNoInvoiceVatFields({
         typeValue: noInvoiceType.value,
         vatDeductibleValue: noInvoiceVatDeductible?.value,
@@ -7083,6 +7571,9 @@ function bindEvents() {
       interestField: noInvoiceInterestField,
       interestInput: noInvoiceInterest,
       deductibleSelect: noInvoiceDeductible,
+    });
+    toggleNoInvoiceWithholdingField({
+      typeValue: noInvoiceType.value,
     });
     toggleNoInvoiceVatFields({
       typeValue: noInvoiceType.value,

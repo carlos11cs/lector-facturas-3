@@ -1650,19 +1650,27 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 # Keep explicit total even if base/vat are incomplete.
                 amount_source = incoming_source
-        # If LLM totals are present and coherent, do NOT override with breakdown.
-        elif llm_consistent:
-            amount_source = amount_source or "llm"
-        else:
-            # If LLM totals are missing or inconsistent, only use breakdown if it is coherent.
-            if breakdown_consistent:
+        elif breakdown_consistent:
+            llm_matches_breakdown = (
+                totals_match(base_amount, base_sum)
+                and totals_match(vat_amount, vat_sum)
+                and totals_match(total_amount, total_sum)
+            )
+            # Prefer the line-level breakdown whenever it is coherent and the
+            # aggregate totals do not match it. This keeps multi-IVA invoices
+            # internally consistent without relying on a single aggregate guess.
+            if not llm_matches_breakdown:
                 base_amount = base_sum
                 vat_amount = vat_sum
                 total_amount = total_sum
                 amount_source = "breakdown"
-            else:
-                # Keep LLM totals if they exist; otherwise fall back later.
+            elif llm_consistent:
                 amount_source = amount_source or "llm"
+            else:
+                amount_source = "breakdown"
+        else:
+            # Keep LLM totals if they exist; otherwise fall back later.
+            amount_source = amount_source or "llm"
 
     analysis_status = result.get("analysis_status") or "ok"
     mismatch = (
@@ -1673,13 +1681,17 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
     )
     if total_amount is None or mismatch or base_amount is None or vat_amount is None:
         analysis_status = "partial"
-        # Keep total if present, but drop inconsistent base/IVA.
-        if mismatch or base_amount is None or vat_amount is None:
-            if not breakdown_warning:
-                base_amount = None
-                vat_amount = None
-                vat_rate = None
-                normalized_breakdown = []
+        if mismatch and not breakdown_warning:
+            base_amount = None
+            vat_amount = None
+            total_amount = None
+            vat_rate = None
+            normalized_breakdown = []
+        elif (base_amount is None or vat_amount is None) and not breakdown_warning:
+            base_amount = None
+            vat_amount = None
+            vat_rate = None
+            normalized_breakdown = []
         if total_amount is None:
             amount_source = "fallback"
 

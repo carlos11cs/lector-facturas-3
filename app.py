@@ -49,6 +49,22 @@ DEFAULT_USER_ID = int(os.getenv("DEFAULT_USER_ID", "1"))
 OWNER_EMAIL = (os.getenv("OWNER_EMAIL") or "").strip().lower()
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 APP_FROM_EMAIL = os.getenv("APP_FROM_EMAIL", "no-reply@tuapp.com")
+RENT_WITHHOLDING_TYPES = {"alquiler_local", "alquiler_cabina"}
+EXCLUDED_111_TYPES = {"prestamo", "seguridad_social", "amortizacion", "kilometraje"}
+MONTH_LABELS_ES = {
+    1: "Enero",
+    2: "Febrero",
+    3: "Marzo",
+    4: "Abril",
+    5: "Mayo",
+    6: "Junio",
+    7: "Julio",
+    8: "Agosto",
+    9: "Septiembre",
+    10: "Octubre",
+    11: "Noviembre",
+    12: "Diciembre",
+}
 
 _raw_db_url = os.getenv("DATABASE_URL")
 DATABASE_URL = _raw_db_url.strip() if _raw_db_url else ""
@@ -75,6 +91,13 @@ companies_table = Table(
     Column("email", String),
     Column("phone", String),
     Column("assigned_user_id", Integer),
+    Column("vat_regime", String, nullable=False, server_default="general"),
+    Column("tax_periodicity", String, nullable=False, server_default="quarterly"),
+    Column("files_model_303", Boolean, nullable=False, server_default="1"),
+    Column("files_model_111", Boolean, nullable=False, server_default="0"),
+    Column("files_model_115", Boolean, nullable=False, server_default="0"),
+    Column("files_model_130", Boolean, nullable=False, server_default="0"),
+    Column("files_model_202", Boolean, nullable=False, server_default="0"),
     Column("created_at", String, nullable=False),
 )
 
@@ -205,6 +228,7 @@ no_invoice_table = Table(
     Column("vat_rate", Integer),
     Column("vat_amount", Float),
     Column("base_amount", Float),
+    Column("withholding_amount", Float),
     Column("expense_type", String, nullable=False),
     Column("deductible", Boolean, nullable=False),
     Column("created_at", String, nullable=False),
@@ -284,7 +308,15 @@ def init_db():
     add_column_if_missing("no_invoice_expenses", "vat_rate", "INTEGER")
     add_column_if_missing("no_invoice_expenses", "vat_amount", "FLOAT")
     add_column_if_missing("no_invoice_expenses", "base_amount", "FLOAT")
+    add_column_if_missing("no_invoice_expenses", "withholding_amount", "FLOAT")
     add_column_if_missing("loan_installments", "bank_name", "VARCHAR")
+    add_column_if_missing("companies", "vat_regime", "VARCHAR DEFAULT 'general'")
+    add_column_if_missing("companies", "tax_periodicity", "VARCHAR DEFAULT 'quarterly'")
+    add_column_if_missing("companies", "files_model_303", "BOOLEAN DEFAULT 1")
+    add_column_if_missing("companies", "files_model_111", "BOOLEAN DEFAULT 0")
+    add_column_if_missing("companies", "files_model_115", "BOOLEAN DEFAULT 0")
+    add_column_if_missing("companies", "files_model_130", "BOOLEAN DEFAULT 0")
+    add_column_if_missing("companies", "files_model_202", "BOOLEAN DEFAULT 0")
     if "no_invoice_expenses" in table_names:
         with engine.begin() as conn:
             conn.execute(
@@ -301,6 +333,11 @@ def init_db():
                 no_invoice_table.update()
                 .where(no_invoice_table.c.base_amount.is_(None))
                 .values(base_amount=no_invoice_table.c.amount)
+            )
+            conn.execute(
+                no_invoice_table.update()
+                .where(no_invoice_table.c.withholding_amount.is_(None))
+                .values(withholding_amount=0.0)
             )
 
     add_column_if_missing("income_invoices", "user_id", "INTEGER")
@@ -1100,6 +1137,371 @@ def _get_months_for_period(year, quarter=None, start_month=None, end_month=None)
     return list(range(1, 13))
 
 
+def _quarter_number_for_month(month):
+    return ((int(month) - 1) // 3) + 1
+
+
+def _quarter_months_for_month(month):
+    start = (_quarter_number_for_month(month) - 1) * 3 + 1
+    return [start, start + 1, start + 2]
+
+
+def _periods_for_months(year, months):
+    return [(int(year), int(month)) for month in months]
+
+
+def _periods_for_previous_month(month, year):
+    previous_month = month - 1
+    previous_year = year
+    if previous_month <= 0:
+        previous_month = 12
+        previous_year -= 1
+    return [(previous_year, previous_month)]
+
+
+def _quarter_periods_due_in_month(month, year):
+    if month not in {1, 4, 7, 10}:
+        return [], None
+    if month == 1:
+        target_year = year - 1
+        target_months = [10, 11, 12]
+    else:
+        target_year = year
+        target_months = [month - 3, month - 2, month - 1]
+    quarter = _quarter_number_for_month(target_months[-1])
+    return _periods_for_months(target_year, target_months), f"T{quarter} {target_year}"
+
+
+def _model_202_periods_for_due_month(month, year):
+    if month == 4:
+        return _periods_for_months(year, [1, 2, 3]), "3 meses"
+    if month == 10:
+        return _periods_for_months(year, list(range(1, 10))), "9 meses"
+    if month == 12:
+        return _periods_for_months(year, list(range(1, 12))), "11 meses"
+    return [], None
+
+
+def _format_period_label(periods):
+    if not periods:
+        return ""
+    if len(periods) == 1:
+        target_year, target_month = periods[0]
+        return f"{MONTH_LABELS_ES[target_month]} {target_year}"
+    years = {item[0] for item in periods}
+    months = [item[1] for item in periods]
+    if len(periods) == 3 and len(years) == 1 and months == _quarter_months_for_month(months[-1]):
+        quarter = _quarter_number_for_month(months[-1])
+        return f"T{quarter} {next(iter(years))}"
+    if len(years) == 1:
+        return f"Ene-{MONTH_LABELS_ES[months[-1]][:3]} {next(iter(years))}"
+    first_year, first_month = periods[0]
+    last_year, last_month = periods[-1]
+    return f"{MONTH_LABELS_ES[first_month][:3]} {first_year} - {MONTH_LABELS_ES[last_month][:3]} {last_year}"
+
+
+def _fetch_company_fiscal_profile(conn, company_id):
+    return conn.execute(
+        select(
+            companies_table.c.id,
+            companies_table.c.display_name,
+            companies_table.c.legal_name,
+            companies_table.c.company_type,
+            companies_table.c.vat_regime,
+            companies_table.c.tax_periodicity,
+            companies_table.c.files_model_303,
+            companies_table.c.files_model_111,
+            companies_table.c.files_model_115,
+            companies_table.c.files_model_130,
+            companies_table.c.files_model_202,
+        ).where(companies_table.c.id == company_id)
+    ).mappings().first()
+
+
+def _build_tax_model_metrics(user_id, company_id, periods, conn):
+    income_base = 0.0
+    income_vat = 0.0
+    expense_base = 0.0
+    expense_vat = 0.0
+    withholding_111 = 0.0
+    withholding_115 = 0.0
+
+    for period_year, period_month in periods:
+        prefix = f"{period_year}-{period_month:02d}"
+        invoice_rows = conn.execute(
+            select(
+                invoices_table.c.base_amount,
+                invoices_table.c.vat_amount,
+                invoices_table.c.expense_category,
+            )
+            .where(invoices_table.c.user_id == user_id)
+            .where(invoices_table.c.company_id == company_id)
+            .where(invoices_table.c.invoice_date.like(f"{prefix}%"))
+        ).mappings().all()
+        for row in invoice_rows:
+            if row["expense_category"] == "non_deductible":
+                continue
+            expense_base += float(row["base_amount"] or 0)
+            expense_vat += float(row["vat_amount"] or 0)
+
+        no_invoice_rows = conn.execute(
+            select(
+                no_invoice_table.c.amount,
+                no_invoice_table.c.interest_amount,
+                no_invoice_table.c.vat_deductible,
+                no_invoice_table.c.vat_amount,
+                no_invoice_table.c.base_amount,
+                no_invoice_table.c.expense_type,
+                no_invoice_table.c.deductible,
+                no_invoice_table.c.withholding_amount,
+            )
+            .where(no_invoice_table.c.user_id == user_id)
+            .where(
+                (no_invoice_table.c.company_id == company_id)
+                | (no_invoice_table.c.company_id.is_(None))
+            )
+            .where(no_invoice_table.c.expense_date.like(f"{prefix}%"))
+        ).mappings().all()
+        for row in no_invoice_rows:
+            expense_type = row.get("expense_type")
+            withholding_amount = float(row.get("withholding_amount") or 0)
+            if withholding_amount > 0:
+                if expense_type in RENT_WITHHOLDING_TYPES:
+                    withholding_115 += withholding_amount
+                elif expense_type not in EXCLUDED_111_TYPES:
+                    withholding_111 += withholding_amount
+
+            if expense_type == "prestamo":
+                expense_base += float(row.get("interest_amount") or 0)
+                continue
+            if row.get("vat_deductible"):
+                expense_base += float(row.get("base_amount") or row.get("amount") or 0)
+                expense_vat += float(row.get("vat_amount") or 0)
+                continue
+            if not row.get("deductible"):
+                continue
+            expense_base += float(row.get("amount") or 0)
+
+        loan_rows = conn.execute(
+            select(loan_installments_table.c.interest_amount)
+            .where(loan_installments_table.c.user_id == user_id)
+            .where(loan_installments_table.c.company_id == company_id)
+            .where(loan_installments_table.c.payment_date.like(f"{prefix}%"))
+        ).mappings().all()
+        for row in loan_rows:
+            expense_base += float(row.get("interest_amount") or 0)
+
+        income_invoice_rows = conn.execute(
+            select(income_invoices_table.c.base_amount, income_invoices_table.c.vat_amount)
+            .where(income_invoices_table.c.user_id == user_id)
+            .where(income_invoices_table.c.company_id == company_id)
+            .where(income_invoices_table.c.invoice_date.like(f"{prefix}%"))
+        ).mappings().all()
+        for row in income_invoice_rows:
+            income_base += float(row.get("base_amount") or 0)
+            income_vat += float(row.get("vat_amount") or 0)
+
+        billing_rows = conn.execute(
+            select(
+                facturacion_table.c.base_facturada,
+                facturacion_table.c.iva_repercutido,
+            )
+            .where(facturacion_table.c.user_id == user_id)
+            .where(facturacion_table.c.company_id == company_id)
+            .where(facturacion_table.c.anio == period_year)
+            .where(facturacion_table.c.mes == period_month)
+        ).mappings().all()
+        for row in billing_rows:
+            income_base += float(row.get("base_facturada") or 0)
+            income_vat += float(row.get("iva_repercutido") or 0)
+
+    net_result = round(income_base - expense_base, 2)
+    vat_result = round(income_vat - expense_vat, 2)
+
+    return {
+        "income_base": round(income_base, 2),
+        "income_vat": round(income_vat, 2),
+        "expense_base": round(expense_base, 2),
+        "expense_vat": round(expense_vat, 2),
+        "net_result": net_result,
+        "vat_result": vat_result,
+        "withholding_111": round(withholding_111, 2),
+        "withholding_115": round(withholding_115, 2),
+        "model_130_estimate": round(max(net_result, 0) * 0.20, 2),
+        "corporate_tax_estimate": round(max(net_result, 0) * 0.25, 2),
+        "model_202_estimate": round(max(net_result, 0) * 0.18, 2),
+    }
+
+
+def _build_fiscal_model_rows(conn, user_id, company_id, selected_month, selected_year, selected_period):
+    company = _fetch_company_fiscal_profile(conn, company_id)
+    if not company:
+        return []
+
+    selected_months = (
+        _quarter_months_for_month(selected_month)
+        if selected_period == "quarterly"
+        else [selected_month]
+    )
+    selected_periods = _periods_for_months(selected_year, selected_months)
+    ytd_periods = _periods_for_months(selected_year, range(1, selected_month + 1))
+    selected_metrics = _build_tax_model_metrics(user_id, company_id, selected_periods, conn)
+    ytd_metrics = _build_tax_model_metrics(user_id, company_id, ytd_periods, conn)
+
+    selected_label = _format_period_label(selected_periods)
+    annual_label = f"Acumulado anual hasta {MONTH_LABELS_ES[selected_month]} {selected_year}"
+    periodicity_label = "Mensual" if company.get("tax_periodicity") == "monthly" else "Trimestral"
+
+    rows = []
+    if company.get("files_model_303") is not False and company.get("vat_regime") != "exempt":
+        rows.append(
+            {
+                "model": "303",
+                "periodicity": periodicity_label,
+                "status": f"Liquidación estimada {selected_label}",
+                "amount": selected_metrics["vat_result"],
+            }
+        )
+        rows.append(
+            {
+                "model": "390",
+                "periodicity": "Anual",
+                "status": annual_label,
+                "amount": ytd_metrics["vat_result"],
+            }
+        )
+
+    if company.get("files_model_111"):
+        rows.append(
+            {
+                "model": "111",
+                "periodicity": periodicity_label,
+                "status": f"Retenciones acumuladas {selected_label}",
+                "amount": selected_metrics["withholding_111"],
+            }
+        )
+        rows.append(
+            {
+                "model": "190",
+                "periodicity": "Anual",
+                "status": annual_label,
+                "amount": ytd_metrics["withholding_111"],
+            }
+        )
+
+    if company.get("files_model_115"):
+        rows.append(
+            {
+                "model": "115",
+                "periodicity": periodicity_label,
+                "status": f"Retenciones alquiler acumuladas {selected_label}",
+                "amount": selected_metrics["withholding_115"],
+            }
+        )
+        rows.append(
+            {
+                "model": "180",
+                "periodicity": "Anual",
+                "status": annual_label,
+                "amount": ytd_metrics["withholding_115"],
+            }
+        )
+
+    if company.get("company_type") == "individual" and company.get("files_model_130"):
+        rows.append(
+            {
+                "model": "130",
+                "periodicity": "Trimestral",
+                "status": f"Pago fraccionado estimado {selected_label}",
+                "amount": selected_metrics["model_130_estimate"],
+            }
+        )
+
+    if company.get("company_type") == "company":
+        rows.append(
+            {
+                "model": "200",
+                "periodicity": "Anual",
+                "status": annual_label,
+                "amount": ytd_metrics["corporate_tax_estimate"],
+            }
+        )
+        if company.get("files_model_202"):
+            rows.append(
+                {
+                    "model": "202",
+                    "periodicity": "Abr / Oct / Dic",
+                    "status": f"Pago fraccionado estimado a {MONTH_LABELS_ES[selected_month]} {selected_year}",
+                    "amount": ytd_metrics["model_202_estimate"],
+                }
+            )
+
+    return rows
+
+
+def _build_fiscal_calendar_items(conn, user_id, company_id, target_month, target_year):
+    company = _fetch_company_fiscal_profile(conn, company_id)
+    if not company:
+        return []
+
+    items = []
+    due_date = date(target_year, target_month, 20).isoformat()
+
+    def add_item(model, label, amount):
+        amount = round(float(amount or 0), 2)
+        if amount <= 0:
+            return
+        items.append(
+            {
+                "id": f"{model}-{target_year}-{target_month}",
+                "counterparty": "AEAT",
+                "concept": label,
+                "payment_date": due_date,
+                "payment_dates": [due_date],
+                "invoice_date": due_date,
+                "base_amount": amount,
+                "vat_rate": None,
+                "vat_amount": None,
+                "total_amount": amount,
+                "amount": amount,
+                "type": "tax_obligation",
+                "tax_model": model,
+            }
+        )
+
+    if company.get("tax_periodicity") == "monthly":
+        monthly_periods = _periods_for_previous_month(target_month, target_year)
+        monthly_metrics = _build_tax_model_metrics(user_id, company_id, monthly_periods, conn)
+        monthly_label = _format_period_label(monthly_periods)
+        if company.get("files_model_303") is not False and company.get("vat_regime") != "exempt":
+            add_item("303", f"Modelo 303 · {monthly_label}", monthly_metrics["vat_result"])
+        if company.get("files_model_111"):
+            add_item("111", f"Modelo 111 · {monthly_label}", monthly_metrics["withholding_111"])
+        if company.get("files_model_115"):
+            add_item("115", f"Modelo 115 · {monthly_label}", monthly_metrics["withholding_115"])
+
+    quarter_periods, quarter_label = _quarter_periods_due_in_month(target_month, target_year)
+    if quarter_periods and quarter_label:
+        quarter_metrics = _build_tax_model_metrics(user_id, company_id, quarter_periods, conn)
+        if company.get("tax_periodicity") != "monthly":
+            if company.get("files_model_303") is not False and company.get("vat_regime") != "exempt":
+                add_item("303", f"Modelo 303 · {quarter_label}", quarter_metrics["vat_result"])
+            if company.get("files_model_111"):
+                add_item("111", f"Modelo 111 · {quarter_label}", quarter_metrics["withholding_111"])
+            if company.get("files_model_115"):
+                add_item("115", f"Modelo 115 · {quarter_label}", quarter_metrics["withholding_115"])
+        if company.get("company_type") == "individual" and company.get("files_model_130"):
+            add_item("130", f"Modelo 130 · {quarter_label}", quarter_metrics["model_130_estimate"])
+
+    if company.get("company_type") == "company" and company.get("files_model_202"):
+        model_202_periods, model_202_label = _model_202_periods_for_due_month(target_month, target_year)
+        if model_202_periods and model_202_label:
+            model_202_metrics = _build_tax_model_metrics(user_id, company_id, model_202_periods, conn)
+            add_item("202", f"Modelo 202 · {model_202_label}", model_202_metrics["model_202_estimate"])
+
+    return items
+
+
 def _build_report_totals(user_id, company_id, months, year):
     income_base = 0.0
     income_vat = 0.0
@@ -1728,6 +2130,13 @@ def list_companies():
         companies_table.c.email,
         companies_table.c.phone,
         companies_table.c.assigned_user_id,
+        companies_table.c.vat_regime,
+        companies_table.c.tax_periodicity,
+        companies_table.c.files_model_303,
+        companies_table.c.files_model_111,
+        companies_table.c.files_model_115,
+        companies_table.c.files_model_130,
+        companies_table.c.files_model_202,
     )
     if user_role == "staff":
         base_query = base_query.where(companies_table.c.assigned_user_id == user_id)
@@ -1747,6 +2156,13 @@ def list_companies():
             "email": row["email"],
             "phone": row["phone"],
             "assigned_user_id": row["assigned_user_id"],
+            "vat_regime": row.get("vat_regime") or "general",
+            "tax_periodicity": row.get("tax_periodicity") or "quarterly",
+            "files_model_303": bool(row.get("files_model_303")) if row.get("files_model_303") is not None else True,
+            "files_model_111": bool(row.get("files_model_111")) if row.get("files_model_111") is not None else False,
+            "files_model_115": bool(row.get("files_model_115")) if row.get("files_model_115") is not None else False,
+            "files_model_130": bool(row.get("files_model_130")) if row.get("files_model_130") is not None else False,
+            "files_model_202": bool(row.get("files_model_202")) if row.get("files_model_202") is not None else False,
         }
         for row in rows
     ]
@@ -1767,6 +2183,13 @@ def create_company():
     email = (payload.get("email") or "").strip()
     phone = (payload.get("phone") or "").strip()
     assigned_user_id = payload.get("assigned_user_id") or payload.get("assignedUserId")
+    vat_regime = (payload.get("vat_regime") or payload.get("vatRegime") or "general").strip()
+    tax_periodicity = (payload.get("tax_periodicity") or payload.get("taxPeriodicity") or "quarterly").strip()
+    files_model_303 = payload.get("files_model_303")
+    files_model_111 = payload.get("files_model_111")
+    files_model_115 = payload.get("files_model_115")
+    files_model_130 = payload.get("files_model_130")
+    files_model_202 = payload.get("files_model_202")
 
     errors = []
     if not display_name:
@@ -1777,6 +2200,10 @@ def create_company():
         errors.append("Tipo de empresa inválido.")
     if not validate_tax_id(tax_id, company_type):
         errors.append("CIF/NIF inválido.")
+    if vat_regime not in {"general", "exempt", "prorata"}:
+        errors.append("Régimen de IVA inválido.")
+    if tax_periodicity not in {"quarterly", "monthly"}:
+        errors.append("Periodicidad fiscal inválida.")
 
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
@@ -1796,6 +2223,11 @@ def create_company():
         return jsonify({"ok": False, "errors": ["Ya existe una empresa con ese CIF/NIF."]}), 400
 
     assigned_user_id = resolve_assigned_staff(user_id, assigned_user_id)
+    files_model_303 = files_model_303 not in (False, "false", "False", 0, "0", None) if files_model_303 is not None else vat_regime != "exempt"
+    files_model_111 = files_model_111 in (True, "true", "True", 1, "1")
+    files_model_115 = files_model_115 in (True, "true", "True", 1, "1")
+    files_model_130 = files_model_130 in (True, "true", "True", 1, "1")
+    files_model_202 = files_model_202 in (True, "true", "True", 1, "1")
 
     created_at = datetime.utcnow().isoformat()
     with engine.begin() as conn:
@@ -1810,6 +2242,13 @@ def create_company():
                 email=email,
                 phone=phone,
                 assigned_user_id=assigned_user_id,
+                vat_regime=vat_regime,
+                tax_periodicity=tax_periodicity,
+                files_model_303=files_model_303,
+                files_model_111=files_model_111,
+                files_model_115=files_model_115,
+                files_model_130=files_model_130,
+                files_model_202=files_model_202,
                 created_at=created_at,
             )
         )
@@ -1857,6 +2296,13 @@ def update_company(company_id):
     email = (payload.get("email") or "").strip()
     phone = (payload.get("phone") or "").strip()
     assigned_user_id = payload.get("assigned_user_id") or payload.get("assignedUserId")
+    vat_regime = (payload.get("vat_regime") or payload.get("vatRegime") or "general").strip()
+    tax_periodicity = (payload.get("tax_periodicity") or payload.get("taxPeriodicity") or "quarterly").strip()
+    files_model_303 = payload.get("files_model_303")
+    files_model_111 = payload.get("files_model_111")
+    files_model_115 = payload.get("files_model_115")
+    files_model_130 = payload.get("files_model_130")
+    files_model_202 = payload.get("files_model_202")
 
     errors = []
     if not display_name:
@@ -1867,6 +2313,10 @@ def update_company(company_id):
         errors.append("Tipo de empresa inválido.")
     if not validate_tax_id(tax_id, company_type):
         errors.append("CIF/NIF inválido.")
+    if vat_regime not in {"general", "exempt", "prorata"}:
+        errors.append("Régimen de IVA inválido.")
+    if tax_periodicity not in {"quarterly", "monthly"}:
+        errors.append("Periodicidad fiscal inválida.")
 
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
@@ -1882,6 +2332,11 @@ def update_company(company_id):
         return jsonify({"ok": False, "errors": ["Ya existe una empresa con ese CIF/NIF."]}), 400
 
     assigned_user_id = resolve_assigned_staff(user_id, assigned_user_id)
+    files_model_303 = files_model_303 not in (False, "false", "False", 0, "0", None) if files_model_303 is not None else vat_regime != "exempt"
+    files_model_111 = files_model_111 in (True, "true", "True", 1, "1")
+    files_model_115 = files_model_115 in (True, "true", "True", 1, "1")
+    files_model_130 = files_model_130 in (True, "true", "True", 1, "1")
+    files_model_202 = files_model_202 in (True, "true", "True", 1, "1")
 
     with engine.begin() as conn:
         result = conn.execute(
@@ -1896,6 +2351,13 @@ def update_company(company_id):
                 email=email,
                 phone=phone,
                 assigned_user_id=assigned_user_id,
+                vat_regime=vat_regime,
+                tax_periodicity=tax_periodicity,
+                files_model_303=files_model_303,
+                files_model_111=files_model_111,
+                files_model_115=files_model_115,
+                files_model_130=files_model_130,
+                files_model_202=files_model_202,
             )
         )
 
@@ -2626,6 +3088,7 @@ def list_payments():
     year_end_iso = year_end.isoformat()
 
     with engine.connect() as conn:
+        company = _fetch_company_fiscal_profile(conn, company_id)
         expense_rows = conn.execute(
             select(
                 invoices_table.c.id,
@@ -2665,6 +3128,7 @@ def list_payments():
                 no_invoice_table.c.vat_rate,
                 no_invoice_table.c.vat_amount,
                 no_invoice_table.c.base_amount,
+                no_invoice_table.c.withholding_amount,
                 no_invoice_table.c.expense_type,
                 no_invoice_table.c.deductible,
             )
@@ -2725,6 +3189,13 @@ def list_payments():
             .where(income_invoices_table.c.company_id == company_id)
             .order_by(income_invoices_table.c.invoice_date.desc(), income_invoices_table.c.id.desc())
         ).mappings().all()
+        tax_obligation_rows = _build_fiscal_calendar_items(
+            conn,
+            data_owner_id,
+            company_id,
+            month,
+            year,
+        )
 
     items = []
     day_totals = {}
@@ -2782,7 +3253,9 @@ def list_payments():
         if payment_dt < start or payment_dt > end:
             continue
         day = payment_dt.day
-        amount = float(row.get("amount") or 0)
+        withholding_amount = float(row.get("withholding_amount") or 0)
+        gross_amount = float(row.get("amount") or 0)
+        amount = max(round(gross_amount - withholding_amount, 2), 0.0)
         day_totals[day] = round(day_totals.get(day, 0.0) + amount, 2)
         items.append(
             {
@@ -2799,6 +3272,7 @@ def list_payments():
                 "expense_category": "without_invoice",
                 "expense_type": row.get("expense_type"),
                 "interest_amount": float(row.get("interest_amount") or 0),
+                "withholding_amount": withholding_amount,
                 "vat_deductible": bool(row.get("vat_deductible"))
                 if row.get("vat_deductible") is not None
                 else False,
@@ -2809,6 +3283,7 @@ def list_payments():
                 "base_amount_no_invoice": float(row.get("base_amount") or row.get("amount") or 0),
                 "deductible": bool(row.get("deductible")),
                 "amount": amount,
+                "gross_amount": gross_amount,
                 "type": "no_invoice",
             }
         )
@@ -2888,7 +3363,51 @@ def list_payments():
                 }
             )
 
+    for item in tax_obligation_rows:
+        try:
+            payment_dt = date.fromisoformat(item["payment_date"])
+        except (TypeError, ValueError):
+            continue
+        if payment_dt < start or payment_dt > end:
+            continue
+        day = payment_dt.day
+        amount = float(item.get("amount") or 0)
+        day_totals[day] = round(day_totals.get(day, 0.0) + amount, 2)
+        items.append(item)
+
     return jsonify({"items": items, "dayTotals": day_totals})
+
+
+@app.route("/api/fiscal-models/summary")
+def fiscal_models_summary():
+    month = request.args.get("month", type=int)
+    year = request.args.get("year", type=int)
+    period = (request.args.get("period") or "monthly").strip().lower()
+    data_owner_id = get_data_owner_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    today = date.today()
+    month = month or today.month
+    year = year or today.year
+    if period not in {"monthly", "quarterly"}:
+        period = "monthly"
+
+    with engine.connect() as conn:
+        company = _fetch_company_fiscal_profile(conn, company_id)
+        if not company:
+            return jsonify({"ok": False, "errors": ["Empresa no encontrada."]}), 404
+        rows = _build_fiscal_model_rows(
+            conn,
+            data_owner_id,
+            company_id,
+            month,
+            year,
+            period,
+        )
+
+    return jsonify({"ok": True, "rows": rows})
 
 
 @app.route("/api/reports/quarterly")
@@ -3700,6 +4219,7 @@ def list_no_invoice_expenses():
                 no_invoice_table.c.vat_rate,
                 no_invoice_table.c.vat_amount,
                 no_invoice_table.c.base_amount,
+                no_invoice_table.c.withholding_amount,
                 no_invoice_table.c.expense_type,
                 no_invoice_table.c.deductible,
             )
@@ -3723,6 +4243,7 @@ def list_no_invoice_expenses():
             "vat_rate": int(row["vat_rate"]) if row.get("vat_rate") is not None else None,
             "vat_amount": float(row["vat_amount"] or 0),
             "base_amount": float(row["base_amount"] or row["amount"] or 0),
+            "withholding_amount": float(row["withholding_amount"] or 0),
             "expense_type": row["expense_type"],
             "deductible": bool(row["deductible"]),
         }
@@ -3749,6 +4270,7 @@ def create_no_invoice_expense():
     vat_rate_raw = payload.get("vat_rate")
     vat_amount_payload = parse_amount(str(payload.get("vat_amount") or ""))
     base_amount_payload = parse_amount(str(payload.get("base_amount") or ""))
+    withholding_amount = parse_amount(str(payload.get("withholding_amount") or ""))
     deductible = payload.get("deductible")
 
     errors = []
@@ -3761,6 +4283,8 @@ def create_no_invoice_expense():
     if expense_type not in {
         "nomina",
         "seguridad_social",
+        "alquiler_local",
+        "alquiler_cabina",
         "amortizacion",
         "kilometraje",
         "prestamo",
@@ -3769,6 +4293,8 @@ def create_no_invoice_expense():
         errors.append("Tipo de gasto inválido.")
     if deductible is None:
         deductible = True
+    if withholding_amount is None:
+        withholding_amount = 0.0
 
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
@@ -3780,9 +4306,15 @@ def create_no_invoice_expense():
             errors.append("Interés inválido.")
         if amount is not None and interest_amount > amount:
             errors.append("El interés no puede superar el importe.")
+        withholding_amount = 0.0
         deductible = False
     else:
         interest_amount = None
+
+    if withholding_amount < 0:
+        errors.append("Retención inválida.")
+    elif amount is not None and withholding_amount > amount:
+        errors.append("La retención no puede superar el importe.")
 
     if vat_deductible in (True, "true", "True", 1, "1"):
         vat_deductible = True
@@ -3829,6 +4361,7 @@ def create_no_invoice_expense():
                 vat_rate=vat_rate,
                 vat_amount=vat_amount,
                 base_amount=base_amount,
+                withholding_amount=withholding_amount,
                 expense_type=expense_type,
                 deductible=bool(deductible),
                 created_at=datetime.utcnow().isoformat(),
@@ -3870,6 +4403,7 @@ def update_no_invoice_expense(expense_id):
     vat_rate_raw = payload.get("vat_rate")
     vat_amount_payload = parse_amount(str(payload.get("vat_amount") or ""))
     base_amount_payload = parse_amount(str(payload.get("base_amount") or ""))
+    withholding_amount = parse_amount(str(payload.get("withholding_amount") or ""))
     deductible = payload.get("deductible")
 
     errors = []
@@ -3882,6 +4416,8 @@ def update_no_invoice_expense(expense_id):
     if expense_type not in {
         "nomina",
         "seguridad_social",
+        "alquiler_local",
+        "alquiler_cabina",
         "amortizacion",
         "kilometraje",
         "prestamo",
@@ -3890,6 +4426,8 @@ def update_no_invoice_expense(expense_id):
         errors.append("Tipo de gasto inválido.")
     if deductible is None:
         deductible = True
+    if withholding_amount is None:
+        withholding_amount = 0.0
 
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
@@ -3901,9 +4439,15 @@ def update_no_invoice_expense(expense_id):
             errors.append("Interés inválido.")
         if amount is not None and interest_amount > amount:
             errors.append("El interés no puede superar el importe.")
+        withholding_amount = 0.0
         deductible = False
     else:
         interest_amount = None
+
+    if withholding_amount < 0:
+        errors.append("Retención inválida.")
+    elif amount is not None and withholding_amount > amount:
+        errors.append("La retención no puede superar el importe.")
 
     if vat_deductible in (True, "true", "True", 1, "1"):
         vat_deductible = True
@@ -3952,6 +4496,7 @@ def update_no_invoice_expense(expense_id):
                 vat_rate=vat_rate,
                 vat_amount=vat_amount,
                 base_amount=base_amount,
+                withholding_amount=withholding_amount,
                 expense_type=expense_type,
                 deductible=bool(deductible),
             )

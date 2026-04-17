@@ -26,16 +26,12 @@
       <nav class="sidebar-nav">
         <button class="nav-link active" data-section="dashboard" type="button">Dashboard</button>
         <button class="nav-link" data-section="companies" type="button">Mis empresas</button>
-        <button class="nav-link" data-section="invoices" type="button">Facturas</button>
-        <button class="nav-link" data-section="expenses" type="button">Gastos (sin factura)</button>
+        <button class="nav-link" data-section="expenses" type="button">Gastos</button>
         <button class="nav-link" data-section="income" type="button">Ingresos</button>
-        <button class="nav-link" data-section="payments" type="button">Calendario de pagos</button>
         <button class="nav-link" data-section="reports" type="button">Informes</button>
-        <button class="nav-link" data-section="taxes" type="button">Modelos de impuestos</button>
-        <button class="nav-link" data-section="pnl" type="button">Pérdidas y Ganancias</button>
-        <button class="nav-link" data-section="balance" type="button">Balance de situación</button>
+        <button class="nav-link" data-section="statements" type="button">P&amp;G y Balance</button>
         {% if user and user.role == "owner" %}
-        <a class="nav-link" href="{{ url_for('admin_dashboard') }}">Panel de gestorías</a>
+        <a class="nav-link-external" href="{{ url_for('admin_dashboard') }}">Panel de gestorías</a>
         {% endif %}
       </nav>
     </aside>
@@ -132,6 +128,28 @@
           </p>
         </section>
 
+        <section class="panel payments-panel dashboard-payments-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Calendario fiscal y tesorería</h2>
+              <p>Consulta vencimientos, cobros y obligaciones fiscales previstas por día.</p>
+            </div>
+          </div>
+          <div class="calendar-toolbar">
+            <button class="calendar-nav-btn" type="button" id="paymentPrevMonth" aria-label="Mes anterior">‹</button>
+            <h3 id="paymentCalendarTitle"></h3>
+            <button class="calendar-nav-btn" type="button" id="paymentNextMonth" aria-label="Mes siguiente">›</button>
+          </div>
+          <p id="paymentMonthTotal" class="payment-month-total"></p>
+          <p id="paymentMonthEmpty" class="empty">Sin movimientos previstos este mes.</p>
+          <div id="paymentCalendar" class="calendar-wrapper"></div>
+          <div class="payment-details">
+            <h3 id="paymentDayTitle">Selecciona un día para ver el detalle</h3>
+            <div id="paymentDayList" class="payment-day-list"></div>
+            <p id="paymentDayTotal" class="payment-day-total"></p>
+          </div>
+        </section>
+
         <section class="grid dashboard-grid">
           <div class="panel">
             <div class="panel-header">
@@ -218,6 +236,49 @@
                 <option value="company">Sociedad</option>
               </select>
             </div>
+            <div class="field">
+              <label for="companyVatRegime">Régimen IVA</label>
+              <select id="companyVatRegime">
+                <option value="general">General</option>
+                <option value="prorata">Prorrata</option>
+                <option value="exempt">Exento / sin 303</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="companyTaxPeriodicity">Periodicidad fiscal</label>
+              <select id="companyTaxPeriodicity">
+                <option value="quarterly">Trimestral</option>
+                <option value="monthly">Mensual</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="companyFilesModel111">Modelo 111</label>
+              <select id="companyFilesModel111">
+                <option value="false">No</option>
+                <option value="true">Sí</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="companyFilesModel115">Modelo 115</label>
+              <select id="companyFilesModel115">
+                <option value="false">No</option>
+                <option value="true">Sí</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="companyFilesModel130">Modelo 130</label>
+              <select id="companyFilesModel130">
+                <option value="false">No</option>
+                <option value="true">Sí</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="companyFilesModel202">Modelo 202</label>
+              <select id="companyFilesModel202">
+                <option value="false">No</option>
+                <option value="true">Sí</option>
+              </select>
+            </div>
             <button id="companySaveBtn" class="button primary">Guardar empresa</button>
           </div>
           <div class="billing-entries">
@@ -233,6 +294,8 @@
                     <th>Teléfono</th>
                     <th>Asignado a</th>
                     <th>Tipo</th>
+                    <th>Periodicidad</th>
+                    <th>Perfil fiscal</th>
                     <th>Acciones</th>
                   </tr>
                 </thead>
@@ -280,11 +343,23 @@
         </section>
       </section>
 
-      <section class="page-section" data-section="invoices">
+      <section class="page-section" data-section="expenses" data-group="expenses" data-subsection="received">
         <section class="panel upload-panel">
           <div class="panel-header">
             <div>
-              <h2>Subir facturas</h2>
+              <h2>Gastos</h2>
+              <p>Centraliza facturas recibidas, alquileres, nóminas y otros gastos con una operativa consistente.</p>
+            </div>
+          </div>
+          <div class="section-tabs" data-parent="expenses">
+            <button class="section-tab active" type="button" data-parent="expenses" data-subsection="received">Facturas recibidas</button>
+            <button class="section-tab" type="button" data-parent="expenses" data-subsection="rent">Alquileres</button>
+            <button class="section-tab" type="button" data-parent="expenses" data-subsection="payroll">Nóminas y S.S.</button>
+            <button class="section-tab" type="button" data-parent="expenses" data-subsection="other">Otros gastos</button>
+          </div>
+          <div class="panel-header compact-header">
+            <div>
+              <h3>Subir facturas recibidas</h3>
               <p>Arrastra archivos o selecciona una carpeta completa. Añade los datos antes de guardar.</p>
             </div>
             <button id="uploadBtn" class="button primary">Guardar facturas</button>
@@ -348,11 +423,11 @@
         </section>
       </section>
 
-      <section class="page-section" data-section="expenses">
+      <section class="page-section" data-section="expenses" data-group="expenses" data-subsection="operations">
         <section class="panel no-invoice-panel">
           <div class="panel-header">
-            <h2>Gastos sin factura</h2>
-            <p>Registra gastos deducibles o no deducibles sin documento fiscal.</p>
+            <h2 id="expenseSectionTitle">Otros gastos</h2>
+            <p id="expenseSectionDescription">Registra gastos deducibles o no deducibles sin documento fiscal, con fecha contable y fecha de pago.</p>
           </div>
           <div class="billing-form">
             <div class="field">
@@ -370,6 +445,10 @@
             <div class="field is-hidden" id="noInvoiceInterestField">
               <label for="noInvoiceInterest">Interés (€)</label>
               <input type="text" id="noInvoiceInterest" placeholder="0,00" />
+            </div>
+            <div class="field is-hidden" id="noInvoiceWithholdingField">
+              <label for="noInvoiceWithholding">Retención Hacienda (€)</label>
+              <input type="text" id="noInvoiceWithholding" placeholder="0,00" />
             </div>
             <div class="field">
               <label for="noInvoiceVatDeductible">IVA deducible</label>
@@ -412,6 +491,8 @@
             <div class="field">
               <label for="noInvoiceType">Tipo</label>
               <select id="noInvoiceType">
+                <option value="alquiler_local">Alquiler local</option>
+                <option value="alquiler_cabina">Alquiler cabina</option>
                 <option value="nomina">Nómina</option>
                 <option value="seguridad_social">Seguridad Social</option>
                 <option value="amortizacion">Amortización</option>
@@ -441,6 +522,7 @@
                     <th>IVA</th>
                     <th>IVA (€)</th>
                     <th>Interés (€)</th>
+                    <th>Retención (€)</th>
                     <th>Tipo</th>
                     <th>Deducible</th>
                     <th>Acciones</th>
@@ -451,7 +533,7 @@
             </div>
             <p class="empty" id="noInvoiceEmpty">No hay gastos sin factura en este período.</p>
           </div>
-          <div class="billing-entries loan-panel">
+          <div class="billing-entries loan-panel" id="loanPanel">
             <h3>Plan de amortización de préstamo</h3>
             <p class="muted">
               Registra cada cuota con su interés para llevar el calendario de pagos y los gastos financieros.
@@ -654,37 +736,17 @@
         </section>
       </section>
 
-      <section class="page-section" data-section="payments">
-        <section class="panel payments-panel">
-          <div class="panel-header">
-            <div>
-              <h2>Calendario de pagos</h2>
-              <p>Consulta los vencimientos y los importes previstos por día.</p>
-            </div>
-          </div>
-          <div class="calendar-toolbar">
-            <button class="calendar-nav-btn" type="button" id="paymentPrevMonth" aria-label="Mes anterior">‹</button>
-            <h3 id="paymentCalendarTitle"></h3>
-            <button class="calendar-nav-btn" type="button" id="paymentNextMonth" aria-label="Mes siguiente">›</button>
-          </div>
-          <p id="paymentMonthTotal" class="payment-month-total"></p>
-          <p id="paymentMonthEmpty" class="empty">Sin pagos previstos este mes.</p>
-          <div id="paymentCalendar" class="calendar-wrapper"></div>
-          <div class="payment-details">
-            <h3 id="paymentDayTitle">Selecciona un día para ver el detalle</h3>
-            <div id="paymentDayList" class="payment-day-list"></div>
-            <p id="paymentDayTotal" class="payment-day-total"></p>
-          </div>
-        </section>
-      </section>
-
-      <section class="page-section" data-section="reports">
+      <section class="page-section" data-section="reports" data-group="reports" data-subsection="summary">
         <section class="panel report-panel">
           <div class="panel-header">
             <div>
-              <h2>Informes trimestrales</h2>
-              <p>Genera informes fiscales por trimestre o periodo personalizado.</p>
+              <h2>Informes</h2>
+              <p>Resumen general de la empresa, reporting por periodo y obligaciones fiscales activas.</p>
             </div>
+          </div>
+          <div class="section-tabs" data-parent="reports">
+            <button class="section-tab active" type="button" data-parent="reports" data-subsection="summary">Resumen</button>
+            <button class="section-tab" type="button" data-parent="reports" data-subsection="taxes">Modelos</button>
           </div>
           <div class="report-form">
             <div class="field">
@@ -714,16 +776,32 @@
             <button id="reportDownloadBtn" class="button primary">Descargar informe</button>
             <button id="reportEmailBtn" class="button ghost">Enviar por email</button>
           </div>
+          <div class="billing-entries">
+            <h3>Obligaciones fiscales activas</h3>
+            <div class="billing-table">
+              <table id="fiscalModelsTable">
+                <thead>
+                  <tr>
+                    <th>Modelo</th>
+                    <th>Periodicidad</th>
+                    <th>Situación actual</th>
+                    <th>Importe</th>
+                  </tr>
+                </thead>
+                <tbody id="fiscalModelsTableBody"></tbody>
+              </table>
+            </div>
+          </div>
           <p id="reportStatus" class="form-hint"></p>
         </section>
       </section>
 
-      <section class="page-section" data-section="taxes">
+      <section class="page-section" data-section="reports" data-group="reports" data-subsection="taxes">
         <section class="panel billing-summary-panel">
           <div class="panel-header">
             <div>
-              <h2>Resumen de IVA</h2>
-              <p>Datos consolidados del periodo seleccionado.</p>
+              <h2>Modelos de impuestos</h2>
+              <p>Datos consolidados del periodo seleccionado y estimaciones actualizadas a fecha.</p>
             </div>
             <span class="period-badge" id="taxPeriodBadge"></span>
           </div>
@@ -823,11 +901,21 @@
         </section>
       </section>
 
-      <section class="page-section" data-section="pnl">
+      <section class="page-section" data-section="statements" data-group="statements" data-subsection="pnl">
         <section class="panel pnl-panel">
           <div class="panel-header">
             <div>
-              <h2>Cuenta de pérdidas y ganancias (estimada)</h2>
+              <h2>P&amp;G y Balance de situación</h2>
+              <p>Consulta y exporta los estados contables principales desde un único módulo.</p>
+            </div>
+          </div>
+          <div class="section-tabs" data-parent="statements">
+            <button class="section-tab active" type="button" data-parent="statements" data-subsection="pnl">Pérdidas y Ganancias</button>
+            <button class="section-tab" type="button" data-parent="statements" data-subsection="balance">Balance de situación</button>
+          </div>
+          <div class="panel-header compact-header">
+            <div>
+              <h3>Cuenta de pérdidas y ganancias (estimada)</h3>
               <p>Cuenta de resultados estimada para el periodo seleccionado.</p>
             </div>
             <div class="panel-actions">
@@ -977,7 +1065,7 @@
         </section>
       </section>
 
-      <section class="page-section" data-section="balance">
+      <section class="page-section" data-section="statements" data-group="statements" data-subsection="balance">
         <section class="panel balance-panel">
           <div class="panel-header">
             <div>
