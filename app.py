@@ -93,11 +93,11 @@ companies_table = Table(
     Column("assigned_user_id", Integer),
     Column("vat_regime", String, nullable=False, server_default="general"),
     Column("tax_periodicity", String, nullable=False, server_default="quarterly"),
-    Column("files_model_303", Boolean, nullable=False, server_default="1"),
-    Column("files_model_111", Boolean, nullable=False, server_default="0"),
-    Column("files_model_115", Boolean, nullable=False, server_default="0"),
-    Column("files_model_130", Boolean, nullable=False, server_default="0"),
-    Column("files_model_202", Boolean, nullable=False, server_default="0"),
+    Column("files_model_303", Boolean, nullable=False, server_default=text("true")),
+    Column("files_model_111", Boolean, nullable=False, server_default=text("false")),
+    Column("files_model_115", Boolean, nullable=False, server_default=text("false")),
+    Column("files_model_130", Boolean, nullable=False, server_default=text("false")),
+    Column("files_model_202", Boolean, nullable=False, server_default=text("false")),
     Column("created_at", String, nullable=False),
 )
 
@@ -111,7 +111,7 @@ users_table = Table(
     Column("plan", String, nullable=False),  # internal | trial | standard | premium
     Column("agency_id", Integer),
     Column("created_at", String, nullable=False),
-    Column("is_active", Boolean, nullable=False, server_default="1"),
+    Column("is_active", Boolean, nullable=False, server_default=text("true")),
 )
 
 agencies_table = Table(
@@ -312,11 +312,11 @@ def init_db():
     add_column_if_missing("loan_installments", "bank_name", "VARCHAR")
     add_column_if_missing("companies", "vat_regime", "VARCHAR DEFAULT 'general'")
     add_column_if_missing("companies", "tax_periodicity", "VARCHAR DEFAULT 'quarterly'")
-    add_column_if_missing("companies", "files_model_303", "BOOLEAN DEFAULT 1")
-    add_column_if_missing("companies", "files_model_111", "BOOLEAN DEFAULT 0")
-    add_column_if_missing("companies", "files_model_115", "BOOLEAN DEFAULT 0")
-    add_column_if_missing("companies", "files_model_130", "BOOLEAN DEFAULT 0")
-    add_column_if_missing("companies", "files_model_202", "BOOLEAN DEFAULT 0")
+    add_column_if_missing("companies", "files_model_303", "BOOLEAN DEFAULT TRUE")
+    add_column_if_missing("companies", "files_model_111", "BOOLEAN DEFAULT FALSE")
+    add_column_if_missing("companies", "files_model_115", "BOOLEAN DEFAULT FALSE")
+    add_column_if_missing("companies", "files_model_130", "BOOLEAN DEFAULT FALSE")
+    add_column_if_missing("companies", "files_model_202", "BOOLEAN DEFAULT FALSE")
     if "no_invoice_expenses" in table_names:
         with engine.begin() as conn:
             conn.execute(
