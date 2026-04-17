@@ -2137,6 +2137,9 @@ def analyze_invoice(
         }
 
     is_income = document_type == "income"
+    is_rent_expense = document_type == "expense_rent"
+    is_payroll_expense = document_type == "expense_payroll"
+    is_other_expense = document_type == "expense_other"
     if is_income:
         prompt = (
             "Analiza el siguiente texto extraido de una factura emitida (ingreso). "
@@ -2153,13 +2156,62 @@ def analyze_invoice(
             "No incluyas texto adicional fuera del JSON.\n\n"
             f"TEXTO_FACTURA:\n{extracted_text}"
         )
+    elif is_rent_expense:
+        prompt = (
+            "Analiza el siguiente texto extraido de un documento de gasto de alquiler o arrendamiento. "
+            "Devuelve SOLO JSON valido con estas claves: "
+            "supplier, invoice_date, payment_terms_days, payment_dates, withholding_amount, totals, vat_breakdown. "
+            "totals es un objeto con {base, vat, total} (pueden ser null). "
+            "vat_breakdown es una lista de lineas IVA con {base, vat_amount} y opcional {rate}. "
+            "withholding_amount es la retencion a Hacienda si aparece. "
+            "El supplier debe ser la razon social del arrendador o emisor, nunca el cliente/receptor. "
+            "Prioriza base imponible, IVA, total, retencion y fecha de pago si aparecen. "
+            "payment_terms_days es el numero de dias si aparece una condicion tipo "
+            "\"RECIBO X DIAS FECHA FACTURA\". "
+            "Si hay payment_terms_days y invoice_date, devuelve payment_dates con invoice_date + X dias. "
+            "payment_dates debe ser una lista de fechas (YYYY-MM-DD) y puede estar vacia. "
+            "Usa null si no puedes inferir un dato con seguridad. "
+            "No incluyas texto adicional fuera del JSON.\n\n"
+            f"TEXTO_FACTURA:\n{extracted_text}"
+        )
+    elif is_payroll_expense:
+        prompt = (
+            "Analiza el siguiente texto extraido de una nomina o documento de coste laboral. "
+            "Devuelve SOLO JSON valido con estas claves: "
+            "supplier, invoice_date, payment_terms_days, payment_dates, withholding_amount, totals, vat_breakdown. "
+            "supplier debe ser el emisor o entidad asociada al documento si aparece. "
+            "totals es un objeto con {base, vat, total} (pueden ser null). "
+            "Si no hay IVA, usa vat = 0 o null y deja vat_breakdown vacio. "
+            "withholding_amount es la retencion si aparece en el documento. "
+            "Prioriza fecha, total del documento y retencion. "
+            "payment_dates debe ser una lista de fechas (YYYY-MM-DD) y puede estar vacia. "
+            "Usa null si no puedes inferir un dato con seguridad. "
+            "No incluyas texto adicional fuera del JSON.\n\n"
+            f"TEXTO_FACTURA:\n{extracted_text}"
+        )
+    elif is_other_expense:
+        prompt = (
+            "Analiza el siguiente texto extraido de un documento de gasto. "
+            "Devuelve SOLO JSON valido con estas claves: "
+            "supplier, invoice_date, payment_terms_days, payment_dates, withholding_amount, totals, vat_breakdown. "
+            "totals es un objeto con {base, vat, total} (pueden ser null). "
+            "vat_breakdown es una lista de lineas IVA con {base, vat_amount} y opcional {rate}. "
+            "withholding_amount es la retencion a Hacienda si aparece. "
+            "El supplier debe ser la razon social del emisor si aparece y no debe ser el cliente/receptor. "
+            "Prioriza fecha, base, IVA, total y retencion. "
+            "payment_dates debe ser una lista de fechas (YYYY-MM-DD) y puede estar vacia. "
+            "Usa null si no puedes inferir un dato con seguridad. "
+            "No incluyas texto adicional fuera del JSON.\n\n"
+            f"TEXTO_FACTURA:\n{extracted_text}"
+        )
     else:
         prompt = (
             "Analiza el siguiente texto extraido de una factura recibida (gasto). "
             "Devuelve SOLO JSON valido con estas claves: "
-            "supplier, invoice_date, payment_terms_days, payment_dates, totals, vat_breakdown. "
+            "supplier, invoice_date, payment_terms_days, payment_dates, withholding_amount, totals, vat_breakdown. "
             "totals es un objeto con {base, vat, total} (pueden ser null). "
             "vat_breakdown es una lista de lineas IVA con {base, vat_amount} y opcional {rate}. "
+            "withholding_amount es la retencion a Hacienda si aparece. "
             "Si hay varias lineas IVA, NO rellenes un vat_rate unico (deja rate en cada linea o null). "
             "El supplier debe ser la razon social del emisor (forma juridica si aparece) "
             "y no debe ser el cliente/receptor. "
@@ -2302,6 +2354,12 @@ def analyze_invoice(
         or data.get("vat_lines")
         or data.get("iva_lines")
         or []
+    )
+    withholding_amount = _normalize_amount(
+        data.get("withholding_amount")
+        or data.get("retencion")
+        or data.get("retencion_irpf")
+        or data.get("retention_amount")
     )
     amount_source = "llm" if data else "fallback"
 
@@ -2449,6 +2507,7 @@ def analyze_invoice(
         "total_amount": total_amount,
         "vat_breakdown": vat_breakdown,
         "is_rectificativa": is_rectificativa,
+        "withholding_amount": withholding_amount,
         "breakdown_warning": breakdown_warning,
         "extraction_source": amount_source,
         "confidence_score": confidence_score,

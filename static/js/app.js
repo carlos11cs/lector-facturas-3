@@ -624,6 +624,9 @@ const dropZone = document.getElementById("dropZone");
 const uploadTableBody = document.querySelector("#uploadTable tbody");
 const emptyMessage = document.getElementById("emptyMessage");
 const uploadBtn = document.getElementById("uploadBtn");
+const expenseUploadTitle = document.getElementById("expenseUploadTitle");
+const expenseUploadDescription = document.getElementById("expenseUploadDescription");
+const expensesSavedInvoicesPanel = document.getElementById("expensesSavedInvoicesPanel");
 const navLinks = document.querySelectorAll(".nav-link[data-section]");
 const sections = document.querySelectorAll(".page-section");
 const sectionTabs = document.querySelectorAll(".section-tab[data-parent]");
@@ -1946,6 +1949,75 @@ function getExpenseModeForSubview(subview) {
   return "other";
 }
 
+function getExpenseUploadKind(subview = currentExpenseSubview) {
+  if (subview === "rent") {
+    return "rent";
+  }
+  if (subview === "payroll") {
+    return "payroll";
+  }
+  if (subview === "other") {
+    return "other";
+  }
+  return "received";
+}
+
+function getNoInvoiceTypeForUploadKind(kind) {
+  if (kind === "rent") {
+    return "alquiler_local";
+  }
+  if (kind === "payroll") {
+    return "nomina";
+  }
+  return "otro";
+}
+
+function getExpenseUploadConfig(kind = getExpenseUploadKind()) {
+  if (kind === "rent") {
+    return {
+      title: "Subir documentos de alquiler",
+      description:
+        "Sube facturas o justificantes de alquiler. La IA priorizará arrendador, base, IVA, total y posibles retenciones.",
+      buttonLabel: "Guardar alquileres",
+    };
+  }
+  if (kind === "payroll") {
+    return {
+      title: "Subir nóminas o costes laborales",
+      description:
+        "Sube nóminas o documentos laborales. La IA priorizará fecha, emisor, importe y retenciones para reflejarlo como gasto de personal.",
+      buttonLabel: "Guardar nóminas",
+    };
+  }
+  if (kind === "other") {
+    return {
+      title: "Subir otros gastos",
+      description:
+        "Sube justificantes o documentos de gasto. La IA priorizará fecha, emisor, base, IVA y total para registrarlo en el apartado correcto.",
+      buttonLabel: "Guardar gastos",
+    };
+  }
+  return {
+    title: "Subir facturas recibidas",
+    description:
+      "Arrastra archivos o selecciona una carpeta completa. La pestaña activa indica a la IA qué tipo de gasto debe priorizar.",
+    buttonLabel: "Guardar facturas",
+  };
+}
+
+function updateExpenseUploadPanel(subview = currentExpenseSubview) {
+  const config = getExpenseUploadConfig(getExpenseUploadKind(subview));
+  if (expenseUploadTitle) {
+    expenseUploadTitle.textContent = config.title;
+  }
+  if (expenseUploadDescription) {
+    expenseUploadDescription.textContent = config.description;
+  }
+  if (uploadBtn) {
+    uploadBtn.textContent = config.buttonLabel;
+  }
+}
+
 function setExpenseMode(mode) {
   currentExpenseMode = mode;
   if (expenseSectionTitle) {
@@ -1998,15 +2070,22 @@ function setExpenseSubview(subview) {
   document.querySelectorAll('.section-tab[data-parent="expenses"]').forEach((tab) => {
     tab.classList.toggle("active", tab.dataset.subsection === subview);
   });
-  document
-    .querySelectorAll('.page-section[data-group="expenses"]')
-    .forEach((section) => {
-      if (section.dataset.subsection === "received") {
-        section.classList.toggle("sub-hidden", subview !== "received");
-      } else {
-        section.classList.toggle("sub-hidden", subview === "received");
-      }
-    });
+  const receivedSection = document.querySelector(
+    '.page-section[data-group="expenses"][data-subsection="received"]'
+  );
+  const operationsSection = document.querySelector(
+    '.page-section[data-group="expenses"][data-subsection="operations"]'
+  );
+  if (receivedSection) {
+    receivedSection.classList.remove("sub-hidden");
+  }
+  if (operationsSection) {
+    operationsSection.classList.toggle("sub-hidden", subview === "received");
+  }
+  if (expensesSavedInvoicesPanel) {
+    expensesSavedInvoicesPanel.classList.toggle("is-hidden", subview !== "received");
+  }
+  updateExpenseUploadPanel(subview);
   if (subview !== "received") {
     setExpenseMode(getExpenseModeForSubview(subview));
   }
@@ -2178,6 +2257,7 @@ function restoreFilters(now) {
 }
 
 function addFiles(fileList) {
+  const expenseUploadKind = getExpenseUploadKind();
   Array.from(fileList).forEach((file) => {
     if (!isAllowedFile(file.name)) {
       return;
@@ -2197,6 +2277,8 @@ function addFiles(fileList) {
       total: "",
       vatBreakdown: [],
       vatBreakdownOpen: false,
+      expenseUploadKind,
+      withholdingAmount: "",
       analysisText: "",
       analysisPending: true,
       analysisError: false,
@@ -3458,9 +3540,101 @@ function validatePending() {
   return errors;
 }
 
+function validatePendingOperationItems(items) {
+  const errors = [];
+  items.forEach((item) => {
+    if (item.analysisPending) {
+      errors.push(`Análisis en proceso: ${item.file.name}`);
+    }
+    if (!item.storedFilename) {
+      errors.push(`Análisis pendiente: ${item.file.name}`);
+    }
+    if (!item.date) {
+      errors.push(`Fecha obligatoria: ${item.file.name}`);
+    }
+    const normalized = normalizeInvoiceAmounts(item);
+    const breakdownPayload = buildVatBreakdownPayload(item.vatBreakdown || []);
+    const breakdownTotals = breakdownPayload.length
+      ? summarizeVatBreakdown(item.vatBreakdown || [])
+      : null;
+    const amountValue = parseNumberInput(
+      breakdownTotals ? breakdownTotals.total : normalized.total || item.total
+    );
+    const baseValue = parseNumberInput(
+      breakdownTotals ? breakdownTotals.base : normalized.base || item.base
+    );
+    if (amountValue === null && baseValue === null) {
+      errors.push(`Importe inválido: ${item.file.name}`);
+    }
+  });
+  return errors;
+}
+
+function getExpenseOperationPayload(item) {
+  const normalized = normalizeInvoiceAmounts(item);
+  const breakdownPayload = buildVatBreakdownPayload(item.vatBreakdown || []);
+  const breakdownTotals = breakdownPayload.length
+    ? summarizeVatBreakdown(item.vatBreakdown || [])
+    : null;
+  const baseValue = parseNumberInput(
+    breakdownTotals ? breakdownTotals.base : normalized.base || item.base
+  );
+  const vatAmountValue = parseNumberInput(
+    breakdownTotals ? breakdownTotals.vatAmount : normalized.vatAmount || item.vatAmount
+  );
+  const totalValue = parseNumberInput(
+    breakdownTotals ? breakdownTotals.total : normalized.total || item.total
+  );
+  const vatRateValue = breakdownPayload.length
+    ? getPrimaryVatRateFromBreakdown(breakdownPayload)
+    : resolveVatRateValue(item.vat);
+  const kind = item.expenseUploadKind || getExpenseUploadKind();
+  const expenseType = getNoInvoiceTypeForUploadKind(kind);
+  const vatDeductible =
+    expenseType !== "nomina" &&
+    expenseType !== "seguridad_social" &&
+    expenseType !== "prestamo" &&
+    vatRateValue !== null &&
+    vatAmountValue !== null &&
+    vatAmountValue > 0;
+  const amount =
+    totalValue !== null
+      ? totalValue
+      : baseValue !== null && vatAmountValue !== null
+        ? roundAmount(baseValue + vatAmountValue)
+        : baseValue;
+  const concept =
+    (item.supplier || "").trim() || item.file.name.replace(/\.[^.]+$/, "");
+  return {
+    expense_date: item.date,
+    payment_date: item.paymentDate || "",
+    payment_dates: item.paymentDates || [],
+    concept,
+    amount,
+    expense_type: expenseType,
+    interest_amount: expenseType === "prestamo" ? amount : null,
+    vat_deductible: vatDeductible,
+    vat_rate: vatDeductible ? vatRateValue : null,
+    vat_amount: vatDeductible ? vatAmountValue : null,
+    base_amount: baseValue,
+    withholding_amount: parseNumberInput(item.withholdingAmount) || 0,
+    deductible: expenseType !== "prestamo",
+  };
+}
+
 function analyzeInvoiceForItem(item) {
   const formData = new FormData();
   formData.append("file", item.file);
+  const expenseUploadKind = item.expenseUploadKind || getExpenseUploadKind();
+  const expenseDocumentType =
+    expenseUploadKind === "received"
+      ? "expense"
+      : expenseUploadKind === "rent"
+        ? "expense_rent"
+        : expenseUploadKind === "payroll"
+          ? "expense_payroll"
+          : "expense_other";
+  formData.append("document_type", expenseDocumentType);
   const companyId = getSelectedCompanyId();
   if (companyId) {
     formData.append("company_id", companyId);
@@ -3517,6 +3691,9 @@ function analyzeInvoiceForItem(item) {
       }
       if (extracted.is_rectificativa) {
         item.isRectificativa = true;
+      }
+      if (extracted.withholding_amount !== null && extracted.withholding_amount !== undefined) {
+        item.withholdingAmount = String(extracted.withholding_amount);
       }
 
       if (!item.touched.supplier && extracted.provider_name) {
@@ -3592,25 +3769,38 @@ function analyzeInvoiceForItem(item) {
 }
 
 function uploadPending() {
-  if (pendingFiles.length === 0) {
-    alert("No hay facturas para subir.");
+  const invoiceItems = pendingFiles.filter(
+    (item) => (item.expenseUploadKind || "received") === "received"
+  );
+  const operationItems = pendingFiles.filter(
+    (item) => (item.expenseUploadKind || "received") !== "received"
+  );
+
+  if (!pendingFiles.length) {
+    alert("No hay gastos para subir.");
     return;
   }
   if (!getSelectedCompanyId()) {
-    alert("Selecciona una empresa antes de subir facturas.");
+    alert("Selecciona una empresa antes de subir gastos.");
     return;
   }
 
-  const errors = validatePending();
+  const errors = [
+    ...validatePending(invoiceItems),
+    ...validatePendingOperationItems(operationItems),
+  ];
   if (errors.length) {
     alert(errors.slice(0, 3).join("\n"));
     return;
   }
 
   uploadBtn.disabled = true;
+  const uploadedIds = [];
+  const groupedErrors = [];
+
   const payload = {
     companyId: getSelectedCompanyId(),
-    entries: pendingFiles.map((item) => {
+    entries: invoiceItems.map((item) => {
       const normalized = normalizeInvoiceAmounts(item);
       const breakdownPayload = buildVatBreakdownPayload(item.vatBreakdown || []);
       const breakdownTotals = breakdownPayload.length
@@ -3637,31 +3827,75 @@ function uploadPending() {
       };
     }),
   };
+  const invoicePromise = invoiceItems.length
+    ? fetch("/api/upload", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          if (!data.ok) {
+            groupedErrors.push(...(data.errors || ["Error al subir facturas."]));
+            return;
+          }
+          uploadedIds.push(...invoiceItems.map((item) => item.id));
+          if (data.errors && data.errors.length) {
+            groupedErrors.push(...data.errors);
+          }
+        })
+        .catch(() => {
+          groupedErrors.push("No se pudieron subir las facturas.");
+        })
+    : Promise.resolve();
 
-  fetch("/api/upload", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  })
-    .then((res) => res.json())
-    .then((data) => {
-      if (!data.ok) {
-        alert((data.errors || ["Error al subir."]).join("\n"));
-        return;
+  const operationsPromise = operationItems.length
+    ? Promise.all(
+        operationItems.map((item) =>
+          fetch(withCompanyParam("/api/expenses/no-invoice"), {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              ...getExpenseOperationPayload(item),
+              company_id: getSelectedCompanyId(),
+            }),
+          })
+            .then((res) => res.json())
+            .then((data) => {
+              if (!data.ok) {
+                groupedErrors.push(...(data.errors || [`Error al guardar ${item.file.name}.`]));
+                return;
+              }
+              uploadedIds.push(item.id);
+            })
+            .catch(() => {
+              groupedErrors.push(`No se pudo guardar ${item.file.name}.`);
+            })
+        )
+      )
+    : Promise.resolve();
+
+  Promise.all([invoicePromise, operationsPromise])
+    .then(() => {
+      if (uploadedIds.length) {
+        const uploadedSet = new Set(uploadedIds);
+        for (let index = pendingFiles.length - 1; index >= 0; index -= 1) {
+          if (uploadedSet.has(pendingFiles[index].id)) {
+            pendingFiles.splice(index, 1);
+          }
+        }
       }
-      if (data.errors && data.errors.length) {
-        alert(data.errors.join("\n"));
-      }
-      pendingFiles.length = 0;
       renderTable();
+      if (groupedErrors.length) {
+        alert(groupedErrors.slice(0, 5).join("\n"));
+      }
       return loadYears().then(() => {
         refreshAllData();
       });
-    })
-    .catch(() => {
-      alert("No se pudo subir la factura.");
     })
     .finally(() => {
       uploadBtn.disabled = false;

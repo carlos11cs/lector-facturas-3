@@ -221,6 +221,8 @@ no_invoice_table = Table(
     Column("user_id", Integer, nullable=False, server_default=str(DEFAULT_USER_ID)),
     Column("company_id", Integer, nullable=False),
     Column("expense_date", String, nullable=False),
+    Column("payment_date", String),
+    Column("payment_dates", Text),
     Column("concept", String, nullable=False),
     Column("amount", Float, nullable=False),
     Column("interest_amount", Float),
@@ -309,6 +311,8 @@ def init_db():
     add_column_if_missing("no_invoice_expenses", "vat_amount", "FLOAT")
     add_column_if_missing("no_invoice_expenses", "base_amount", "FLOAT")
     add_column_if_missing("no_invoice_expenses", "withholding_amount", "FLOAT")
+    add_column_if_missing("no_invoice_expenses", "payment_date", "VARCHAR")
+    add_column_if_missing("no_invoice_expenses", "payment_dates", "TEXT")
     add_column_if_missing("loan_installments", "bank_name", "VARCHAR")
     add_column_if_missing("companies", "vat_regime", "VARCHAR DEFAULT 'general'")
     add_column_if_missing("companies", "tax_periodicity", "VARCHAR DEFAULT 'quarterly'")
@@ -3121,6 +3125,8 @@ def list_payments():
             select(
                 no_invoice_table.c.id,
                 no_invoice_table.c.expense_date,
+                no_invoice_table.c.payment_date,
+                no_invoice_table.c.payment_dates,
                 no_invoice_table.c.concept,
                 no_invoice_table.c.amount,
                 no_invoice_table.c.interest_amount,
@@ -3243,50 +3249,63 @@ def list_payments():
             )
 
     for row in no_invoice_rows:
-        expense_date = row.get("expense_date")
-        if not expense_date:
+        payment_dates = parse_payment_dates(row.get("payment_dates"))
+        if not payment_dates:
+            fallback_payment_date = row.get("payment_date") or row.get("expense_date")
+            if fallback_payment_date:
+                payment_dates = [fallback_payment_date]
+        if not payment_dates:
             continue
-        try:
-            payment_dt = date.fromisoformat(expense_date)
-        except ValueError:
-            continue
-        if payment_dt < start or payment_dt > end:
-            continue
-        day = payment_dt.day
         withholding_amount = float(row.get("withholding_amount") or 0)
         gross_amount = float(row.get("amount") or 0)
-        amount = max(round(gross_amount - withholding_amount, 2), 0.0)
-        day_totals[day] = round(day_totals.get(day, 0.0) + amount, 2)
-        items.append(
-            {
-                "id": row["id"],
-                "counterparty": row.get("concept"),
-                "concept": row.get("concept"),
-                "payment_date": expense_date,
-                "payment_dates": [expense_date],
-                "invoice_date": expense_date,
-                "base_amount": amount,
-                "vat_rate": 0,
-                "vat_amount": 0,
-                "total_amount": amount,
-                "expense_category": "without_invoice",
-                "expense_type": row.get("expense_type"),
-                "interest_amount": float(row.get("interest_amount") or 0),
-                "withholding_amount": withholding_amount,
-                "vat_deductible": bool(row.get("vat_deductible"))
-                if row.get("vat_deductible") is not None
-                else False,
-                "vat_rate_no_invoice": int(row.get("vat_rate"))
-                if row.get("vat_rate") is not None
-                else None,
-                "vat_amount_no_invoice": float(row.get("vat_amount") or 0),
-                "base_amount_no_invoice": float(row.get("base_amount") or row.get("amount") or 0),
-                "deductible": bool(row.get("deductible")),
-                "amount": amount,
-                "gross_amount": gross_amount,
-                "type": "no_invoice",
-            }
-        )
+        split_count = len(payment_dates)
+        split_amount = round(max(round(gross_amount - withholding_amount, 2), 0.0) / split_count, 2)
+        amounts = [split_amount] * split_count
+        if split_count > 1:
+            amounts[-1] = round(
+                max(round(gross_amount - withholding_amount, 2), 0.0)
+                - split_amount * (split_count - 1),
+                2,
+            )
+        for payment_date, amount in zip(payment_dates, amounts):
+            try:
+                payment_dt = date.fromisoformat(payment_date)
+            except ValueError:
+                continue
+            if payment_dt < start or payment_dt > end:
+                continue
+            day = payment_dt.day
+            day_totals[day] = round(day_totals.get(day, 0.0) + amount, 2)
+            items.append(
+                {
+                    "id": row["id"],
+                    "counterparty": row.get("concept"),
+                    "concept": row.get("concept"),
+                    "payment_date": payment_date,
+                    "payment_dates": payment_dates,
+                    "invoice_date": row.get("expense_date"),
+                    "base_amount": amount,
+                    "vat_rate": 0,
+                    "vat_amount": 0,
+                    "total_amount": max(round(gross_amount - withholding_amount, 2), 0.0),
+                    "expense_category": "without_invoice",
+                    "expense_type": row.get("expense_type"),
+                    "interest_amount": float(row.get("interest_amount") or 0),
+                    "withholding_amount": withholding_amount,
+                    "vat_deductible": bool(row.get("vat_deductible"))
+                    if row.get("vat_deductible") is not None
+                    else False,
+                    "vat_rate_no_invoice": int(row.get("vat_rate"))
+                    if row.get("vat_rate") is not None
+                    else None,
+                    "vat_amount_no_invoice": float(row.get("vat_amount") or 0),
+                    "base_amount_no_invoice": float(row.get("base_amount") or row.get("amount") or 0),
+                    "deductible": bool(row.get("deductible")),
+                    "amount": amount,
+                    "gross_amount": gross_amount,
+                    "type": "no_invoice",
+                }
+            )
 
     for row in loan_rows:
         payment_date = row.get("payment_date")
@@ -4212,6 +4231,8 @@ def list_no_invoice_expenses():
             select(
                 no_invoice_table.c.id,
                 no_invoice_table.c.expense_date,
+                no_invoice_table.c.payment_date,
+                no_invoice_table.c.payment_dates,
                 no_invoice_table.c.concept,
                 no_invoice_table.c.amount,
                 no_invoice_table.c.interest_amount,
@@ -4236,6 +4257,9 @@ def list_no_invoice_expenses():
         {
             "id": row["id"],
             "expense_date": row["expense_date"],
+            "payment_date": row["payment_date"] or row["expense_date"],
+            "payment_dates": parse_payment_dates(row["payment_dates"])
+            or ([row["payment_date"]] if row["payment_date"] else [row["expense_date"]]),
             "concept": row["concept"],
             "amount": float(row["amount"]),
             "interest_amount": float(row["interest_amount"] or 0),
@@ -4262,6 +4286,7 @@ def create_no_invoice_expense():
     payload = request.get_json(silent=True) or {}
 
     expense_date = payload.get("expense_date") or ""
+    payment_dates = parse_payment_dates(payload.get("payment_dates") or payload.get("paymentDates"))
     concept = (payload.get("concept") or "").strip()
     amount = parse_amount(str(payload.get("amount") or ""))
     expense_type = payload.get("expense_type") or ""
@@ -4272,6 +4297,12 @@ def create_no_invoice_expense():
     base_amount_payload = parse_amount(str(payload.get("base_amount") or ""))
     withholding_amount = parse_amount(str(payload.get("withholding_amount") or ""))
     deductible = payload.get("deductible")
+    payment_date = compute_payment_date(
+        expense_date,
+        payload.get("payment_date")
+        or payload.get("paymentDate")
+        or (payment_dates[0] if payment_dates else expense_date),
+    )
 
     errors = []
     if not expense_date:
@@ -4354,6 +4385,8 @@ def create_no_invoice_expense():
                 user_id=data_owner_id,
                 company_id=company_id,
                 expense_date=expense_date,
+                payment_date=payment_date,
+                payment_dates=json.dumps(payment_dates) if payment_dates else json.dumps([payment_date]),
                 concept=concept,
                 amount=amount,
                 interest_amount=interest_amount,
@@ -4384,13 +4417,24 @@ def update_no_invoice_expense(expense_id):
     if payment_only:
         if not expense_date:
             return jsonify({"ok": False, "errors": ["Fecha obligatoria."]}), 400
+        payment_dates = parse_payment_dates(payload.get("payment_dates") or payload.get("paymentDates"))
+        payment_date = compute_payment_date(
+            expense_date,
+            payload.get("payment_date")
+            or payload.get("paymentDate")
+            or (payment_dates[0] if payment_dates else expense_date),
+        )
         with engine.begin() as conn:
             result = conn.execute(
                 no_invoice_table.update()
                 .where(no_invoice_table.c.id == expense_id)
                 .where(no_invoice_table.c.user_id == data_owner_id)
                 .where(no_invoice_table.c.company_id == company_id)
-                .values(expense_date=expense_date)
+                .values(
+                    expense_date=expense_date,
+                    payment_date=payment_date,
+                    payment_dates=json.dumps(payment_dates) if payment_dates else json.dumps([payment_date]),
+                )
             )
         if result.rowcount == 0:
             return jsonify({"ok": False, "errors": ["Gasto no encontrado."]}), 404
@@ -4405,6 +4449,13 @@ def update_no_invoice_expense(expense_id):
     base_amount_payload = parse_amount(str(payload.get("base_amount") or ""))
     withholding_amount = parse_amount(str(payload.get("withholding_amount") or ""))
     deductible = payload.get("deductible")
+    payment_dates = parse_payment_dates(payload.get("payment_dates") or payload.get("paymentDates"))
+    payment_date = compute_payment_date(
+        expense_date,
+        payload.get("payment_date")
+        or payload.get("paymentDate")
+        or (payment_dates[0] if payment_dates else expense_date),
+    )
 
     errors = []
     if not expense_date:
@@ -4489,6 +4540,8 @@ def update_no_invoice_expense(expense_id):
             .where(no_invoice_table.c.company_id == company_id)
             .values(
                 expense_date=expense_date,
+                payment_date=payment_date,
+                payment_dates=json.dumps(payment_dates) if payment_dates else json.dumps([payment_date]),
                 concept=concept,
                 amount=amount,
                 interest_amount=interest_amount,
@@ -4511,6 +4564,8 @@ def update_no_invoice_expense(expense_id):
             "expense": {
                 "id": expense_id,
                 "expense_date": expense_date,
+                "payment_date": payment_date,
+                "payment_dates": payment_dates if payment_dates else [payment_date],
                 "concept": concept,
                 "amount": amount,
                 "interest_amount": float(interest_amount or 0),
