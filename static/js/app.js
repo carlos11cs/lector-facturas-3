@@ -856,7 +856,7 @@ function parseVatBreakdown(value) {
   return [];
 }
 
-function normalizeBreakdownLine(line) {
+function normalizeBreakdownLine(line, source = "auto") {
   const baseValue = parseNumberInput(line.base);
   const vatValue = parseNumberInput(line.vat_amount);
   const totalValue = parseNumberInput(line.total);
@@ -870,6 +870,41 @@ function normalizeBreakdownLine(line) {
   let vatAmount = vatValue;
   let total = totalValue;
   let rate = rateValue !== null ? Number(rateValue) : null;
+
+  if (source === "base" || source === "rate") {
+    if (base !== null && rate !== null) {
+      vatAmount = roundAmount(base * (rate / 100));
+      total = roundAmount(base + vatAmount);
+    } else if (base !== null && vatAmount !== null) {
+      total = roundAmount(base + vatAmount);
+    } else if (base !== null && total !== null) {
+      vatAmount = roundAmount(total - base);
+    }
+  } else if (source === "vat" || source === "vatAmount") {
+    if (base !== null && vatAmount !== null) {
+      total = roundAmount(base + vatAmount);
+      if (base > 0) {
+        rate = roundAmount((vatAmount / base) * 100);
+      }
+    } else if (total !== null && vatAmount !== null) {
+      base = roundAmount(total - vatAmount);
+      if (base > 0) {
+        rate = roundAmount((vatAmount / base) * 100);
+      }
+    }
+  } else if (source === "total") {
+    if (base !== null && total !== null) {
+      vatAmount = roundAmount(total - base);
+      if (base > 0) {
+        rate = roundAmount((vatAmount / base) * 100);
+      }
+    } else if (vatAmount !== null && total !== null) {
+      base = roundAmount(total - vatAmount);
+      if (base > 0) {
+        rate = roundAmount((vatAmount / base) * 100);
+      }
+    }
+  }
 
   if (base !== null && vatAmount === null && total !== null) {
     vatAmount = roundAmount(total - base);
@@ -2628,15 +2663,17 @@ function renderTable() {
         });
         actionsCell.appendChild(removeLineBtn);
 
-        const syncLine = () => {
+        const syncLine = (source = "auto") => {
           line.rate = rateSelect.value;
           line.base = baseLineInput.value;
           line.vat_amount = vatLineInput.value;
           line.total = totalLineInput.value;
-          const normalized = normalizeBreakdownLine(line);
+          const normalized = normalizeBreakdownLine(line, source);
           if (normalized) {
+            line.base = formatAmountInput(normalized.base);
             line.vat_amount = formatAmountInput(normalized.vat_amount);
             line.total = formatAmountInput(normalized.total);
+            baseLineInput.value = line.base;
             vatLineInput.value = line.vat_amount;
             totalLineInput.value = line.total;
           } else {
@@ -2655,10 +2692,10 @@ function renderTable() {
             totalInput.value = item.total;
           }
         };
-        rateSelect.addEventListener("change", syncLine);
-        baseLineInput.addEventListener("input", syncLine);
-        vatLineInput.addEventListener("input", syncLine);
-        totalLineInput.addEventListener("input", syncLine);
+        rateSelect.addEventListener("change", () => syncLine("rate"));
+        baseLineInput.addEventListener("input", () => syncLine("base"));
+        vatLineInput.addEventListener("input", () => syncLine("vatAmount"));
+        totalLineInput.addEventListener("input", () => syncLine("total"));
         syncLine();
 
         row.appendChild(baseCell);
@@ -3079,15 +3116,17 @@ function renderIncomeTable() {
         });
         actionsCell.appendChild(removeLineBtn);
 
-        const syncLine = () => {
+        const syncLine = (source = "auto") => {
           line.rate = rateSelect.value;
           line.base = baseLineInput.value;
           line.vat_amount = vatLineInput.value;
           line.total = totalLineInput.value;
-          const normalized = normalizeBreakdownLine(line);
+          const normalized = normalizeBreakdownLine(line, source);
           if (normalized) {
+            line.base = formatAmountInput(normalized.base);
             line.vat_amount = formatAmountInput(normalized.vat_amount);
             line.total = formatAmountInput(normalized.total);
+            baseLineInput.value = line.base;
             vatLineInput.value = line.vat_amount;
             totalLineInput.value = line.total;
           } else {
@@ -3106,10 +3145,10 @@ function renderIncomeTable() {
             totalInput.value = item.total;
           }
         };
-        rateSelect.addEventListener("change", syncLine);
-        baseLineInput.addEventListener("input", syncLine);
-        vatLineInput.addEventListener("input", syncLine);
-        totalLineInput.addEventListener("input", syncLine);
+        rateSelect.addEventListener("change", () => syncLine("rate"));
+        baseLineInput.addEventListener("input", () => syncLine("base"));
+        vatLineInput.addEventListener("input", () => syncLine("vatAmount"));
+        totalLineInput.addEventListener("input", () => syncLine("total"));
         syncLine();
 
         row.appendChild(baseCell);
