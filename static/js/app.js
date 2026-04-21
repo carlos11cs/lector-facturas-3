@@ -7306,6 +7306,75 @@ function toggleReportCustomRange() {
   reportEndMonthSelect.parentElement.style.display = isCustom ? "" : "none";
 }
 
+function syncReportSelectorsFromMain() {
+  if (reportYearSelect && yearSelect) {
+    reportYearSelect.value = yearSelect.value;
+  }
+  if (!reportQuarterSelect || !reportStartMonthSelect || !reportEndMonthSelect || !monthSelect || !periodSelect) {
+    toggleReportCustomRange();
+    return;
+  }
+
+  const selectedMonth = Number(monthSelect.value || 1);
+  if (getSelectedPeriod() === "quarterly") {
+    const quarter = Math.min(4, Math.max(1, Math.ceil(selectedMonth / 3)));
+    reportQuarterSelect.value = String(quarter);
+    reportStartMonthSelect.value = String((quarter - 1) * 3 + 1);
+    reportEndMonthSelect.value = String(quarter * 3);
+  } else {
+    reportQuarterSelect.value = "custom";
+    reportStartMonthSelect.value = String(selectedMonth);
+    reportEndMonthSelect.value = String(selectedMonth);
+  }
+  toggleReportCustomRange();
+}
+
+function applyReportSelectorsToMain() {
+  if (!monthSelect || !yearSelect || !periodSelect) {
+    return;
+  }
+
+  if (reportYearSelect?.value) {
+    yearSelect.value = reportYearSelect.value;
+  }
+
+  const reportMode = reportQuarterSelect?.value || "custom";
+  if (reportMode === "custom") {
+    const startMonth = Number(reportStartMonthSelect?.value || monthSelect.value || 1);
+    const endMonth = Number(reportEndMonthSelect?.value || monthSelect.value || startMonth);
+    const isQuarterRange =
+      (startMonth === 1 && endMonth === 3) ||
+      (startMonth === 4 && endMonth === 6) ||
+      (startMonth === 7 && endMonth === 9) ||
+      (startMonth === 10 && endMonth === 12);
+
+    periodSelect.value = isQuarterRange ? "quarterly" : "monthly";
+    monthSelect.value = String(endMonth);
+  } else {
+    const quarter = Number(reportMode);
+    periodSelect.value = "quarterly";
+    if (quarter >= 1 && quarter <= 4) {
+      monthSelect.value = String(quarter * 3);
+      if (reportStartMonthSelect) {
+        reportStartMonthSelect.value = String((quarter - 1) * 3 + 1);
+      }
+      if (reportEndMonthSelect) {
+        reportEndMonthSelect.value = String(quarter * 3);
+      }
+    }
+  }
+
+  document.body.classList.toggle(
+    "period-quarterly",
+    getSelectedPeriod() === "quarterly"
+  );
+  persistFilters();
+  updateHeaderContext();
+  calendarOverride = false;
+  syncCalendarWithFilters();
+  refreshAllData();
+}
+
 function buildReportParams() {
   const params = {};
   if (reportYearSelect) {
@@ -7724,6 +7793,7 @@ function bindEvents() {
       updateHeaderContext();
       calendarOverride = false;
       syncCalendarWithFilters();
+      syncReportSelectorsFromMain();
       refreshAllData();
     });
   }
@@ -7733,6 +7803,7 @@ function bindEvents() {
       updateHeaderContext();
       calendarOverride = false;
       syncCalendarWithFilters();
+      syncReportSelectorsFromMain();
       refreshAllData();
     });
   }
@@ -7746,6 +7817,7 @@ function bindEvents() {
       updateHeaderContext();
       calendarOverride = false;
       syncCalendarWithFilters();
+      syncReportSelectorsFromMain();
       refreshAllData();
     });
   }
@@ -7761,7 +7833,10 @@ function bindEvents() {
       syncCalendarWithFilters();
       renderTable();
       renderIncomeTable();
-      loadYears().then(() => refreshAllData());
+      loadYears().then(() => {
+        syncReportSelectorsFromMain();
+        refreshAllData();
+      });
     });
   }
   if (billingBaseInput) {
@@ -7859,6 +7934,24 @@ function bindEvents() {
   if (reportQuarterSelect) {
     reportQuarterSelect.addEventListener("change", () => {
       toggleReportCustomRange();
+      applyReportSelectorsToMain();
+    });
+  }
+  if (reportYearSelect) {
+    reportYearSelect.addEventListener("change", applyReportSelectorsToMain);
+  }
+  if (reportStartMonthSelect) {
+    reportStartMonthSelect.addEventListener("change", () => {
+      if (reportQuarterSelect?.value === "custom") {
+        applyReportSelectorsToMain();
+      }
+    });
+  }
+  if (reportEndMonthSelect) {
+    reportEndMonthSelect.addEventListener("change", () => {
+      if (reportQuarterSelect?.value === "custom") {
+        applyReportSelectorsToMain();
+      }
     });
   }
   if (reportDownloadBtn) {
@@ -7890,6 +7983,7 @@ function init() {
       document.body.classList.toggle("period-quarterly", getSelectedPeriod() === "quarterly");
       billingMonthSelect.value = monthSelect.value;
       billingYearSelect.value = yearSelect.value;
+      syncReportSelectorsFromMain();
       if (reportStartMonthSelect) {
         reportStartMonthSelect.value = monthSelect.value;
       }
