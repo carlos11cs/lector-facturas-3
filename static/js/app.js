@@ -391,19 +391,21 @@ function applyVatCalculation(item, inputs, source) {
     source,
   });
 
-  if (source === "total" && result.base !== null) {
-    inputs.base.value = formatAmountInput(result.base);
-  } else if (source === "total" && result.base === null) {
-    inputs.base.value = "";
+  if (source !== "base") {
+    if (result.base !== null) {
+      inputs.base.value = formatAmountInput(result.base);
+    } else if (source === "total") {
+      inputs.base.value = "";
+    }
   }
-  if (result.vatAmount !== null) {
+  if (source !== "vatAmount" && result.vatAmount !== null) {
     inputs.vatAmount.value = formatAmountInput(result.vatAmount);
-  } else {
+  } else if (source !== "vatAmount") {
     inputs.vatAmount.value = "";
   }
-  if (result.total !== null) {
+  if (source !== "total" && result.total !== null) {
     inputs.total.value = formatAmountInput(result.total);
-  } else {
+  } else if (source !== "total") {
     inputs.total.value = "";
   }
 
@@ -427,19 +429,19 @@ function syncBillingCalculation(source) {
     source,
   });
 
-  if (result.base !== null) {
+  if (source !== "base" && result.base !== null) {
     billingBaseInput.value = formatAmountInput(result.base);
-  } else if (source === "total") {
+  } else if (source !== "base" && source === "total") {
     billingBaseInput.value = "";
   }
-  if (result.total !== null) {
+  if (source !== "total" && result.total !== null) {
     billingTotalInput.value = formatAmountInput(result.total);
-  } else if (source === "base") {
+  } else if (source !== "total" && source === "base") {
     billingTotalInput.value = "";
   }
-  if (result.vatAmount !== null) {
+  if (source !== "vatAmount" && result.vatAmount !== null) {
     billingVatAmountInput.value = formatAmountInput(result.vatAmount);
-  } else {
+  } else if (source !== "vatAmount") {
     billingVatAmountInput.value = "";
   }
 }
@@ -2670,17 +2672,27 @@ function renderTable() {
           line.total = totalLineInput.value;
           const normalized = normalizeBreakdownLine(line, source);
           if (normalized) {
-            line.base = formatAmountInput(normalized.base);
-            line.vat_amount = formatAmountInput(normalized.vat_amount);
-            line.total = formatAmountInput(normalized.total);
-            baseLineInput.value = line.base;
-            vatLineInput.value = line.vat_amount;
-            totalLineInput.value = line.total;
+            if (source !== "base") {
+              line.base = formatAmountInput(normalized.base);
+              baseLineInput.value = line.base;
+            }
+            if (source !== "vatAmount") {
+              line.vat_amount = formatAmountInput(normalized.vat_amount);
+              vatLineInput.value = line.vat_amount;
+            }
+            if (source !== "total") {
+              line.total = formatAmountInput(normalized.total);
+              totalLineInput.value = line.total;
+            }
           } else {
-            line.vat_amount = "";
-            line.total = "";
-            vatLineInput.value = "";
-            totalLineInput.value = "";
+            if (source !== "vatAmount") {
+              line.vat_amount = "";
+              vatLineInput.value = "";
+            }
+            if (source !== "total") {
+              line.total = "";
+              totalLineInput.value = "";
+            }
           }
           const totals = summarizeVatBreakdown(item.vatBreakdown || []);
           if (totals) {
@@ -3123,17 +3135,27 @@ function renderIncomeTable() {
           line.total = totalLineInput.value;
           const normalized = normalizeBreakdownLine(line, source);
           if (normalized) {
-            line.base = formatAmountInput(normalized.base);
-            line.vat_amount = formatAmountInput(normalized.vat_amount);
-            line.total = formatAmountInput(normalized.total);
-            baseLineInput.value = line.base;
-            vatLineInput.value = line.vat_amount;
-            totalLineInput.value = line.total;
+            if (source !== "base") {
+              line.base = formatAmountInput(normalized.base);
+              baseLineInput.value = line.base;
+            }
+            if (source !== "vatAmount") {
+              line.vat_amount = formatAmountInput(normalized.vat_amount);
+              vatLineInput.value = line.vat_amount;
+            }
+            if (source !== "total") {
+              line.total = formatAmountInput(normalized.total);
+              totalLineInput.value = line.total;
+            }
           } else {
-            line.vat_amount = "";
-            line.total = "";
-            vatLineInput.value = "";
-            totalLineInput.value = "";
+            if (source !== "vatAmount") {
+              line.vat_amount = "";
+              vatLineInput.value = "";
+            }
+            if (source !== "total") {
+              line.total = "";
+              totalLineInput.value = "";
+            }
           }
           const totals = summarizeVatBreakdown(item.vatBreakdown || []);
           if (totals) {
