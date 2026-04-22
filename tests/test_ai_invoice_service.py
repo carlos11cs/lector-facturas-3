@@ -151,6 +151,23 @@ class TestAiInvoiceService(unittest.TestCase):
         payment_date = (svc.date.fromisoformat(invoice_date) + svc.timedelta(days=terms)).isoformat()
         self.assertEqual(payment_date, "2020-03-12")
 
+    def test_zero_vat_totals_are_preserved(self):
+        extracted = {
+            "supplier": "Google Cloud EMEA Limited",
+            "invoice_date": "2026-01-31",
+            "totals": {"base": 32.40, "vat": 0.00, "total": 32.40},
+            "vat_breakdown": [
+                {"base": 32.40, "vat_amount": 0.00, "rate": None},
+            ],
+        }
+        normalized = svc.normalize_and_validate_amounts(extracted)
+        self.assertEqual(normalized["analysis_status"], "ok")
+        self.assertAlmostEqual(normalized["base_amount"], 32.40, places=2)
+        self.assertAlmostEqual(normalized["vat_amount"], 0.00, places=2)
+        self.assertAlmostEqual(normalized["total_amount"], 32.40, places=2)
+        self.assertAlmostEqual(normalized["vat_rate"], 0.0, places=2)
+        self.assertEqual(len(normalized["vat_breakdown"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

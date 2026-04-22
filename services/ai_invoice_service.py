@@ -1568,19 +1568,25 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
     incoming_source = result.get("amount_source") or "llm"
 
     base_amount = _normalize_amount(
-        totals_payload.get("base")
-        or totals_payload.get("base_amount")
-        or result.get("base_amount")
+        _pick_first_non_empty(
+            totals_payload.get("base"),
+            totals_payload.get("base_amount"),
+            result.get("base_amount"),
+        )
     )
     vat_amount = _normalize_amount(
-        totals_payload.get("vat")
-        or totals_payload.get("vat_amount")
-        or result.get("vat_amount")
+        _pick_first_non_empty(
+            totals_payload.get("vat"),
+            totals_payload.get("vat_amount"),
+            result.get("vat_amount"),
+        )
     )
     total_amount = _normalize_amount(
-        totals_payload.get("total")
-        or totals_payload.get("total_amount")
-        or result.get("total_amount")
+        _pick_first_non_empty(
+            totals_payload.get("total"),
+            totals_payload.get("total_amount"),
+            result.get("total_amount"),
+        )
     )
     vat_rate = _normalize_rate(result.get("vat_rate"))
 
@@ -1598,8 +1604,12 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
     for line in raw_breakdown:
         if not isinstance(line, dict):
             continue
-        base_line = _normalize_amount(line.get("base") or line.get("base_amount"))
-        vat_line = _normalize_amount(line.get("vat_amount") or line.get("vat"))
+        base_line = _normalize_amount(
+            _pick_first_non_empty(line.get("base"), line.get("base_amount"))
+        )
+        vat_line = _normalize_amount(
+            _pick_first_non_empty(line.get("vat_amount"), line.get("vat"))
+        )
         if base_line is None or vat_line is None:
             continue
         rate_calc = round((vat_line / base_line) * 100, 2) if base_line > 0 else None
@@ -2320,11 +2330,13 @@ def analyze_invoice(
         payment_dates.append(single_payment_date)
     totals_payload = data.get("totals") if isinstance(data.get("totals"), dict) else {}
     base_amount = _normalize_amount(
-        totals_payload.get("base")
-        or totals_payload.get("base_amount")
-        or data.get("base_amount")
-        or data.get("base_imponible")
-        or data.get("base")
+        _pick_first_non_empty(
+            totals_payload.get("base"),
+            totals_payload.get("base_amount"),
+            data.get("base_amount"),
+            data.get("base_imponible"),
+            data.get("base"),
+        )
     )
     vat_rate = _normalize_rate(
         _pick_first_non_empty(
@@ -2335,18 +2347,22 @@ def analyze_invoice(
         )
     )
     vat_amount = _normalize_amount(
-        totals_payload.get("vat")
-        or totals_payload.get("vat_amount")
-        or data.get("vat_amount")
-        or data.get("importe_iva")
-        or data.get("iva_importe")
+        _pick_first_non_empty(
+            totals_payload.get("vat"),
+            totals_payload.get("vat_amount"),
+            data.get("vat_amount"),
+            data.get("importe_iva"),
+            data.get("iva_importe"),
+        )
     )
     total_amount = _normalize_amount(
-        totals_payload.get("total")
-        or totals_payload.get("total_amount")
-        or data.get("total_amount")
-        or data.get("total_factura")
-        or data.get("total")
+        _pick_first_non_empty(
+            totals_payload.get("total"),
+            totals_payload.get("total_amount"),
+            data.get("total_amount"),
+            data.get("total_factura"),
+            data.get("total"),
+        )
     )
     vat_breakdown = (
         data.get("vat_breakdown")
@@ -2356,10 +2372,12 @@ def analyze_invoice(
         or []
     )
     withholding_amount = _normalize_amount(
-        data.get("withholding_amount")
-        or data.get("retencion")
-        or data.get("retencion_irpf")
-        or data.get("retention_amount")
+        _pick_first_non_empty(
+            data.get("withholding_amount"),
+            data.get("retencion"),
+            data.get("retencion_irpf"),
+            data.get("retention_amount"),
+        )
     )
     amount_source = "llm" if data else "fallback"
 
