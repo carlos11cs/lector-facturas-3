@@ -151,7 +151,7 @@ invoices_table = Table(
     Column("invoice_date", String, nullable=False),
     Column("supplier", String, nullable=False),
     Column("base_amount", Float, nullable=False),
-    Column("vat_rate", Integer, nullable=False),
+    Column("vat_rate", Integer),
     Column("vat_amount", Float),
     Column("total_amount", Float, nullable=False),
     Column("vat_breakdown", Text),
@@ -175,7 +175,7 @@ income_invoices_table = Table(
     Column("invoice_date", String, nullable=False),
     Column("client", String, nullable=False),
     Column("base_amount", Float, nullable=False),
-    Column("vat_rate", Integer, nullable=False),
+    Column("vat_rate", Integer),
     Column("vat_amount", Float),
     Column("total_amount", Float, nullable=False),
     Column("vat_breakdown", Text),
@@ -275,6 +275,20 @@ def init_db():
                 text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
             )
 
+    def drop_not_null_if_needed(table_name, column_name):
+        if table_name not in table_names:
+            return
+        columns = {col["name"]: col for col in inspector.get_columns(table_name)}
+        column = columns.get(column_name)
+        if not column or column.get("nullable", True):
+            return
+        if engine.dialect.name != "postgresql":
+            return
+        with engine.begin() as conn:
+            conn.execute(
+                text(f"ALTER TABLE {table_name} ALTER COLUMN {column_name} DROP NOT NULL")
+            )
+
     add_column_if_missing("invoices", "user_id", "INTEGER")
     add_column_if_missing("invoices", "company_id", "INTEGER")
     add_column_if_missing("invoices", "payment_date", "VARCHAR")
@@ -282,6 +296,7 @@ def init_db():
     add_column_if_missing("invoices", "vat_breakdown", "TEXT")
     add_column_if_missing("invoices", "extraction_source", "VARCHAR")
     add_column_if_missing("invoices", "confidence_score", "FLOAT")
+    drop_not_null_if_needed("invoices", "vat_rate")
     if "invoices" in table_names:
         with engine.begin() as conn:
             conn.execute(
@@ -351,6 +366,7 @@ def init_db():
     add_column_if_missing("income_invoices", "vat_breakdown", "TEXT")
     add_column_if_missing("income_invoices", "extraction_source", "VARCHAR")
     add_column_if_missing("income_invoices", "confidence_score", "FLOAT")
+    drop_not_null_if_needed("income_invoices", "vat_rate")
     if "income_invoices" in table_names:
         with engine.begin() as conn:
             conn.execute(
@@ -1068,6 +1084,39 @@ def summarize_vat_breakdown(lines):
         vat_total += float(line.get("vat_amount") or 0)
         total_total += float(line.get("total") or 0)
     return round(base_total, 2), round(vat_total, 2), round(total_total, 2)
+
+
+def infer_vat_rate_from_breakdown(lines):
+    if not lines:
+        return None
+    inferred_rates = set()
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        rate = line.get("rate")
+        if rate is None:
+            base_amount = parse_amount(str(line.get("base") or ""))
+            vat_amount = parse_amount(str(line.get("vat_amount") or ""))
+            if base_amount is None or vat_amount is None:
+                continue
+            if abs(vat_amount) <= 0.02 and base_amount is not None:
+                rate = 0.0
+            elif base_amount:
+                rate = round((vat_amount / base_amount) * 100, 2)
+        if rate is None:
+            continue
+        matched = None
+        for allowed in (0, 4, 10, 21):
+            if abs(float(rate) - allowed) <= 0.25:
+                matched = allowed
+                break
+        if matched is not None:
+            inferred_rates.add(matched)
+    if len(inferred_rates) == 1:
+        return int(next(iter(inferred_rates)))
+    if len(inferred_rates) > 1:
+        return -1
+    return None
 
 
 def store_known_supplier(conn, user_id, company_id, supplier):
@@ -2607,12 +2656,7 @@ def upload_invoices():
                     )
 
                 if vat_breakdown:
-                    rates = {line.get("rate") for line in vat_breakdown if line.get("rate") is not None}
-                    vat_rate_int = None
-                    if len(rates) == 1:
-                        vat_rate_int = int(list(rates)[0])
-                    elif rates:
-                        vat_rate_int = -1
+                    vat_rate_int = infer_vat_rate_from_breakdown(vat_breakdown)
                     summary = summarize_vat_breakdown(vat_breakdown)
                     if summary:
                         base_amount, vat_amount, total_amount = summary
@@ -3797,8 +3841,7 @@ def update_invoice(invoice_id):
         if (base_amount < 0 or total_amount < 0) and not is_rectificativa:
             errors.append("Factura rectificativa no indicada.")
     if vat_breakdown:
-        rates = {line.get("rate") for line in vat_breakdown if line.get("rate") is not None}
-        vat_rate = int(list(rates)[0]) if len(rates) == 1 else (-1 if rates else None)
+        vat_rate = infer_vat_rate_from_breakdown(vat_breakdown)
         summary = summarize_vat_breakdown(vat_breakdown)
         if summary:
             base_amount, vat_amount, total_amount = summary
@@ -4015,12 +4058,7 @@ def create_income_invoices():
                 )
                 continue
             if vat_breakdown:
-                rates = {line.get("rate") for line in vat_breakdown if line.get("rate") is not None}
-                vat_rate_int = None
-                if len(rates) == 1:
-                    vat_rate_int = int(list(rates)[0])
-                elif rates:
-                    vat_rate_int = -1
+                vat_rate_int = infer_vat_rate_from_breakdown(vat_breakdown)
                 summary = summarize_vat_breakdown(vat_breakdown)
                 if summary:
                     base_amount, vat_amount, total_amount = summary
@@ -4141,8 +4179,7 @@ def update_income_invoice(invoice_id):
         if (base_amount < 0 or total_amount < 0) and not is_rectificativa:
             errors.append("Factura rectificativa no indicada.")
     if vat_breakdown:
-        rates = {line.get("rate") for line in vat_breakdown if line.get("rate") is not None}
-        vat_rate = int(list(rates)[0]) if len(rates) == 1 else (-1 if rates else None)
+        vat_rate = infer_vat_rate_from_breakdown(vat_breakdown)
         summary = summarize_vat_breakdown(vat_breakdown)
         if summary:
             base_amount, vat_amount, total_amount = summary
