@@ -487,7 +487,7 @@ def _extract_invoice_date_from_text(text: str) -> Optional[str]:
             found = _extract_first_date(line)
             if found:
                 return found
-            for offset in range(1, 11):
+            for offset in range(1, 21):
                 if idx + offset < len(lines):
                     candidate = _extract_first_date(lines[idx + offset])
                     if candidate:
@@ -2585,7 +2585,7 @@ def analyze_invoice(
     # Fallback to explicit amounts in text (e.g., "Total factura") if present.
     text_amounts = _extract_amounts_from_text(extracted_text)
     text_total = text_amounts.get("total")
-    if text_total is not None:
+    if text_total is not None and amount_source != "regex_tax_summary":
         if total_amount is None or text_total <= (total_amount + 0.02):
             total_amount = text_total
             if amount_source == "llm":

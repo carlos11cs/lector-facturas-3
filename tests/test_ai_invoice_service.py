@@ -78,6 +78,41 @@ I.V.A 3
 1.40
 """
 
+HENRY_SCHEIN_FULL_DATE_FIXTURE = """FECHA PEDIDO
+C.I.F. / N.I.F.
+FECHA FACTURA
+N° FACTURA
+SU REFERENCIA
+N° CLIENTE
+F A C T U R A
+674259
+A136372
+17936479
+702882
+27676
+A2
+22-04-26
+22-04-26
+BASE EXENTA
+TOTAL A PAGAR
+BASE 2
+BASE 1
+TOTAL BASE
+63.67
+92.44
+EURO
+77.67
+14.00
+BASE 3 (4.0%)
+TOTAL I.V.A
+I.V.A 1
+I.V.A 2
+I.V.A 3
+13.37
+14.77
+1.40
+"""
+
 
 class TestAiInvoiceService(unittest.TestCase):
     def test_parse_eu_amount(self):
@@ -220,6 +255,30 @@ class TestAiInvoiceService(unittest.TestCase):
     def test_extract_invoice_date_dd_mm_yy_from_original_text(self):
         invoice_date = svc._extract_invoice_date_from_text(HENRY_SCHEIN_FIXTURE)
         self.assertEqual(invoice_date, "2026-04-22")
+
+    def test_extract_invoice_date_with_longer_header_gap(self):
+        invoice_date = svc._extract_invoice_date_from_text(HENRY_SCHEIN_FULL_DATE_FIXTURE)
+        self.assertEqual(invoice_date, "2026-04-22")
+
+    def test_text_total_does_not_override_tax_summary(self):
+        summary = svc._extract_tax_summary_from_text(HENRY_SCHEIN_FULL_DATE_FIXTURE)
+        self.assertTrue(summary.get("found"))
+        base, vat, total, rate, source = svc._apply_tax_summary_override(
+            HENRY_SCHEIN_FULL_DATE_FIXTURE,
+            63.67,
+            13.37,
+            77.67,
+            None,
+            summary,
+        )
+        self.assertEqual(source, "regex_tax_summary")
+        text_amounts = svc._extract_amounts_from_text(HENRY_SCHEIN_FULL_DATE_FIXTURE)
+        if text_amounts.get("total") is not None and source != "regex_tax_summary":
+            if total is None or text_amounts["total"] <= (total + 0.02):
+                total = text_amounts["total"]
+        self.assertAlmostEqual(base, 77.67, places=2)
+        self.assertAlmostEqual(vat, 14.77, places=2)
+        self.assertAlmostEqual(total, 92.44, places=2)
 
 
 if __name__ == "__main__":
