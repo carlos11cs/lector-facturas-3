@@ -6,6 +6,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import date, timedelta
+from itertools import combinations
 from typing import Any, Dict, Optional, List, Tuple
 
 import mimetypes
@@ -494,6 +495,110 @@ def _extract_invoice_date_from_text(text: str) -> Optional[str]:
     return None
 
 
+def _extract_numbered_tax_summary_from_text(text: str) -> Dict[str, Any]:
+    if not text:
+        return {"found": False}
+    normalized_text = _normalize_ocr_amount_text(text)
+    upper_text = normalized_text.upper()
+    required_tokens = ("TOTAL A PAGAR", "TOTAL BASE", "TOTAL I.V.A")
+    if not all(token in upper_text for token in required_tokens):
+        return {"found": False}
+
+    lines = [line.strip() for line in normalized_text.splitlines() if line.strip()]
+    start_idx = None
+    for idx, line in enumerate(lines):
+        upper = line.upper()
+        if (
+            "TOTAL A PAGAR" in upper
+            or "TOTAL BASE" in upper
+            or "BASE 1" in upper
+            or "BASE 2" in upper
+            or "BASE 3" in upper
+        ):
+            start_idx = idx
+            break
+    if start_idx is None:
+        return {"found": False}
+
+    block = lines[start_idx : start_idx + 25]
+    candidates: List[float] = []
+    amount_pattern = re.compile(r"\d{1,3}(?:[.\s]\d{3})*[.,]\d{2}|\d+[.,]\d{2}")
+    for line in block:
+        for raw in amount_pattern.findall(line):
+            parsed = _normalize_amount(raw)
+            if parsed is None or parsed < 0:
+                continue
+            rounded = round(parsed, 2)
+            if rounded not in candidates:
+                candidates.append(rounded)
+    if len(candidates) < 3:
+        return {"found": False}
+
+    total_triplet: Optional[Tuple[float, float, float]] = None
+    for total_candidate in sorted(candidates, reverse=True):
+        for base_candidate in sorted([v for v in candidates if v <= total_candidate], reverse=True):
+            vat_candidate = round(total_candidate - base_candidate, 2)
+            if vat_candidate < 0:
+                continue
+            if any(abs(v - vat_candidate) <= 0.02 for v in candidates):
+                total_triplet = (base_candidate, vat_candidate, total_candidate)
+                break
+        if total_triplet:
+            break
+    if not total_triplet:
+        return {"found": False}
+
+    total_base, total_vat, total_amount = total_triplet
+    base_candidates = [value for value in candidates if 0 < value < total_base + 0.02]
+    line_candidates: List[Dict[str, Any]] = []
+    for base_candidate in base_candidates:
+        for rate in (21.0, 10.0, 4.0, 0.0):
+            vat_candidate = round(base_candidate * (rate / 100), 2)
+            if rate == 0.0:
+                vat_match = abs(vat_candidate) <= 0.02
+            else:
+                vat_match = any(abs(v - vat_candidate) <= 0.02 for v in candidates)
+            if not vat_match:
+                continue
+            line_candidates.append(
+                {
+                    "base": _round_amount(base_candidate),
+                    "vat_amount": _round_amount(vat_candidate),
+                    "rate": rate,
+                    "total": _round_amount(base_candidate + vat_candidate),
+                }
+            )
+
+    breakdown: List[Dict[str, Any]] = []
+    seen = set()
+    for line in line_candidates:
+        key = (line["base"], line["vat_amount"], line["rate"])
+        if key not in seen:
+            breakdown.append(line)
+            seen.add(key)
+
+    resolved_breakdown: List[Dict[str, Any]] = []
+    for size in range(1, min(3, len(breakdown)) + 1):
+        for combo in combinations(breakdown, size):
+            combo_base = round(sum(line["base"] or 0 for line in combo), 2)
+            combo_vat = round(sum(line["vat_amount"] or 0 for line in combo), 2)
+            if abs(combo_base - total_base) <= 0.02 and abs(combo_vat - total_vat) <= 0.02:
+                resolved_breakdown = list(combo)
+                break
+        if resolved_breakdown:
+            break
+
+    return {
+        "found": True,
+        "base_amount": total_base,
+        "vat_amount": total_vat,
+        "total_amount": total_amount,
+        "vat_rate": resolved_breakdown[0]["rate"] if len(resolved_breakdown) == 1 else None,
+        "source": "regex_tax_summary",
+        "breakdown": resolved_breakdown,
+    }
+
+
 def _extract_tax_summary_from_text(text: str) -> Dict[str, Any]:
     if not text:
         return {"found": False}
@@ -512,7 +617,7 @@ def _extract_tax_summary_from_text(text: str) -> Dict[str, Any]:
                 start_idx = idx
                 break
     if start_idx is None:
-        return {"found": False}
+        return _extract_numbered_tax_summary_from_text(text)
     block = lines[start_idx : start_idx + 20]
 
     def find_amount_after_keywords(
@@ -654,6 +759,22 @@ def _extract_tax_summary_from_text(text: str) -> Dict[str, Any]:
             rate_value = round(100 * vat_value / base_value, 2)
 
     found = any(value is not None for value in (base_value, vat_value, total_value))
+    if found:
+        return {
+            "found": found,
+            "base_amount": base_value,
+            "vat_amount": vat_value,
+            "total_amount": total_value,
+            "vat_rate": rate_value,
+            "base_raw": base_raw,
+            "vat_raw": vat_raw,
+            "total_raw": total_raw,
+            "rate_raw": rate_raw,
+            "source": "regex_tax_summary" if found else None,
+        }
+    numbered_summary = _extract_numbered_tax_summary_from_text(text)
+    if numbered_summary.get("found"):
+        return numbered_summary
     return {
         "found": found,
         "base_amount": base_value,
@@ -683,8 +804,9 @@ def _apply_tax_summary_override(
     summary_base = summary.get("base_amount")
     summary_vat = summary.get("vat_amount")
     summary_total = summary.get("total_amount")
-    summary_rate = summary.get("vat_rate") or vat_rate
+    summary_rate = _pick_first_non_empty(summary.get("vat_rate"), vat_rate)
     summary_base_raw = summary.get("base_raw")
+    summary_breakdown = summary.get("breakdown") if isinstance(summary.get("breakdown"), list) else []
 
     def within_tolerance(a: float, b: float) -> bool:
         return abs(a - b) <= 0.03
@@ -699,7 +821,7 @@ def _apply_tax_summary_override(
         summary_total = round(summary_base + summary_vat, 2)
     if summary_base is not None and summary_total is not None and summary_vat is None:
         summary_vat = round(summary_total - summary_base, 2)
-    if summary_rate is None and summary_base and summary_vat:
+    if summary_rate is None and summary_base and summary_vat and len(summary_breakdown) <= 1:
         summary_rate = round(100 * summary_vat / summary_base, 2)
 
     summary_math_ok = (
@@ -743,10 +865,10 @@ def _apply_tax_summary_override(
         return base_amount, vat_amount, total_amount, vat_rate, source
 
     if summary_base is not None or summary_total is not None:
-        base_amount = summary_base or base_amount
-        vat_amount = summary_vat or vat_amount
-        total_amount = summary_total or total_amount
-        vat_rate = summary_rate or vat_rate
+        base_amount = _pick_first_non_empty(summary_base, base_amount)
+        vat_amount = _pick_first_non_empty(summary_vat, vat_amount)
+        total_amount = _pick_first_non_empty(summary_total, total_amount)
+        vat_rate = _pick_first_non_empty(summary_rate, vat_rate)
         source = "regex_tax_summary"
         return base_amount, vat_amount, total_amount, vat_rate, source
 
@@ -2294,8 +2416,9 @@ def analyze_invoice(
     invoice_date = _normalize_date(
         data.get("invoice_date") or data.get("fecha_factura") or data.get("fecha")
     )
-    if invoice_date is None:
-        invoice_date = _extract_invoice_date_from_text(extracted_text)
+    text_invoice_date = _extract_invoice_date_from_text(extracted_text)
+    if text_invoice_date and (invoice_date is None or pdf_kind == "original"):
+        invoice_date = text_invoice_date
     payment_terms_days = data.get("payment_terms_days") or data.get("payment_terms")
     try:
         payment_terms_days = int(payment_terms_days) if payment_terms_days is not None else None
@@ -2455,6 +2578,9 @@ def analyze_invoice(
     )
     if summary_source != "llm":
         amount_source = summary_source
+    summary_breakdown = tax_summary.get("breakdown") if isinstance(tax_summary, dict) else None
+    if summary_breakdown and (not vat_breakdown or summary_source != "llm"):
+        vat_breakdown = summary_breakdown
 
     # Fallback to explicit amounts in text (e.g., "Total factura") if present.
     text_amounts = _extract_amounts_from_text(extracted_text)

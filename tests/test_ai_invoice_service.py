@@ -37,6 +37,47 @@ VENCIMIENTO:
 04/04/2026
 """
 
+HENRY_SCHEIN_FIXTURE = """REF
+CTD.
+PEDIDA
+CTD.
+SERVIDA
+DTO. %
+DESCRIPCIÓN
+PRECIO
+UNITARIO
+PRECIO
+NETO
+BASE
+I.V.A.
+TOTAL
+Nº ALBARÁN
+Henry Schein Medical SL Avda. De la Albufera 153 – 28038 Madrid  CIF: B-02679538
+FECHA FACTURA
+N° FACTURA
+22-04-26
+A136372
+RECIBO 15 DIAS FECHA FACTURA
+BASE EXENTA
+TOTAL A PAGAR
+BASE 2
+BASE 1
+TOTAL BASE
+63.67
+92.44
+EURO
+77.67
+14.00
+BASE 3 (4.0%)
+TOTAL I.V.A
+I.V.A 1
+I.V.A 2
+I.V.A 3
+13.37
+14.77
+1.40
+"""
+
 
 class TestAiInvoiceService(unittest.TestCase):
     def test_parse_eu_amount(self):
@@ -167,6 +208,18 @@ class TestAiInvoiceService(unittest.TestCase):
         self.assertAlmostEqual(normalized["total_amount"], 32.40, places=2)
         self.assertAlmostEqual(normalized["vat_rate"], 0.0, places=2)
         self.assertEqual(len(normalized["vat_breakdown"]), 1)
+
+    def test_extract_numbered_tax_summary_from_text(self):
+        summary = svc._extract_tax_summary_from_text(HENRY_SCHEIN_FIXTURE)
+        self.assertTrue(summary.get("found"))
+        self.assertAlmostEqual(summary.get("base_amount"), 77.67, places=2)
+        self.assertAlmostEqual(summary.get("vat_amount"), 14.77, places=2)
+        self.assertAlmostEqual(summary.get("total_amount"), 92.44, places=2)
+        self.assertEqual(len(summary.get("breakdown") or []), 2)
+
+    def test_extract_invoice_date_dd_mm_yy_from_original_text(self):
+        invoice_date = svc._extract_invoice_date_from_text(HENRY_SCHEIN_FIXTURE)
+        self.assertEqual(invoice_date, "2026-04-22")
 
 
 if __name__ == "__main__":
