@@ -599,6 +599,93 @@ def _extract_numbered_tax_summary_from_text(text: str) -> Dict[str, Any]:
     }
 
 
+def _extract_multiline_tax_summary_from_block(block: List[str]) -> Dict[str, Any]:
+    if not block:
+        return {"found": False}
+
+    amount_pattern = re.compile(r"^\d{1,3}(?:[.\s]\d{3})*[.,]\d{2}|\d+[.,]\d{2}$")
+    marker_pattern = re.compile(r"^\(\d+\)$")
+    breakdown: List[Dict[str, Any]] = []
+
+    idx = 0
+    while idx + 3 < len(block):
+        base_line = block[idx].strip()
+        marker_line = block[idx + 1].strip()
+        rate_line = block[idx + 2].strip()
+        vat_line = block[idx + 3].strip()
+
+        if (
+            amount_pattern.match(base_line)
+            and marker_pattern.match(marker_line)
+            and amount_pattern.match(rate_line)
+            and amount_pattern.match(vat_line)
+        ):
+            base_value = _normalize_amount(base_line)
+            rate_value = _normalize_rate(rate_line)
+            vat_value = _normalize_amount(vat_line)
+            if (
+                base_value is not None
+                and vat_value is not None
+                and rate_value in {0, 4, 10, 21}
+            ):
+                breakdown.append(
+                    {
+                        "base": _round_amount(base_value),
+                        "vat_amount": _round_amount(vat_value),
+                        "rate": float(rate_value),
+                        "total": _round_amount(base_value + vat_value),
+                    }
+                )
+                idx += 4
+                continue
+        idx += 1
+
+    if not breakdown:
+        return {"found": False}
+
+    base_sum = _round_amount(sum(line["base"] or 0 for line in breakdown))
+    vat_sum = _round_amount(sum(line["vat_amount"] or 0 for line in breakdown))
+    total_sum = _round_amount(base_sum + vat_sum)
+
+    candidates: List[float] = []
+    for line in block:
+        for raw in re.findall(r"\d{1,3}(?:[.\s]\d{3})*[.,]\d{2}|\d+[.,]\d{2}", line):
+            parsed = _normalize_amount(raw)
+            if parsed is None:
+                continue
+            rounded = round(parsed, 2)
+            if rounded not in candidates:
+                candidates.append(rounded)
+
+    total_base = base_sum
+    total_amount = total_sum
+    if any(abs(candidate - base_sum) <= 0.02 for candidate in candidates):
+        total_base = base_sum
+    if any(abs(candidate - total_sum) <= 0.02 for candidate in candidates):
+        total_amount = total_sum
+    else:
+        explicit_total = next(
+            (candidate for candidate in sorted(candidates, reverse=True) if candidate > base_sum + 0.02),
+            None,
+        )
+        if explicit_total is not None and abs((explicit_total - base_sum) - vat_sum) <= 0.05:
+            total_amount = explicit_total
+
+    total_vat = _round_amount(total_amount - total_base)
+    if abs(total_vat - vat_sum) > 0.05:
+        return {"found": False}
+
+    return {
+        "found": True,
+        "base_amount": total_base,
+        "vat_amount": total_vat,
+        "total_amount": total_amount,
+        "vat_rate": breakdown[0]["rate"] if len(breakdown) == 1 else None,
+        "source": "regex_tax_summary",
+        "breakdown": breakdown,
+    }
+
+
 def _extract_tax_summary_from_text(text: str) -> Dict[str, Any]:
     if not text:
         return {"found": False}
@@ -619,6 +706,9 @@ def _extract_tax_summary_from_text(text: str) -> Dict[str, Any]:
     if start_idx is None:
         return _extract_numbered_tax_summary_from_text(text)
     block = lines[start_idx : start_idx + 20]
+    multiline_summary = _extract_multiline_tax_summary_from_block(block)
+    if multiline_summary.get("found"):
+        return multiline_summary
 
     def find_amount_after_keywords(
         keywords: List[str],
@@ -1766,17 +1856,25 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
         # If totals come from text/summary, do NOT let breakdown override a lower explicit total.
         if incoming_source in {"regex_tax_summary", "text_total"} and total_amount is not None:
             if total_sum > total_amount + 0.02:
-                # Keep explicit total, adjust breakdown to match it (likely OCR noise).
-                breakdown_warning = True
-                normalized_breakdown = _adjust_breakdown_to_targets(
-                    normalized_breakdown,
-                    base_amount,
-                    vat_amount,
-                    total_amount,
-                )
-                base_amount = round(sum(line["base"] or 0 for line in normalized_breakdown), 2)
-                vat_amount = round(sum(line["vat_amount"] or 0 for line in normalized_breakdown), 2)
-                amount_source = incoming_source
+                if len(normalized_breakdown) > 1 and breakdown_consistent:
+                    # Multi-line VAT summaries are more reliable than a partial explicit
+                    # summary that only captured the first tax band.
+                    base_amount = base_sum
+                    vat_amount = vat_sum
+                    total_amount = total_sum
+                    amount_source = "breakdown"
+                else:
+                    # Keep explicit total, adjust breakdown to match it (likely OCR noise).
+                    breakdown_warning = True
+                    normalized_breakdown = _adjust_breakdown_to_targets(
+                        normalized_breakdown,
+                        base_amount,
+                        vat_amount,
+                        total_amount,
+                    )
+                    base_amount = round(sum(line["base"] or 0 for line in normalized_breakdown), 2)
+                    vat_amount = round(sum(line["vat_amount"] or 0 for line in normalized_breakdown), 2)
+                    amount_source = incoming_source
             elif llm_consistent:
                 amount_source = incoming_source
             else:

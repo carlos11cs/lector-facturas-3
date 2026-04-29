@@ -113,6 +113,32 @@ I.V.A 3
 1.40
 """
 
+CANTABRIA_MULTIVAT_FIXTURE = """Industrial Farmacéutica Cantabria, S.A.
+IMPUESTOS
+TOTAL BRUTO
+BASE IMPONIBLE
+%
+I.V.A.
+%
+REC.EQUIV
+TOTAL
+111,35
+(1)
+10,00
+11,14
+
+462,36
+(2)
+21,00
+97,10
+
+573,71
+681,95 EUR
+VENCIMIENTO:
+60 dias fecha factura
+27/06/2026
+"""
+
 
 class TestAiInvoiceService(unittest.TestCase):
     def test_parse_eu_amount(self):
@@ -279,6 +305,36 @@ class TestAiInvoiceService(unittest.TestCase):
         self.assertAlmostEqual(base, 77.67, places=2)
         self.assertAlmostEqual(vat, 14.77, places=2)
         self.assertAlmostEqual(total, 92.44, places=2)
+
+    def test_extract_multivat_tax_summary_from_text(self):
+        summary = svc._extract_tax_summary_from_text(CANTABRIA_MULTIVAT_FIXTURE)
+        self.assertTrue(summary.get("found"))
+        self.assertAlmostEqual(summary.get("base_amount"), 573.71, places=2)
+        self.assertAlmostEqual(summary.get("vat_amount"), 108.24, places=2)
+        self.assertAlmostEqual(summary.get("total_amount"), 681.95, places=2)
+        self.assertEqual(len(summary.get("breakdown") or []), 2)
+        self.assertEqual(sorted(line["rate"] for line in summary["breakdown"]), [10.0, 21.0])
+
+    def test_breakdown_wins_over_partial_tax_summary(self):
+        normalized = svc.normalize_and_validate_amounts(
+            {
+                "analysis_status": "ok",
+                "base_amount": 111.35,
+                "vat_amount": 11.13,
+                "total_amount": 122.48,
+                "vat_rate": 10.0,
+                "vat_breakdown": [
+                    {"base": 111.35, "vat_amount": 11.14, "rate": None},
+                    {"base": 462.36, "vat_amount": 97.10, "rate": None},
+                ],
+                "amount_source": "regex_tax_summary",
+            }
+        )
+        self.assertEqual(normalized["amount_source"], "breakdown")
+        self.assertAlmostEqual(normalized["base_amount"], 573.71, places=2)
+        self.assertAlmostEqual(normalized["vat_amount"], 108.24, places=2)
+        self.assertAlmostEqual(normalized["total_amount"], 681.95, places=2)
+        self.assertEqual(len(normalized["vat_breakdown"]), 2)
 
 
 if __name__ == "__main__":
