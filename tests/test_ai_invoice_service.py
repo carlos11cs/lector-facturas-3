@@ -336,6 +336,29 @@ class TestAiInvoiceService(unittest.TestCase):
         self.assertAlmostEqual(normalized["total_amount"], 681.95, places=2)
         self.assertEqual(len(normalized["vat_breakdown"]), 2)
 
+    def test_corrected_amounts_override_raw_totals_payload(self):
+        normalized = svc.normalize_and_validate_amounts(
+            {
+                "analysis_status": "ok",
+                "base_amount": 573.71,
+                "vat_amount": 108.24,
+                "total_amount": 681.95,
+                "vat_rate": None,
+                "vat_breakdown": [
+                    {"base": 111.35, "vat_amount": 11.14, "rate": 10.0, "total": 122.49},
+                    {"base": 462.36, "vat_amount": 97.10, "rate": 21.0, "total": 559.46},
+                ],
+                "totals": {"base": 573.71, "vat": 97.10, "total": 681.95},
+                "amount_source": "regex_tax_summary",
+            }
+        )
+        self.assertEqual(normalized["analysis_status"], "ok")
+        self.assertEqual(normalized["amount_source"], "regex_tax_summary")
+        self.assertAlmostEqual(normalized["base_amount"], 573.71, places=2)
+        self.assertAlmostEqual(normalized["vat_amount"], 108.24, places=2)
+        self.assertAlmostEqual(normalized["total_amount"], 681.95, places=2)
+        self.assertEqual(len(normalized["vat_breakdown"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

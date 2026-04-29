@@ -1781,23 +1781,23 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
 
     base_amount = _normalize_amount(
         _pick_first_non_empty(
+            result.get("base_amount"),
             totals_payload.get("base"),
             totals_payload.get("base_amount"),
-            result.get("base_amount"),
         )
     )
     vat_amount = _normalize_amount(
         _pick_first_non_empty(
+            result.get("vat_amount"),
             totals_payload.get("vat"),
             totals_payload.get("vat_amount"),
-            result.get("vat_amount"),
         )
     )
     total_amount = _normalize_amount(
         _pick_first_non_empty(
+            result.get("total_amount"),
             totals_payload.get("total"),
             totals_payload.get("total_amount"),
-            result.get("total_amount"),
         )
     )
     vat_rate = _normalize_rate(result.get("vat_rate"))
