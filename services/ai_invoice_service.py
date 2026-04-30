@@ -1946,6 +1946,74 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _recover_from_tax_summary_if_needed(
+    analysis_status: str,
+    base_amount: Optional[float],
+    vat_amount: Optional[float],
+    total_amount: Optional[float],
+    vat_rate: Optional[float],
+    vat_breakdown: List[Dict[str, Any]],
+    amount_source: Optional[str],
+    tax_summary: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not isinstance(tax_summary, dict) or not tax_summary.get("found"):
+        return {
+            "analysis_status": analysis_status,
+            "base_amount": base_amount,
+            "vat_amount": vat_amount,
+            "total_amount": total_amount,
+            "vat_rate": vat_rate,
+            "vat_breakdown": vat_breakdown,
+            "amount_source": amount_source,
+            "breakdown_warning": False,
+        }
+
+    if (
+        base_amount is not None
+        and vat_amount is not None
+        and total_amount is not None
+        and abs((base_amount + vat_amount) - total_amount) <= 0.02
+    ):
+        return {
+            "analysis_status": analysis_status,
+            "base_amount": base_amount,
+            "vat_amount": vat_amount,
+            "total_amount": total_amount,
+            "vat_rate": vat_rate,
+            "vat_breakdown": vat_breakdown,
+            "amount_source": amount_source,
+            "breakdown_warning": False,
+        }
+
+    rescued = normalize_and_validate_amounts(
+        {
+            "analysis_status": "ok",
+            "base_amount": tax_summary.get("base_amount"),
+            "vat_amount": tax_summary.get("vat_amount"),
+            "total_amount": tax_summary.get("total_amount"),
+            "vat_rate": tax_summary.get("vat_rate"),
+            "vat_breakdown": tax_summary.get("breakdown") or vat_breakdown,
+            "amount_source": "regex_tax_summary",
+        }
+    )
+    if (
+        rescued.get("base_amount") is not None
+        and rescued.get("vat_amount") is not None
+        and rescued.get("total_amount") is not None
+    ):
+        return rescued
+    return {
+        "analysis_status": analysis_status,
+        "base_amount": base_amount,
+        "vat_amount": vat_amount,
+        "total_amount": total_amount,
+        "vat_rate": vat_rate,
+        "vat_breakdown": vat_breakdown,
+        "amount_source": amount_source,
+        "breakdown_warning": False,
+    }
+
+
 def _has_vat_exemption_indicators(text: str) -> bool:
     if not text:
         return False
@@ -2714,6 +2782,26 @@ def analyze_invoice(
     vat_breakdown = normalized.get("vat_breakdown") or []
     breakdown_warning = normalized.get("breakdown_warning")
     amount_source = normalized.get("amount_source") or amount_source or ("llm" if data else "fallback")
+
+    rescued = _recover_from_tax_summary_if_needed(
+        analysis_status,
+        base_amount,
+        vat_amount,
+        total_amount,
+        vat_rate,
+        vat_breakdown,
+        amount_source,
+        tax_summary,
+    )
+    analysis_status = rescued.get("analysis_status") or analysis_status
+    base_amount = rescued.get("base_amount")
+    vat_amount = rescued.get("vat_amount")
+    total_amount = rescued.get("total_amount")
+    vat_rate = rescued.get("vat_rate")
+    vat_breakdown = rescued.get("vat_breakdown") or []
+    amount_source = rescued.get("amount_source") or amount_source
+    if rescued.get("breakdown_warning") is not None:
+        breakdown_warning = rescued.get("breakdown_warning")
 
     validation = _validate_math(base_amount, vat_amount, total_amount)
     is_rectificativa = bool((base_amount is not None and base_amount < 0) or (total_amount is not None and total_amount < 0))

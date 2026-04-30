@@ -359,6 +359,25 @@ class TestAiInvoiceService(unittest.TestCase):
         self.assertAlmostEqual(normalized["total_amount"], 681.95, places=2)
         self.assertEqual(len(normalized["vat_breakdown"]), 2)
 
+    def test_tax_summary_rescue_recovers_partial_result(self):
+        summary = svc._extract_tax_summary_from_text(CANTABRIA_MULTIVAT_FIXTURE)
+        rescued = svc._recover_from_tax_summary_if_needed(
+            "partial",
+            None,
+            None,
+            None,
+            None,
+            [],
+            "fallback",
+            summary,
+        )
+        self.assertEqual(rescued["analysis_status"], "ok")
+        self.assertEqual(rescued["amount_source"], "regex_tax_summary")
+        self.assertAlmostEqual(rescued["base_amount"], 573.71, places=2)
+        self.assertAlmostEqual(rescued["vat_amount"], 108.24, places=2)
+        self.assertAlmostEqual(rescued["total_amount"], 681.95, places=2)
+        self.assertEqual(len(rescued["vat_breakdown"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
