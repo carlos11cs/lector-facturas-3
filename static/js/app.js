@@ -86,6 +86,63 @@ const TIMEOUT_MESSAGE =
   "El análisis tardó demasiado y se detuvo. Puedes introducir los datos manualmente.";
 const VAT_WARNING_MESSAGE =
   "Puede que la calidad de la imagen o la información sea dudosa. Por favor, revisa siempre las cantidades y los tipos de IVA.";
+const ANALYSIS_MAX_CONCURRENCY = 1;
+
+const analysisTaskQueue = [];
+let activeAnalysisTasks = 0;
+
+function isPendingUploadItemPresent(item) {
+  return (
+    pendingFiles.some((entry) => entry.id === item.id) ||
+    pendingIncomeFiles.some((entry) => entry.id === item.id)
+  );
+}
+
+function removeQueuedAnalysisTask(itemId) {
+  const index = analysisTaskQueue.findIndex((task) => task.item.id === itemId);
+  if (index !== -1) {
+    analysisTaskQueue.splice(index, 1);
+  }
+}
+
+function abortPendingAnalysis(item) {
+  item._analysisCancelled = true;
+  item.analysisPending = false;
+  item.analysisQueued = false;
+  removeQueuedAnalysisTask(item.id);
+  if (item._analysisController) {
+    item._analysisController.abort();
+  }
+}
+
+function processAnalysisQueue() {
+  while (activeAnalysisTasks < ANALYSIS_MAX_CONCURRENCY && analysisTaskQueue.length) {
+    const task = analysisTaskQueue.shift();
+    if (!task || !task.item || task.item._analysisCancelled || !isPendingUploadItemPresent(task.item)) {
+      continue;
+    }
+    activeAnalysisTasks += 1;
+    task.item.analysisQueued = false;
+    if (typeof task.render === "function") {
+      task.render();
+    }
+    Promise.resolve()
+      .then(() => task.run(task.item))
+      .catch(() => undefined)
+      .finally(() => {
+        activeAnalysisTasks = Math.max(activeAnalysisTasks - 1, 0);
+        processAnalysisQueue();
+      });
+  }
+}
+
+function enqueueAnalysisTask(item, run, render) {
+  item.analysisPending = true;
+  item.analysisQueued = true;
+  item._analysisCancelled = false;
+  analysisTaskQueue.push({ item, run, render });
+  processAnalysisQueue();
+}
 
 function showLowQualityModal() {
   const modal = document.getElementById("lowQualityModal");
@@ -2318,6 +2375,7 @@ function addFiles(fileList) {
       withholdingAmount: "",
       analysisText: "",
       analysisPending: true,
+      analysisQueued: true,
       analysisError: false,
       analysisErrorMessage: "",
       analysisStatus: "ok",
@@ -2331,7 +2389,7 @@ function addFiles(fileList) {
       },
     };
     pendingFiles.push(item);
-    analyzeInvoiceForItem(item);
+    enqueueAnalysisTask(item, analyzeInvoiceForItem, renderTable);
   });
   renderTable();
 }
@@ -2358,6 +2416,7 @@ function addIncomeFiles(fileList) {
       vatBreakdownOpen: false,
       analysisText: "",
       analysisPending: true,
+      analysisQueued: true,
       analysisError: false,
       analysisErrorMessage: "",
       analysisStatus: "ok",
@@ -2371,7 +2430,7 @@ function addIncomeFiles(fileList) {
       },
     };
     pendingIncomeFiles.push(item);
-    analyzeIncomeForItem(item);
+    enqueueAnalysisTask(item, analyzeIncomeForItem, renderIncomeTable);
   });
   renderIncomeTable();
 }
@@ -2576,9 +2635,11 @@ function renderTable() {
     actionsTd.classList.add("row-actions");
     const removeBtn = document.createElement("button");
     removeBtn.type = "button";
-    removeBtn.textContent = "Quitar";
-    removeBtn.disabled = item.analysisPending;
+    removeBtn.textContent = item.analysisPending ? "Cancelar" : "Quitar";
     removeBtn.addEventListener("click", () => {
+      if (item.analysisPending) {
+        abortPendingAnalysis(item);
+      }
       const index = pendingFiles.findIndex((entry) => entry.id === item.id);
       if (index !== -1) {
         pendingFiles.splice(index, 1);
@@ -2848,7 +2909,9 @@ function renderTable() {
       const message = document.createElement("span");
       message.textContent = item.analysisError
         ? item.analysisErrorMessage || ANALYSIS_ERROR_MESSAGE
-        : "Analizando factura… Las facturas escaneadas pueden tardar hasta 1 minuto.";
+        : item.analysisQueued
+          ? "Factura en cola… Se analiza de una en una para evitar bloqueos con escaneadas."
+          : "Analizando factura… Las facturas escaneadas pueden tardar hasta 1 minuto.";
       statusWrapper.appendChild(message);
       statusTd.appendChild(statusWrapper);
       statusRow.appendChild(statusTd);
@@ -3039,9 +3102,11 @@ function renderIncomeTable() {
     actionsTd.classList.add("row-actions");
     const removeBtn = document.createElement("button");
     removeBtn.type = "button";
-    removeBtn.textContent = "Quitar";
-    removeBtn.disabled = item.analysisPending;
+    removeBtn.textContent = item.analysisPending ? "Cancelar" : "Quitar";
     removeBtn.addEventListener("click", () => {
+      if (item.analysisPending) {
+        abortPendingAnalysis(item);
+      }
       const index = pendingIncomeFiles.findIndex((entry) => entry.id === item.id);
       if (index !== -1) {
         pendingIncomeFiles.splice(index, 1);
@@ -3310,7 +3375,9 @@ function renderIncomeTable() {
       const message = document.createElement("span");
       message.textContent = item.analysisError
         ? item.analysisErrorMessage || ANALYSIS_ERROR_MESSAGE
-        : "Analizando factura… Las facturas escaneadas pueden tardar hasta 1 minuto.";
+        : item.analysisQueued
+          ? "Factura en cola… Se analiza de una en una para evitar bloqueos con escaneadas."
+          : "Analizando factura… Las facturas escaneadas pueden tardar hasta 1 minuto.";
       statusWrapper.appendChild(message);
       statusTd.appendChild(statusWrapper);
       statusRow.appendChild(statusTd);
@@ -3320,6 +3387,9 @@ function renderIncomeTable() {
 }
 
 function analyzeIncomeForItem(item) {
+  if (item._analysisCancelled || !isPendingUploadItemPresent(item)) {
+    return Promise.resolve();
+  }
   const formData = new FormData();
   formData.append("file", item.file);
   formData.append("document_type", "income");
@@ -3327,15 +3397,22 @@ function analyzeIncomeForItem(item) {
   if (companyId) {
     formData.append("company_id", companyId);
   }
+  const controller = new AbortController();
+  item._analysisController = controller;
 
-  fetch("/api/analyze-invoice", {
+  return fetch("/api/analyze-invoice", {
     method: "POST",
     body: formData,
+    signal: controller.signal,
   })
     .then((res) => res.json())
     .then((data) => {
+      if (item._analysisCancelled || !isPendingUploadItemPresent(item)) {
+        return;
+      }
       if (!data.ok) {
         item.analysisPending = false;
+        item.analysisQueued = false;
         item.analysisError = true;
         item.analysisErrorMessage = ANALYSIS_ERROR_MESSAGE;
         renderIncomeTable();
@@ -3361,6 +3438,7 @@ function analyzeIncomeForItem(item) {
       }
       if (extracted.analysis_status === "low_quality_scan") {
         item.analysisPending = false;
+        item.analysisQueued = false;
         item.analysisError = true;
         item.analysisErrorMessage = LOW_QUALITY_SCAN_MESSAGE;
         if (!lowQualityDismissedIds.has(item.id)) {
@@ -3372,6 +3450,7 @@ function analyzeIncomeForItem(item) {
       }
       if (extracted.analysis_status === "timeout") {
         item.analysisPending = false;
+        item.analysisQueued = false;
         item.analysisError = true;
         item.analysisErrorMessage = TIMEOUT_MESSAGE;
         renderIncomeTable();
@@ -3429,6 +3508,7 @@ function analyzeIncomeForItem(item) {
       }
 
       item.analysisPending = false;
+      item.analysisQueued = false;
       const hasExtractedValue = [
         detectedClient,
         extracted.invoice_date,
@@ -3443,11 +3523,21 @@ function analyzeIncomeForItem(item) {
       item.analysisErrorMessage = item.analysisError ? ANALYSIS_ERROR_MESSAGE : "";
       renderIncomeTable();
     })
-    .catch(() => {
+    .catch((error) => {
+      if (error && error.name === "AbortError") {
+        return;
+      }
+      if (item._analysisCancelled || !isPendingUploadItemPresent(item)) {
+        return;
+      }
       item.analysisPending = false;
+      item.analysisQueued = false;
       item.analysisError = true;
       item.analysisErrorMessage = ANALYSIS_ERROR_MESSAGE;
       renderIncomeTable();
+    })
+    .finally(() => {
+      item._analysisController = null;
     });
 }
 
@@ -3684,6 +3774,9 @@ function getExpenseOperationPayload(item) {
 }
 
 function analyzeInvoiceForItem(item) {
+  if (item._analysisCancelled || !isPendingUploadItemPresent(item)) {
+    return Promise.resolve();
+  }
   const formData = new FormData();
   formData.append("file", item.file);
   const expenseUploadKind = item.expenseUploadKind || getExpenseUploadKind();
@@ -3700,15 +3793,22 @@ function analyzeInvoiceForItem(item) {
   if (companyId) {
     formData.append("company_id", companyId);
   }
+  const controller = new AbortController();
+  item._analysisController = controller;
 
-  fetch("/api/analyze-invoice", {
+  return fetch("/api/analyze-invoice", {
     method: "POST",
     body: formData,
+    signal: controller.signal,
   })
     .then((res) => res.json())
     .then((data) => {
+      if (item._analysisCancelled || !isPendingUploadItemPresent(item)) {
+        return;
+      }
       if (!data.ok) {
         item.analysisPending = false;
+        item.analysisQueued = false;
         item.analysisError = true;
         item.analysisErrorMessage = ANALYSIS_ERROR_MESSAGE;
         renderTable();
@@ -3734,6 +3834,7 @@ function analyzeInvoiceForItem(item) {
       }
       if (extracted.analysis_status === "low_quality_scan") {
         item.analysisPending = false;
+        item.analysisQueued = false;
         item.analysisError = true;
         item.analysisErrorMessage = LOW_QUALITY_SCAN_MESSAGE;
         if (!lowQualityDismissedIds.has(item.id)) {
@@ -3745,6 +3846,7 @@ function analyzeInvoiceForItem(item) {
       }
       if (extracted.analysis_status === "timeout") {
         item.analysisPending = false;
+        item.analysisQueued = false;
         item.analysisError = true;
         item.analysisErrorMessage = TIMEOUT_MESSAGE;
         renderTable();
@@ -3808,6 +3910,7 @@ function analyzeInvoiceForItem(item) {
       }
 
       item.analysisPending = false;
+      item.analysisQueued = false;
       const hasExtractedValue = [
         extracted.provider_name,
         extracted.invoice_date,
@@ -3821,11 +3924,21 @@ function analyzeInvoiceForItem(item) {
       item.analysisErrorMessage = item.analysisError ? ANALYSIS_ERROR_MESSAGE : "";
       renderTable();
     })
-    .catch(() => {
+    .catch((error) => {
+      if (error && error.name === "AbortError") {
+        return;
+      }
+      if (item._analysisCancelled || !isPendingUploadItemPresent(item)) {
+        return;
+      }
       item.analysisPending = false;
+      item.analysisQueued = false;
       item.analysisError = true;
       item.analysisErrorMessage = ANALYSIS_ERROR_MESSAGE;
       renderTable();
+    })
+    .finally(() => {
+      item._analysisController = null;
     });
 }
 
