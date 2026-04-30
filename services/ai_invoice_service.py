@@ -2014,6 +2014,89 @@ def _recover_from_tax_summary_if_needed(
     }
 
 
+def _force_tax_summary_result_if_available(
+    analysis_status: str,
+    base_amount: Optional[float],
+    vat_amount: Optional[float],
+    total_amount: Optional[float],
+    vat_rate: Optional[float],
+    vat_breakdown: List[Dict[str, Any]],
+    amount_source: Optional[str],
+    breakdown_warning: bool,
+    tax_summary: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not isinstance(tax_summary, dict) or not tax_summary.get("found"):
+        return {
+            "analysis_status": analysis_status,
+            "base_amount": base_amount,
+            "vat_amount": vat_amount,
+            "total_amount": total_amount,
+            "vat_rate": vat_rate,
+            "vat_breakdown": vat_breakdown,
+            "amount_source": amount_source,
+            "breakdown_warning": breakdown_warning,
+        }
+
+    summary_breakdown = tax_summary.get("breakdown") or []
+    summary_base = _normalize_amount(tax_summary.get("base_amount"))
+    summary_vat = _normalize_amount(tax_summary.get("vat_amount"))
+    summary_total = _normalize_amount(tax_summary.get("total_amount"))
+    summary_rate = _normalize_rate(tax_summary.get("vat_rate"))
+
+    if summary_breakdown and (
+        summary_base is None or summary_vat is None or summary_total is None
+    ):
+        summary_values = _summarize_vat_breakdown(summary_breakdown)
+        if summary_values:
+            summary_base, summary_vat, summary_total = summary_values
+
+    summary_is_complete = (
+        summary_base is not None
+        and summary_vat is not None
+        and summary_total is not None
+        and abs((summary_base + summary_vat) - summary_total) <= 0.02
+    )
+    current_is_complete = (
+        base_amount is not None
+        and vat_amount is not None
+        and total_amount is not None
+        and abs((base_amount + vat_amount) - total_amount) <= 0.02
+    )
+
+    should_force_summary = summary_is_complete and (
+        not current_is_complete
+        or amount_source == "fallback"
+        or base_amount is None
+        or vat_amount is None
+        or total_amount is None
+    )
+
+    if not should_force_summary:
+        return {
+            "analysis_status": analysis_status,
+            "base_amount": base_amount,
+            "vat_amount": vat_amount,
+            "total_amount": total_amount,
+            "vat_rate": vat_rate,
+            "vat_breakdown": vat_breakdown,
+            "amount_source": amount_source,
+            "breakdown_warning": breakdown_warning,
+        }
+
+    normalized_breakdown = summary_breakdown if summary_breakdown else vat_breakdown
+    final_rate = summary_rate if len(normalized_breakdown) <= 1 else None
+    return {
+        "analysis_status": "ok",
+        "base_amount": summary_base,
+        "vat_amount": summary_vat,
+        "total_amount": summary_total,
+        "vat_rate": final_rate,
+        "vat_breakdown": normalized_breakdown,
+        "amount_source": "regex_tax_summary",
+        "breakdown_warning": False,
+    }
+
+
 def _has_vat_exemption_indicators(text: str) -> bool:
     if not text:
         return False
@@ -2802,6 +2885,27 @@ def analyze_invoice(
     amount_source = rescued.get("amount_source") or amount_source
     if rescued.get("breakdown_warning") is not None:
         breakdown_warning = rescued.get("breakdown_warning")
+
+    forced_summary = _force_tax_summary_result_if_available(
+        analysis_status,
+        base_amount,
+        vat_amount,
+        total_amount,
+        vat_rate,
+        vat_breakdown,
+        amount_source,
+        bool(breakdown_warning),
+        tax_summary,
+    )
+    analysis_status = forced_summary.get("analysis_status") or analysis_status
+    base_amount = forced_summary.get("base_amount")
+    vat_amount = forced_summary.get("vat_amount")
+    total_amount = forced_summary.get("total_amount")
+    vat_rate = forced_summary.get("vat_rate")
+    vat_breakdown = forced_summary.get("vat_breakdown") or []
+    amount_source = forced_summary.get("amount_source") or amount_source
+    if forced_summary.get("breakdown_warning") is not None:
+        breakdown_warning = forced_summary.get("breakdown_warning")
 
     validation = _validate_math(base_amount, vat_amount, total_amount)
     is_rectificativa = bool((base_amount is not None and base_amount < 0) or (total_amount is not None and total_amount < 0))
