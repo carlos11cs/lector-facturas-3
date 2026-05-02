@@ -182,7 +182,8 @@ def _find_payment_dates_by_keywords(text: str, invoice_date_iso: Optional[str]) 
     ]
     for line in text.splitlines():
         lowered = line.lower()
-        if any(keyword in lowered for keyword in keywords):
+        has_payment_context = any(keyword in lowered for keyword in keywords)
+        if has_payment_context:
             for match in re.findall(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", line):
                 normalized = _normalize_date(match)
                 if normalized:
@@ -191,20 +192,20 @@ def _find_payment_dates_by_keywords(text: str, invoice_date_iso: Optional[str]) 
                 normalized = _normalize_date(match)
                 if normalized:
                     dates.append(normalized)
-        day_matches = re.findall(r"(\d{1,3})\s*d[ií]as", lowered)
-        if day_matches and invoice_date_iso:
-            try:
-                base_date = date.fromisoformat(invoice_date_iso)
-            except ValueError:
-                base_date = None
-            if base_date:
-                for days_str in day_matches:
-                    try:
-                        days = int(days_str)
-                    except ValueError:
-                        continue
-                    due_date = (base_date + timedelta(days=days)).isoformat()
-                    dates.append(due_date)
+            day_matches = re.findall(r"(\d{1,3})\s*d[ií]as", lowered)
+            if day_matches and invoice_date_iso:
+                try:
+                    base_date = date.fromisoformat(invoice_date_iso)
+                except ValueError:
+                    base_date = None
+                if base_date:
+                    for days_str in day_matches:
+                        try:
+                            days = int(days_str)
+                        except ValueError:
+                            continue
+                        due_date = (base_date + timedelta(days=days)).isoformat()
+                        dates.append(due_date)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     for idx, line in enumerate(lines):
         lowered = line.lower()

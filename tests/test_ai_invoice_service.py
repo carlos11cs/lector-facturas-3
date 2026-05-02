@@ -177,6 +177,150 @@ CLIENTE Domiciliación bancaria
 CC:ES3900492626802114161816
 """
 
+YSONUT_LONG_FIXTURE = """YSONUT SLU - Calle Maldonado 50. 28006, Madrid - NIF: ESB61741112
+Factura Simplificada
+CERVANTES 25 BJ
+46007  VALENCIA
+KALOS HEALTH AND BEAUTY S.R.L.
+Fecha entrega 30/04/2026
+Cliente : 30036373
+CIF/NIF: B05410667
+Nº Factura: INP-26FIG1-011546
+Fecha Factura: 30/04/2026
+Nº Albaran :ECCFIG12618179
+Pag:
+1/2
+Referencia
+Descripción
+Unidades
+Precio Neto
+Precio Total
+% IVA
+Precio
+Dto1 - Dto2
+C080NB06
+ 23,36
+ 10,00
+ 11,680
+ 2
+ 20,00
+INOVANCE MAGNESIUM
+20,00 - 27,00
+C446NB06
+ 32,39
+ 10,00
+ 16,193
+ 2
+ 27,73
+INOVANCE VITA K2-D3
+20,00 - 27,00
+C528NA06
+ 52,98
+ 10,00
+ 26,492
+ 2
+ 45,36
+INOVANCE HYALUROVANCE COLLAGENE RADIANCE
+20,00 - 27,00
+34FLYC528A62601
+ 0,000
+ 10
+ 0,00
+DOC- FLYER HYALUROVANCE RADIANCE 2026
+0,00
+C375NA06
+ 74,06
+ 10,00
+ 24,687
+ 3
+ 42,27
+INOVANCE HYALUROVANCE
+20,00 - 27,00
+C448NB06
+ 52,98
+ 10,00
+ 26,492
+ 2
+ 45,36
+INOVANCE DERMOVANCE M
+20,00 - 27,00
+C482LB06
+ 105,97
+ 10,00
+ 26,492
+ 4
+ 45,36
+INOVANCE CAPIVANCE 180
+20,00 - 27,00
+KALOS HEALTH AND BEAUTY S.R.L.
+AVDA GUILLEM DE CASTRO 8 PTA 20
+46001  VALENCIA
+Dirección entrega:
+ 341,74
+Total referencias
+Base impuesto
+Tasa
+Importe impuesto
+Tipo de IVA
+ 10,00
+IVA Reducido
+ 341,74
+ 34,17
+Total base imponible
+ 341,74
+ 34,17
+Total IVA
+Total factura
+ 375,91
+EUR
+ 375,91
+NETO A PAGAR
+Forma de pago
+Vencimiento
+Importe
+CLIENTE Domiciliación bancaria
+ 187,96
+31/05/2026
+CC:ES3900492626802114161816
+CLIENTE Domiciliación bancaria
+ 187,95
+15/06/2026
+CC:ES3900492626802114161816
+C/Maldonado, 50 28006-MADRID         C/Provença, 302 bajos 08038-BARCELONA          C/Holanda,16 17600-FIGUERES
+Tel. 915 90 39 40                                      Tel. 934 88 10 96                                                       Fax 972 512190
+www.ysonut.com
+YSONUT SLU NIF/EORI: ESB61741112
+YSONUT SLU - Calle Maldonado 50. 28006, Madrid - NIF: ESB61741112
+Factura Simplificada
+CERVANTES 25 BJ
+46007  VALENCIA
+KALOS HEALTH AND BEAUTY S.R.L.
+Fecha entrega 30/04/2026
+Cliente : 30036373
+CIF/NIF: B05410667
+Nº Factura: INP-26FIG1-011546
+Fecha Factura: 30/04/2026
+LEY DE PROTECCIÓN DE DATOS
+Los datos de carácter personal  facilitados serán tratados por YSONUT , S.L.U. con NIF B61741112 de acuerdo con lo dispuesto en el Reglamento (UE) 2016/679 del Parlamento
+Europeo y del Consejo, de 27 de abril de 2016, relativo a la protección de las personas físicas en lo que respecta al tratamiento de datos personales y a la libre circulación de los
+mismos.
+Los datos facilitados serán tratados por el tiempo necesario para el cumplimiento de las finalidades objeto de tratamiento, mientras no se oponga al mismo y por el tiempo
+necesario para el cumplimiento de las obligaciones legales del responsable.
+Los datos no serán cedidos ni comunicados a terceros, salvo en los supuestos legalmente establecidos.
+Le recordamos que tiene derecho a ejercer los derechos de acceso, rectificación, cancelación, limitación, oposición y portabilidad de manera gratuita mediante correo electrónico a:
+rgpd@ysonut.com o bien en la siguiente dirección: C/ Maldonado, 50, 28006 - Madrid (Madrid) y de solicitar la tutela de la Agencia Española de Protección de datos en
+www.aepd.es.
+DERECHO DE DESISTIMIENTO
+D/Dª_______________________________________, mayor de edad y con DNI num__________________________y domicilio a efecto de notificaciones en, mediante el presente
+documento, y dentro del plazo legal de 14 días a contar desde la recepción de los productos, vengo a..
+Consecuentemente, procedo a la devolución de los productos a YSONUT SLU , en su domicilio sito en CL MALDONADO 50 28006 MADRID , siendo los gastos de devolución de
+mi cuenta.Asimismo, interesa que, una vez recibidos los productos procedan a la devolución de los importes abonados por los mismos.
+C/Maldonado, 50 28006-MADRID         C/Provença, 302 bajos 08038-BARCELONA          C/Holanda,16 17600-FIGUERES
+Tel. 915 90 39 40                                      Tel. 934 88 10 96                                                       Fax 972 512190
+www.ysonut.com
+YSONUT SLU NIF/EORI: ESB61741112
+"""
+
 
 class TestAiInvoiceService(unittest.TestCase):
     def test_parse_eu_amount(self):
@@ -447,6 +591,10 @@ class TestAiInvoiceService(unittest.TestCase):
 
     def test_extract_multiple_payment_dates_from_vertical_schedule(self):
         payment_dates = svc._find_payment_dates_by_keywords(YSONUT_FIXTURE, "2026-04-30")
+        self.assertEqual(payment_dates, ["2026-05-31", "2026-06-15"])
+
+    def test_ignore_legal_text_days_outside_payment_context(self):
+        payment_dates = svc._find_payment_dates_by_keywords(YSONUT_LONG_FIXTURE, "2026-04-30")
         self.assertEqual(payment_dates, ["2026-05-31", "2026-06-15"])
 
 
