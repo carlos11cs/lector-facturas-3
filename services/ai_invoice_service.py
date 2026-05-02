@@ -205,6 +205,25 @@ def _find_payment_dates_by_keywords(text: str, invoice_date_iso: Optional[str]) 
                         continue
                     due_date = (base_date + timedelta(days=days)).isoformat()
                     dates.append(due_date)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for idx, line in enumerate(lines):
+        lowered = line.lower()
+        if not any(keyword in lowered for keyword in keywords):
+            continue
+        for offset in range(1, 12):
+            if idx + offset >= len(lines):
+                break
+            candidate_line = lines[idx + offset]
+            if any(keyword in candidate_line.lower() for keyword in keywords):
+                break
+            for match in re.findall(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", candidate_line):
+                normalized = _normalize_date(match)
+                if normalized:
+                    dates.append(normalized)
+            for match in re.findall(r"\d{4}[/-]\d{1,2}[/-]\d{1,2}", candidate_line):
+                normalized = _normalize_date(match)
+                if normalized:
+                    dates.append(normalized)
     unique_dates = sorted({d for d in dates if d})
     return unique_dates
 
@@ -599,6 +618,117 @@ def _extract_numbered_tax_summary_from_text(text: str) -> Dict[str, Any]:
     }
 
 
+def _extract_vertical_tax_summary_from_text(text: str) -> Dict[str, Any]:
+    if not text:
+        return {"found": False}
+    normalized_text = _normalize_ocr_amount_text(text)
+    upper_text = normalized_text.upper()
+    required_tokens = ("BASE IMPUESTO", "TASA", "IMPORTE IMPUESTO")
+    if not all(token in upper_text for token in required_tokens):
+        return {"found": False}
+
+    lines = [line.strip() for line in normalized_text.splitlines() if line.strip()]
+    totals_labels = ("TOTAL BASE IMPONIBLE", "TOTAL IVA", "TOTAL FACTURA", "NETO A PAGAR", "TOTAL A PAGAR")
+
+    header_idx = None
+    for idx, line in enumerate(lines):
+        if "BASE IMPUESTO" in line.upper():
+            header_idx = idx
+            break
+    if header_idx is None:
+        return {"found": False}
+
+    breakdown: List[Dict[str, Any]] = []
+    idx = header_idx
+    amount_pattern = re.compile(r"^\d{1,3}(?:[.\s]\d{3})*[.,]\d{2}|\d+[.,]\d{2}$")
+    while idx < len(lines):
+        line = lines[idx].strip()
+        upper = line.upper()
+        if any(label in upper for label in totals_labels):
+            break
+        rate_candidate = _normalize_rate(line)
+        if rate_candidate in {0, 4, 10, 21}:
+            amounts: List[float] = []
+            for offset in range(1, 8):
+                if idx + offset >= len(lines):
+                    break
+                next_line = lines[idx + offset].strip()
+                next_upper = next_line.upper()
+                if any(label in next_upper for label in totals_labels):
+                    break
+                if _normalize_rate(next_line) in {0, 4, 10, 21} and amounts:
+                    break
+                if amount_pattern.match(next_line):
+                    parsed = _normalize_amount(next_line)
+                    if parsed is not None:
+                        amounts.append(_round_amount(parsed))
+                if len(amounts) >= 2:
+                    break
+            if len(amounts) >= 2:
+                base_value, vat_value = amounts[0], amounts[1]
+                breakdown.append(
+                    {
+                        "base": _round_amount(base_value),
+                        "vat_amount": _round_amount(vat_value),
+                        "rate": float(rate_candidate),
+                        "total": _round_amount(base_value + vat_value),
+                    }
+                )
+                idx += 1
+                continue
+        idx += 1
+
+    if not breakdown:
+        return {"found": False}
+
+    summary_values = _summarize_vat_breakdown(breakdown)
+    if not summary_values:
+        return {"found": False}
+    base_sum, vat_sum, total_sum = summary_values
+
+    total_amount = None
+    for idx, line in enumerate(lines):
+        upper = line.upper()
+        if "TOTAL FACTURA" in upper or "NETO A PAGAR" in upper or "TOTAL A PAGAR" in upper:
+            for offset in range(1, 6):
+                if idx + offset >= len(lines):
+                    break
+                candidate_line = lines[idx + offset].strip()
+                matches = re.findall(r"\d{1,3}(?:[.\s]\d{3})*[.,]\d{2}|\d+[.,]\d{2}", candidate_line)
+                if matches:
+                    parsed = _normalize_amount(matches[-1])
+                    if parsed is not None:
+                        total_amount = _round_amount(parsed)
+                        break
+            if total_amount is not None:
+                break
+
+    if total_amount is None:
+        currency_matches = re.findall(
+            r"(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+[.,]\d{2})\s*(?:EUR|€)",
+            normalized_text,
+            flags=re.IGNORECASE,
+        )
+        if currency_matches:
+            total_amount = _normalize_amount(currency_matches[-1])
+
+    if total_amount is None:
+        total_amount = total_sum
+
+    if abs((base_sum + vat_sum) - total_amount) > 0.05:
+        return {"found": False}
+
+    return {
+        "found": True,
+        "base_amount": base_sum,
+        "vat_amount": vat_sum,
+        "total_amount": _round_amount(total_amount),
+        "vat_rate": breakdown[0]["rate"] if len(breakdown) == 1 else None,
+        "source": "regex_tax_summary",
+        "breakdown": breakdown,
+    }
+
+
 def _extract_multiline_tax_summary_from_block(block: List[str]) -> Dict[str, Any]:
     if not block:
         return {"found": False}
@@ -690,6 +820,9 @@ def _extract_tax_summary_from_text(text: str) -> Dict[str, Any]:
     if not text:
         return {"found": False}
     text = _normalize_ocr_amount_text(text)
+    vertical_summary = _extract_vertical_tax_summary_from_text(text)
+    if vertical_summary.get("found"):
+        return vertical_summary
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return {"found": False}

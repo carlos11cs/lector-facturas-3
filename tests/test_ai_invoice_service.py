@@ -139,6 +139,44 @@ VENCIMIENTO:
 27/06/2026
 """
 
+YSONUT_FIXTURE = """YSONUT SLU - Calle Maldonado 50. 28006, Madrid - NIF: ESB61741112
+Factura Simplificada
+Fecha entrega 30/04/2026
+Cliente : 30036373
+CIF/NIF: B05410667
+Nº Factura: INP-26FIG1-011569
+Fecha Factura: 30/04/2026
+Total referencias
+Base impuesto
+Tasa
+Importe impuesto
+Tipo de IVA
+ 10,00
+IVA Reducido
+ 169,47
+ 16,95
+Total base imponible
+ 169,47
+ 16,95
+Total IVA
+Total factura
+ 186,42
+EUR
+ 186,42
+NETO A PAGAR
+Forma de pago
+Vencimiento
+Importe
+CLIENTE Domiciliación bancaria
+ 93,21
+31/05/2026
+CC:ES3900492626802114161816
+CLIENTE Domiciliación bancaria
+ 93,21
+15/06/2026
+CC:ES3900492626802114161816
+"""
+
 
 class TestAiInvoiceService(unittest.TestCase):
     def test_parse_eu_amount(self):
@@ -397,6 +435,19 @@ class TestAiInvoiceService(unittest.TestCase):
         self.assertAlmostEqual(forced["vat_amount"], 108.24, places=2)
         self.assertAlmostEqual(forced["total_amount"], 681.95, places=2)
         self.assertEqual(len(forced["vat_breakdown"]), 2)
+
+    def test_extract_vertical_tax_summary_from_text(self):
+        summary = svc._extract_tax_summary_from_text(YSONUT_FIXTURE)
+        self.assertTrue(summary.get("found"))
+        self.assertAlmostEqual(summary.get("base_amount"), 169.47, places=2)
+        self.assertAlmostEqual(summary.get("vat_amount"), 16.95, places=2)
+        self.assertAlmostEqual(summary.get("total_amount"), 186.42, places=2)
+        self.assertEqual(len(summary.get("breakdown") or []), 1)
+        self.assertAlmostEqual(summary["breakdown"][0]["rate"], 10.0, places=2)
+
+    def test_extract_multiple_payment_dates_from_vertical_schedule(self):
+        payment_dates = svc._find_payment_dates_by_keywords(YSONUT_FIXTURE, "2026-04-30")
+        self.assertEqual(payment_dates, ["2026-05-31", "2026-06-15"])
 
 
 if __name__ == "__main__":
