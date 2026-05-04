@@ -1336,6 +1336,63 @@ def has_legal_form(name: Optional[str]) -> bool:
     return any(token in compact for token in legal_tokens)
 
 
+def _trim_company_name(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    legal_form_pattern = (
+        r"(?:"
+        r"S\.?\s*L\.?\s*U\.?|"
+        r"S\.?\s*A\.?\s*U\.?|"
+        r"S\.?\s*L\.?\s*L\.?|"
+        r"S\.?\s*L\.?\s*P\.?|"
+        r"S\.?\s*C\.?\s*P\.?|"
+        r"S\.?\s*R\.?\s*L\.?|"
+        r"S\.?\s*A\.?|"
+        r"LIMITED|LTD|INC|GMBH|SARL|BV|NV|SAS|COOPERATIVA|COOP"
+        r")"
+    )
+    match = re.search(rf"(.+?\b{legal_form_pattern}\b)", value, flags=re.IGNORECASE)
+    if match:
+        value = match.group(1)
+    value = _strip_inline_tax_id(value)
+    value = re.sub(r"\s{2,}", " ", value).strip(" -–—|,;:")
+    return value
+
+
+def _looks_like_legal_or_footer_text(value: Optional[str]) -> bool:
+    if not value:
+        return False
+    lowered = value.lower().strip()
+    if not lowered:
+        return False
+    blocked_phrases = [
+        "reglamento (ue)",
+        "protección de datos",
+        "proteccion de datos",
+        "obligaciones legales",
+        "agencia española de protección de datos",
+        "agencia espanola de proteccion de datos",
+        "derechos de acceso",
+        "quedarán incorporados",
+        "quedaran incorporados",
+        "serán tratados",
+        "seran tratados",
+        "datos proporcionados",
+        "impreso por sap business one",
+        "impreso por",
+    ]
+    if any(phrase in lowered for phrase in blocked_phrases):
+        return True
+    words = [token for token in re.split(r"\s+", lowered) if token]
+    if len(words) > 18:
+        return True
+    if len(lowered) > 140:
+        return True
+    if len(words) > 8 and lowered[0].islower():
+        return True
+    return False
+
+
 def contains_forbidden_keyword(name: Optional[str]) -> bool:
     if not name:
         return False
@@ -1351,6 +1408,7 @@ def contains_forbidden_keyword(name: Optional[str]) -> bool:
         "logística",
         "logistica",
         "shipping",
+        "impreso por",
     ]
     return any(keyword in lowered for keyword in forbidden)
 
@@ -1393,9 +1451,14 @@ def _is_valid_supplier(
     value = str(candidate).strip()
     if not value:
         return False
+    value = _trim_company_name(value)
+    if not value:
+        return False
     if looks_like_person(value):
         return False
     if contains_forbidden_keyword(value):
+        return False
+    if _looks_like_legal_or_footer_text(value):
         return False
     has_form = has_legal_form(value)
     inline_tax = _has_tax_id(value) or _has_iban(value) or "iban" in value.lower()
@@ -1475,6 +1538,18 @@ def _supplier_has_near_tax_id_or_iban(text: str, supplier: str, window: int = 4)
             end = min(len(lines), idx + window + 1)
             for candidate in lines[start:end]:
                 if _has_tax_id(candidate) or _has_iban(candidate) or "iban" in candidate.lower():
+                    return True
+            for candidate in lines:
+                normalized_candidate = _normalize_entity_name(candidate)
+                if (
+                    normalized_supplier
+                    and normalized_candidate
+                    and (
+                        normalized_supplier in normalized_candidate
+                        or normalized_candidate in normalized_supplier
+                    )
+                    and (_has_tax_id(candidate) or _has_iban(candidate) or "iban" in candidate.lower())
+                ):
                     return True
             return False
     return False
@@ -1716,20 +1791,20 @@ def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
         if any(anchor in lowered for anchor in anchor_keywords):
             parts = line.split(":", 1)
             if len(parts) > 1 and _is_valid_supplier(parts[1], company_names, text):
-                return parts[1].strip()
+                return _trim_company_name(parts[1].strip())
             for offset in (1, 2):
                 if idx + offset < len(lines):
                     candidate = lines[idx + offset].strip()
                     if _is_valid_supplier(candidate, company_names, text):
-                        return candidate
+                        return _trim_company_name(candidate)
 
     candidates = _extract_supplier_candidates(text, company_names)
     if not candidates:
         return None
     candidates.sort(key=lambda item: item[1], reverse=True)
-    best, score = candidates[0]
-    if _is_valid_supplier(best, company_names, text):
-        return _strip_inline_tax_id(best)
+    for best, score in candidates:
+        if _is_valid_supplier(best, company_names, text):
+            return _trim_company_name(best)
     return None
 
 

@@ -321,6 +321,83 @@ www.ysonut.com
 YSONUT SLU NIF/EORI: ESB61741112
 """
 
+SKINTECH_FIXTURE = """30/04/2026
+ESB05410667
+C004609
+100% A 30 DIAS
+Basado en Pedidos de cliente 502600616. Basado en Entregas 302600753.
+SEPA Direct Debit Clients
+30/05/2026
+ 1.084,16
+FACTURA
+Mencionar en el pago
+Cliente Nº
+Fecha
+Nº de factura
+Dirección Envío
+NIF
+Condición de Pago
+Vía de Pago
+Vencimientos
+Datos bancarios
+Condiciones de entrega
+Su referencia
+Observaciones
+Código
+Cantidad
+Precio/uni
+Dto.
+Importe
+CALLE CERVANTES NUMERO 25
+BAJO
+46007  VALENCIA
+ESPAÑA
+Incoterm
+Lote
+Fecha vencim.
+Descripción
+Productos fabricados en España
+KALOS HEALTH AND BEAUTY S.L.
+CALLE CERVANTES NUMERO 25
+BAJO
+46007  VALENCIA
+ESPAÑA
+IB26400354
+SKIN TECH PHARMA GROUP S.L.U. Inscrita en el Registro Mercantil de la Provincia de Girona Tomo 904 Folio 97, Hoja GI-16.953. NIF/TAX ID ES B 17.470.261
+ 302600753
+30/04/2026
+Subtotal
+Dto.
+Desglose
+Base Imponible
+% IVA
+Importe IVA
+Total Factura
+Total Productos
+Base Imponible
+ 896,00
+ 21,00%
+ 1.084,16
+ 188,16
+ 896,00
+ 1.084,16
+ 1.084,16
+EUR
+TOTAL IMPORTE PENDIENTE
+Skin Tech Pharma Group, SLU
+C/ Pla de l'estany,29
+17486 Castelló d'Empúries - Girona (Spain)
+Telf. 972455113
+1
+Página
+En cumplimiento de lo establecido en el Reglamento (UE) 2016/679 del Parlamento Europeo y del Consejo, de 27 de abril de 2016, relativo a la protección de datos personales y la libre circulación de los mismos, le comunicamos que los datos que usted nos facilite quedarán incorporados y serán tratados en los
+ficheros titularidad de SKIN TECH PHARMA GROUP, S.L. (NIF B17470261) con el fin de poderle prestar nuestros servicios y realizar la facturación de los mismos. Los datos proporcionados se conservarán durante el tiempo que dure la relación comercial o durante el tiempo que sea necesario para cumplir con
+las obligaciones legales. Dichos datos no serán transferidos a terceros, a menos que exista una obligación legal de hacerlo. Usted puede ejercer sus derechos de acceso, rectificación, oposición, supresión, limitación del tratamiento, portabilidad y de no ser objeto de decisiones individualizadas ante SKIN TECH
+PHARMA GROUP SL, Pla de l'Estany 29, 17486 - Castelló d'Empúries o en la dirección de correo electrónico gdpr@skintechpharmagroup.com, adjuntando copia de su DNI o documento equivalente.  Asimismo, puede presentar una reclamación ante la Agencia Española de Protección de Datos, C/ Jorge Juan, 6
+– 28001 Madrid.
+Impreso por SAP Business One
+"""
+
 
 class TestAiInvoiceService(unittest.TestCase):
     def test_parse_eu_amount(self):
@@ -596,6 +673,13 @@ class TestAiInvoiceService(unittest.TestCase):
     def test_ignore_legal_text_days_outside_payment_context(self):
         payment_dates = svc._find_payment_dates_by_keywords(YSONUT_LONG_FIXTURE, "2026-04-30")
         self.assertEqual(payment_dates, ["2026-05-31", "2026-06-15"])
+
+    def test_extract_supplier_ignores_legal_footer_text(self):
+        supplier = svc._extract_supplier_from_text(
+            SKINTECH_FIXTURE,
+            ["KALOS HEALTH AND BEAUTY S.L."],
+        )
+        self.assertEqual(supplier, "Skin Tech Pharma Group, SLU")
 
 
 if __name__ == "__main__":
