@@ -352,14 +352,15 @@
             </div>
           </div>
           <div class="section-tabs" data-parent="expenses">
-            <button class="section-tab active" type="button" data-parent="expenses" data-subsection="received">Facturas recibidas</button>
+            <button class="section-tab active" type="button" data-parent="expenses" data-subsection="received">Facturas proveedor</button>
             <button class="section-tab" type="button" data-parent="expenses" data-subsection="rent">Alquileres</button>
-            <button class="section-tab" type="button" data-parent="expenses" data-subsection="payroll">Nóminas y S.S.</button>
-            <button class="section-tab" type="button" data-parent="expenses" data-subsection="other">Otros gastos</button>
+            <button class="section-tab" type="button" data-parent="expenses" data-subsection="payroll">Personal</button>
+            <button class="section-tab" type="button" data-parent="expenses" data-subsection="financing">Financiación</button>
+            <button class="section-tab" type="button" data-parent="expenses" data-subsection="adjustments">Otros ajustes</button>
           </div>
           <div class="panel-header compact-header">
             <div>
-              <h3 id="expenseUploadTitle">Subir facturas recibidas</h3>
+              <h3 id="expenseUploadTitle">Subir facturas de proveedor</h3>
               <p id="expenseUploadDescription">
                 Arrastra archivos o selecciona una carpeta completa. La pestaña activa indica a la IA qué tipo de gasto debe priorizar.
               </p>
@@ -428,8 +429,8 @@
       <section class="page-section" data-section="expenses" data-group="expenses" data-subsection="operations">
         <section class="panel no-invoice-panel">
           <div class="panel-header">
-            <h2 id="expenseSectionTitle">Otros gastos</h2>
-            <p id="expenseSectionDescription">Registra gastos deducibles o no deducibles sin documento fiscal, con fecha contable y fecha de pago.</p>
+            <h2 id="expenseSectionTitle">Otros ajustes</h2>
+            <p id="expenseSectionDescription">Registra movimientos manuales con fecha contable y fecha de pago, manteniendo criterio fiscal y tesorería.</p>
           </div>
           <div class="billing-form">
             <div class="field">
@@ -499,8 +500,8 @@
                 <option value="seguridad_social">Seguridad Social</option>
                 <option value="amortizacion">Amortización</option>
                 <option value="kilometraje">Kilometraje</option>
-                <option value="prestamo">Préstamo bancario</option>
-                <option value="otro">Otro</option>
+                <option value="prestamo">Financiación bancaria</option>
+                <option value="otro">Otro ajuste</option>
               </select>
             </div>
             <div class="field">

@@ -39,7 +39,7 @@ let staffMembers = [];
 let selectedLoanPlanFile = null;
 let loanPlanDraft = [];
 let currentExpenseSubview = "received";
-let currentExpenseMode = "other";
+let currentExpenseMode = "adjustments";
 let currentReportsSubview = "summary";
 let currentStatementsSubview = "pnl";
 const lowQualityDismissedIds = new Set();
@@ -74,8 +74,15 @@ const noInvoiceTypeLabels = {
   seguridad_social: "Seguridad Social",
   amortizacion: "Amortización",
   kilometraje: "Kilometraje",
-  prestamo: "Préstamo bancario",
-  otro: "Otro",
+  prestamo: "Financiación bancaria",
+  otro: "Otro ajuste",
+};
+
+const expenseModeTypes = {
+  rent: ["alquiler_local", "alquiler_cabina"],
+  payroll: ["nomina", "seguridad_social"],
+  financing: ["prestamo"],
+  adjustments: ["amortizacion", "kilometraje", "otro"],
 };
 
 const ANALYSIS_ERROR_MESSAGE =
@@ -1100,15 +1107,15 @@ function formatNoInvoiceType(type) {
   return noInvoiceTypeLabels[type] || noInvoiceTypeLabels.otro;
 }
 
-function createNoInvoiceTypeSelect(selected) {
+function createNoInvoiceTypeSelect(selected, allowedTypes = Object.keys(noInvoiceTypeLabels)) {
   const select = document.createElement("select");
-  Object.keys(noInvoiceTypeLabels).forEach((key) => {
+  allowedTypes.forEach((key) => {
     const option = document.createElement("option");
     option.value = key;
     option.textContent = noInvoiceTypeLabels[key];
     select.appendChild(option);
   });
-  select.value = selected || "otro";
+  select.value = allowedTypes.includes(selected) ? selected : allowedTypes[0] || "otro";
   return select;
 }
 
@@ -2040,7 +2047,10 @@ function getExpenseModeForSubview(subview) {
   if (subview === "payroll") {
     return "payroll";
   }
-  return "other";
+  if (subview === "financing") {
+    return "financing";
+  }
+  return "adjustments";
 }
 
 function getExpenseUploadKind(subview = currentExpenseSubview) {
@@ -2050,8 +2060,11 @@ function getExpenseUploadKind(subview = currentExpenseSubview) {
   if (subview === "payroll") {
     return "payroll";
   }
-  if (subview === "other") {
-    return "other";
+  if (subview === "financing") {
+    return "financing";
+  }
+  if (subview === "adjustments" || subview === "other") {
+    return "adjustments";
   }
   return "received";
 }
@@ -2062,6 +2075,9 @@ function getNoInvoiceTypeForUploadKind(kind) {
   }
   if (kind === "payroll") {
     return "nomina";
+  }
+  if (kind === "financing") {
+    return "prestamo";
   }
   return "otro";
 }
@@ -2083,20 +2099,51 @@ function getExpenseUploadConfig(kind = getExpenseUploadKind()) {
       buttonLabel: "Guardar nóminas",
     };
   }
-  if (kind === "other") {
+  if (kind === "financing") {
     return {
-      title: "Subir otros gastos",
+      title: "Subir financiación y justificantes bancarios",
       description:
-        "Sube justificantes o documentos de gasto. La IA priorizará fecha, emisor, base, IVA y total para registrarlo en el apartado correcto.",
-      buttonLabel: "Guardar gastos",
+        "Sube planes de amortización, recibos o justificantes bancarios. La IA priorizará vencimientos, cuota, interés y entidad financiera.",
+      buttonLabel: "Guardar financiación",
+    };
+  }
+  if (kind === "adjustments") {
+    return {
+      title: "Subir otros gastos y ajustes",
+      description:
+        "Sube justificantes o documentos de gasto no encajados en proveedor, alquiler o personal. La IA priorizará fecha, importe, base, IVA y naturaleza del ajuste.",
+      buttonLabel: "Guardar ajustes",
     };
   }
   return {
-    title: "Subir facturas recibidas",
+    title: "Subir facturas de proveedor",
     description:
       "Arrastra archivos o selecciona una carpeta completa. La pestaña activa indica a la IA qué tipo de gasto debe priorizar.",
     buttonLabel: "Guardar facturas",
   };
+}
+
+function getAllowedNoInvoiceTypes(mode = currentExpenseMode) {
+  return expenseModeTypes[mode] || expenseModeTypes.adjustments;
+}
+
+function populateNoInvoiceTypeSelect(select, allowedTypes, selectedValue) {
+  if (!select) {
+    return;
+  }
+  const previousValue = selectedValue || select.value;
+  select.innerHTML = "";
+  allowedTypes.forEach((key) => {
+    const option = document.createElement("option");
+    option.value = key;
+    option.textContent = noInvoiceTypeLabels[key];
+    select.appendChild(option);
+  });
+  if (allowedTypes.includes(previousValue)) {
+    select.value = previousValue;
+  } else if (allowedTypes.length) {
+    select.value = allowedTypes[0];
+  }
 }
 
 function updateExpenseUploadPanel(subview = currentExpenseSubview) {
@@ -2114,28 +2161,36 @@ function updateExpenseUploadPanel(subview = currentExpenseSubview) {
 
 function setExpenseMode(mode) {
   currentExpenseMode = mode;
+  const allowedTypes = getAllowedNoInvoiceTypes(mode);
   if (expenseSectionTitle) {
     expenseSectionTitle.textContent =
       mode === "rent"
-        ? "Gastos de alquiler"
+        ? "Alquileres y arrendamientos"
         : mode === "payroll"
-          ? "Nóminas y Seguridad Social"
-          : "Otros gastos y financiación";
+          ? "Personal"
+          : mode === "financing"
+            ? "Financiación bancaria"
+            : "Otros ajustes";
   }
   if (expenseSectionDescription) {
     expenseSectionDescription.textContent =
       mode === "rent"
-        ? "Registra alquileres del local o de cabinas con la misma lógica fiscal y fechas de pago."
+        ? "Registra alquileres del local o de cabinas con retención, IVA y fechas de pago."
         : mode === "payroll"
-          ? "Centraliza nóminas y Seguridad Social con su fecha contable y vencimiento de pago."
-          : "Registra otros gastos sin factura y préstamos manteniendo calendario de pagos y coherencia contable.";
+          ? "Centraliza nóminas, Seguridad Social y otros costes laborales con fecha contable y vencimiento."
+          : mode === "financing"
+            ? "Registra préstamos, cuotas e intereses separando correctamente tesorería, gasto financiero y principal."
+            : "Registra amortizaciones, kilometraje y otros ajustes manuales con coherencia contable y fiscal.";
   }
   if (noInvoiceType) {
+    populateNoInvoiceTypeSelect(noInvoiceType, allowedTypes);
     if (mode === "rent") {
       noInvoiceType.value = "alquiler_local";
     } else if (mode === "payroll") {
       noInvoiceType.value = "nomina";
-    } else if (!["amortizacion", "kilometraje", "prestamo", "otro"].includes(noInvoiceType.value)) {
+    } else if (mode === "financing") {
+      noInvoiceType.value = "prestamo";
+    } else if (!["amortizacion", "kilometraje", "otro"].includes(noInvoiceType.value)) {
       noInvoiceType.value = "otro";
     }
     toggleLoanInterestField({
@@ -2153,16 +2208,17 @@ function setExpenseMode(mode) {
     });
   }
   if (loanPanel) {
-    loanPanel.style.display = mode === "other" ? "" : "none";
+    loanPanel.style.display = mode === "financing" ? "" : "none";
   }
   renderNoInvoiceExpenses(currentNoInvoiceExpenses || []);
 }
 
 function setExpenseSubview(subview) {
-  currentExpenseSubview = subview;
-  localStorage.setItem("expensesSubview", subview);
+  const normalizedSubview = subview === "other" ? "adjustments" : subview;
+  currentExpenseSubview = normalizedSubview;
+  localStorage.setItem("expensesSubview", normalizedSubview);
   document.querySelectorAll('.section-tab[data-parent="expenses"]').forEach((tab) => {
-    tab.classList.toggle("active", tab.dataset.subsection === subview);
+    tab.classList.toggle("active", tab.dataset.subsection === normalizedSubview);
   });
   const receivedSection = document.querySelector(
     '.page-section[data-group="expenses"][data-subsection="received"]'
@@ -2174,14 +2230,14 @@ function setExpenseSubview(subview) {
     receivedSection.classList.remove("sub-hidden");
   }
   if (operationsSection) {
-    operationsSection.classList.toggle("sub-hidden", subview === "received");
+    operationsSection.classList.toggle("sub-hidden", normalizedSubview === "received");
   }
   if (expensesSavedInvoicesPanel) {
-    expensesSavedInvoicesPanel.classList.toggle("is-hidden", subview !== "received");
+    expensesSavedInvoicesPanel.classList.toggle("is-hidden", normalizedSubview !== "received");
   }
-  updateExpenseUploadPanel(subview);
-  if (subview !== "received") {
-    setExpenseMode(getExpenseModeForSubview(subview));
+  updateExpenseUploadPanel(normalizedSubview);
+  if (normalizedSubview !== "received") {
+    setExpenseMode(getExpenseModeForSubview(normalizedSubview));
   }
 }
 
@@ -5795,8 +5851,11 @@ function getFilteredNoInvoiceExpenses(expenses) {
       ["nomina", "seguridad_social"].includes(expense.expense_type)
     );
   }
+  if (currentExpenseMode === "financing") {
+    return expenses.filter((expense) => expense.expense_type === "prestamo");
+  }
   return expenses.filter(
-    (expense) => !["alquiler_local", "alquiler_cabina", "nomina", "seguridad_social"].includes(expense.expense_type)
+    (expense) => ["amortizacion", "kilometraje", "otro"].includes(expense.expense_type)
   );
 }
 
@@ -5810,8 +5869,10 @@ function renderNoInvoiceExpenses(expenses) {
       currentExpenseMode === "rent"
         ? "No hay gastos de alquiler en este período."
         : currentExpenseMode === "payroll"
-          ? "No hay nóminas o Seguridad Social en este período."
-          : "No hay otros gastos en este período.";
+          ? "No hay gastos de personal en este período."
+          : currentExpenseMode === "financing"
+            ? "No hay movimientos de financiación en este período."
+            : "No hay otros ajustes en este período.";
     updateTaxSummary();
     updateDashboardTotals();
     return;
@@ -6418,7 +6479,10 @@ function enterNoInvoiceEditMode(row, expense) {
   withholdingInput.value = formatAmountInput(expense.withholding_amount || 0);
   attachAmountInputBehavior(withholdingInput);
 
-  const typeSelect = createNoInvoiceTypeSelect(expense.expense_type);
+  const typeSelect = createNoInvoiceTypeSelect(
+    expense.expense_type,
+    getAllowedNoInvoiceTypes(currentExpenseMode)
+  );
   const deductibleSelect = createDeductibleSelect(expense.deductible);
 
   dateTd.textContent = "";
