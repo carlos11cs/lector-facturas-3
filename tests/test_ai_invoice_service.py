@@ -674,6 +674,17 @@ class TestAiInvoiceService(unittest.TestCase):
         payment_dates = svc._find_payment_dates_by_keywords(YSONUT_LONG_FIXTURE, "2026-04-30")
         self.assertEqual(payment_dates, ["2026-05-31", "2026-06-15"])
 
+    def test_explicit_payment_schedule_wins_over_zero_terms_days(self):
+        payment_dates, payment_terms_days = svc._resolve_payment_schedule(
+            YSONUT_LONG_FIXTURE,
+            "2026-04-30",
+            [],
+            None,
+            0,
+        )
+        self.assertEqual(payment_terms_days, None)
+        self.assertEqual(payment_dates, ["2026-05-31", "2026-06-15"])
+
     def test_extract_supplier_ignores_legal_footer_text(self):
         supplier = svc._extract_supplier_from_text(
             SKINTECH_FIXTURE,

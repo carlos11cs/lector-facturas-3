@@ -51,6 +51,16 @@ RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 APP_FROM_EMAIL = os.getenv("APP_FROM_EMAIL", "no-reply@tuapp.com")
 RENT_WITHHOLDING_TYPES = {"alquiler_local", "alquiler_cabina"}
 EXCLUDED_111_TYPES = {"prestamo", "seguridad_social", "amortizacion", "kilometraje"}
+ALLOWED_NO_INVOICE_EXPENSE_TYPES = {
+    "nomina",
+    "seguridad_social",
+    "alquiler_local",
+    "alquiler_cabina",
+    "amortizacion",
+    "kilometraje",
+    "prestamo",
+    "otro",
+}
 MONTH_LABELS_ES = {
     1: "Enero",
     2: "Febrero",
@@ -161,6 +171,10 @@ invoices_table = Table(
     Column("extraction_source", String),
     Column("confidence_score", Float),
     Column("expense_category", String, nullable=False, server_default="with_invoice"),
+    Column("expense_family", String),
+    Column("expense_subtype", String),
+    Column("pnl_bucket", String),
+    Column("tax_model_targets", Text),
     Column("created_at", String, nullable=False),
 )
 
@@ -233,6 +247,10 @@ no_invoice_table = Table(
     Column("withholding_amount", Float),
     Column("expense_type", String, nullable=False),
     Column("deductible", Boolean, nullable=False),
+    Column("expense_family", String),
+    Column("expense_subtype", String),
+    Column("pnl_bucket", String),
+    Column("tax_model_targets", Text),
     Column("created_at", String, nullable=False),
 )
 
@@ -296,6 +314,10 @@ def init_db():
     add_column_if_missing("invoices", "vat_breakdown", "TEXT")
     add_column_if_missing("invoices", "extraction_source", "VARCHAR")
     add_column_if_missing("invoices", "confidence_score", "FLOAT")
+    add_column_if_missing("invoices", "expense_family", "VARCHAR")
+    add_column_if_missing("invoices", "expense_subtype", "VARCHAR")
+    add_column_if_missing("invoices", "pnl_bucket", "VARCHAR")
+    add_column_if_missing("invoices", "tax_model_targets", "TEXT")
     drop_not_null_if_needed("invoices", "vat_rate")
     if "invoices" in table_names:
         with engine.begin() as conn:
@@ -304,6 +326,34 @@ def init_db():
                 .where(invoices_table.c.user_id.is_(None))
                 .values(user_id=DEFAULT_USER_ID)
             )
+            invoice_rows = conn.execute(
+                select(
+                    invoices_table.c.id,
+                    invoices_table.c.expense_category,
+                    invoices_table.c.vat_amount,
+                    invoices_table.c.expense_family,
+                    invoices_table.c.expense_subtype,
+                    invoices_table.c.pnl_bucket,
+                    invoices_table.c.tax_model_targets,
+                )
+            ).mappings().all()
+            for row in invoice_rows:
+                if (
+                    row.get("expense_family")
+                    and row.get("expense_subtype")
+                    and row.get("pnl_bucket")
+                    and row.get("tax_model_targets")
+                ):
+                    continue
+                profile = derive_invoice_profile(
+                    row.get("expense_category"),
+                    row.get("vat_amount"),
+                )
+                conn.execute(
+                    invoices_table.update()
+                    .where(invoices_table.c.id == row["id"])
+                    .values(**profile)
+                )
 
     add_column_if_missing("facturacion", "user_id", "INTEGER")
     add_column_if_missing("facturacion", "company_id", "INTEGER")
@@ -328,6 +378,10 @@ def init_db():
     add_column_if_missing("no_invoice_expenses", "withholding_amount", "FLOAT")
     add_column_if_missing("no_invoice_expenses", "payment_date", "VARCHAR")
     add_column_if_missing("no_invoice_expenses", "payment_dates", "TEXT")
+    add_column_if_missing("no_invoice_expenses", "expense_family", "VARCHAR")
+    add_column_if_missing("no_invoice_expenses", "expense_subtype", "VARCHAR")
+    add_column_if_missing("no_invoice_expenses", "pnl_bucket", "VARCHAR")
+    add_column_if_missing("no_invoice_expenses", "tax_model_targets", "TEXT")
     add_column_if_missing("loan_installments", "bank_name", "VARCHAR")
     add_column_if_missing("companies", "vat_regime", "VARCHAR DEFAULT 'general'")
     add_column_if_missing("companies", "tax_periodicity", "VARCHAR DEFAULT 'quarterly'")
@@ -358,6 +412,36 @@ def init_db():
                 .where(no_invoice_table.c.withholding_amount.is_(None))
                 .values(withholding_amount=0.0)
             )
+            expense_rows = conn.execute(
+                select(
+                    no_invoice_table.c.id,
+                    no_invoice_table.c.expense_type,
+                    no_invoice_table.c.vat_deductible,
+                    no_invoice_table.c.withholding_amount,
+                    no_invoice_table.c.expense_family,
+                    no_invoice_table.c.expense_subtype,
+                    no_invoice_table.c.pnl_bucket,
+                    no_invoice_table.c.tax_model_targets,
+                )
+            ).mappings().all()
+            for row in expense_rows:
+                if (
+                    row.get("expense_family")
+                    and row.get("expense_subtype")
+                    and row.get("pnl_bucket")
+                    and row.get("tax_model_targets")
+                ):
+                    continue
+                profile = derive_no_invoice_profile(
+                    row.get("expense_type"),
+                    row.get("vat_deductible"),
+                    row.get("withholding_amount"),
+                )
+                conn.execute(
+                    no_invoice_table.update()
+                    .where(no_invoice_table.c.id == row["id"])
+                    .values(**profile)
+                )
 
     add_column_if_missing("income_invoices", "user_id", "INTEGER")
     add_column_if_missing("income_invoices", "company_id", "INTEGER")
@@ -832,6 +916,108 @@ def parse_payment_dates(raw_value):
     return sorted(set(normalized))
 
 
+def parse_tax_model_targets(raw_value):
+    if not raw_value:
+        return []
+    if isinstance(raw_value, list):
+        values = raw_value
+    else:
+        try:
+            parsed = json.loads(raw_value) if isinstance(raw_value, str) else raw_value
+        except (TypeError, json.JSONDecodeError):
+            parsed = raw_value
+        values = parsed if isinstance(parsed, list) else [parsed]
+    normalized = []
+    for item in values:
+        if item is None:
+            continue
+        value = str(item).strip().upper()
+        if value:
+            normalized.append(value)
+    return sorted(set(normalized))
+
+
+def serialize_tax_model_targets(targets):
+    return json.dumps(parse_tax_model_targets(targets))
+
+
+def derive_invoice_profile(expense_category, vat_amount=None):
+    category = (expense_category or "with_invoice").strip()
+    if category == "non_deductible":
+        targets = []
+        subtype = "non_deductible_invoice"
+        pnl_bucket = "non_deductible_expense"
+    else:
+        targets = ["303"]
+        subtype = "supplier_invoice"
+        pnl_bucket = "operating_expense"
+    return {
+        "expense_family": "supplier",
+        "expense_subtype": subtype,
+        "pnl_bucket": pnl_bucket,
+        "tax_model_targets": serialize_tax_model_targets(targets),
+    }
+
+
+def derive_no_invoice_profile(expense_type, vat_deductible=False, withholding_amount=0.0):
+    targets = []
+    vat_deductible = bool(vat_deductible)
+    withholding_amount = float(withholding_amount or 0)
+
+    if expense_type == "nomina":
+        targets = ["111", "190"]
+        family = "personnel"
+        subtype = "payroll"
+        pnl_bucket = "personnel_expense"
+    elif expense_type == "seguridad_social":
+        family = "personnel"
+        subtype = "social_security"
+        pnl_bucket = "personnel_expense"
+    elif expense_type == "alquiler_local":
+        family = "rent"
+        subtype = "local_rent"
+        pnl_bucket = "operating_expense"
+        if vat_deductible:
+            targets.append("303")
+        if withholding_amount > 0:
+            targets.extend(["115", "180"])
+    elif expense_type == "alquiler_cabina":
+        family = "rent"
+        subtype = "booth_rent"
+        pnl_bucket = "operating_expense"
+        if vat_deductible:
+            targets.append("303")
+        if withholding_amount > 0:
+            targets.extend(["115", "180"])
+    elif expense_type == "prestamo":
+        family = "financing"
+        subtype = "loan_installment"
+        pnl_bucket = "financial_expense"
+    elif expense_type == "amortizacion":
+        family = "adjustment"
+        subtype = "amortization"
+        pnl_bucket = "amortization_expense"
+    elif expense_type == "kilometraje":
+        family = "adjustment"
+        subtype = "mileage"
+        pnl_bucket = "operating_expense"
+    else:
+        family = "adjustment"
+        subtype = "other_adjustment"
+        pnl_bucket = "operating_expense"
+        if vat_deductible:
+            targets.append("303")
+        if withholding_amount > 0:
+            targets.extend(["111", "190"])
+
+    return {
+        "expense_family": family,
+        "expense_subtype": subtype,
+        "pnl_bucket": pnl_bucket,
+        "tax_model_targets": serialize_tax_model_targets(targets),
+    }
+
+
 def parse_loan_date(value):
     normalized = normalize_date(value)
     if normalized:
@@ -1286,6 +1472,9 @@ def _build_tax_model_metrics(user_id, company_id, periods, conn):
                 invoices_table.c.base_amount,
                 invoices_table.c.vat_amount,
                 invoices_table.c.expense_category,
+                invoices_table.c.tax_model_targets,
+                invoices_table.c.expense_family,
+                invoices_table.c.pnl_bucket,
             )
             .where(invoices_table.c.user_id == user_id)
             .where(invoices_table.c.company_id == company_id)
@@ -1307,6 +1496,10 @@ def _build_tax_model_metrics(user_id, company_id, periods, conn):
                 no_invoice_table.c.expense_type,
                 no_invoice_table.c.deductible,
                 no_invoice_table.c.withholding_amount,
+                no_invoice_table.c.expense_family,
+                no_invoice_table.c.expense_subtype,
+                no_invoice_table.c.pnl_bucket,
+                no_invoice_table.c.tax_model_targets,
             )
             .where(no_invoice_table.c.user_id == user_id)
             .where(
@@ -1317,14 +1510,15 @@ def _build_tax_model_metrics(user_id, company_id, periods, conn):
         ).mappings().all()
         for row in no_invoice_rows:
             expense_type = row.get("expense_type")
+            tax_targets = parse_tax_model_targets(row.get("tax_model_targets"))
             withholding_amount = float(row.get("withholding_amount") or 0)
             if withholding_amount > 0:
-                if expense_type in RENT_WITHHOLDING_TYPES:
+                if "115" in tax_targets:
                     withholding_115 += withholding_amount
-                elif expense_type not in EXCLUDED_111_TYPES:
+                elif "111" in tax_targets:
                     withholding_111 += withholding_amount
 
-            if expense_type == "prestamo":
+            if row.get("expense_family") == "financing" or expense_type == "prestamo":
                 expense_base += float(row.get("interest_amount") or 0)
                 continue
             if row.get("vat_deductible"):
@@ -1568,6 +1762,7 @@ def _build_report_totals(user_id, company_id, months, year):
                     invoices_table.c.base_amount,
                     invoices_table.c.vat_amount,
                     invoices_table.c.expense_category,
+                    invoices_table.c.tax_model_targets,
                 )
                 .where(invoices_table.c.user_id == user_id)
                 .where(invoices_table.c.company_id == company_id)
@@ -1589,6 +1784,8 @@ def _build_report_totals(user_id, company_id, months, year):
                     no_invoice_table.c.vat_rate,
                     no_invoice_table.c.vat_amount,
                     no_invoice_table.c.base_amount,
+                    no_invoice_table.c.expense_family,
+                    no_invoice_table.c.tax_model_targets,
                 )
                 .where(no_invoice_table.c.user_id == user_id)
                 .where(
@@ -1598,7 +1795,7 @@ def _build_report_totals(user_id, company_id, months, year):
                 .where(no_invoice_table.c.expense_date.like(f"{prefix}%"))
             ).mappings().all()
             for row in no_invoice_rows:
-                if row.get("expense_type") == "prestamo":
+                if row.get("expense_family") == "financing" or row.get("expense_type") == "prestamo":
                     expense_base += float(row.get("interest_amount") or 0)
                     continue
                 if row.get("vat_deductible"):
@@ -2691,6 +2888,7 @@ def upload_invoices():
                     base_amount, vat_amount, total_amount = normalize_vat_amounts(
                         base_amount, vat_rate_int, vat_amount, total_amount
                     )
+                expense_profile = derive_invoice_profile(expense_category, vat_amount)
 
                 created_at = datetime.utcnow().isoformat()
 
@@ -2719,6 +2917,7 @@ def upload_invoices():
                         extraction_source=extraction_source,
                         confidence_score=confidence_score,
                         expense_category=expense_category,
+                        **expense_profile,
                         created_at=created_at,
                     )
                 )
@@ -2822,6 +3021,7 @@ def upload_invoices():
 
             # Guardado manual: no recalcular ni aplicar heurísticas semánticas.
             created_at = datetime.utcnow().isoformat()
+            expense_profile = derive_invoice_profile("with_invoice", vat_amount)
 
             conn.execute(
                 invoices_table.insert().values(
@@ -2841,6 +3041,7 @@ def upload_invoices():
                     extraction_source=None,
                     confidence_score=None,
                     expense_category="with_invoice",
+                    **expense_profile,
                     created_at=created_at,
                 )
             )
@@ -3083,6 +3284,10 @@ def list_invoices():
                 invoices_table.c.confidence_score,
                 invoices_table.c.original_filename,
                 invoices_table.c.expense_category,
+                invoices_table.c.expense_family,
+                invoices_table.c.expense_subtype,
+                invoices_table.c.pnl_bucket,
+                invoices_table.c.tax_model_targets,
             )
             .where(invoices_table.c.user_id == data_owner_id)
             .where(invoices_table.c.company_id == company_id)
@@ -3106,6 +3311,10 @@ def list_invoices():
             "confidence_score": float(row["confidence_score"]) if row["confidence_score"] is not None else None,
             "original_filename": row["original_filename"],
             "expense_category": row["expense_category"] or "with_invoice",
+            "expense_family": row.get("expense_family"),
+            "expense_subtype": row.get("expense_subtype"),
+            "pnl_bucket": row.get("pnl_bucket"),
+            "tax_model_targets": parse_tax_model_targets(row.get("tax_model_targets")),
         }
         for row in rows
     ]
@@ -3150,6 +3359,10 @@ def list_payments():
                 invoices_table.c.total_amount,
                 invoices_table.c.original_filename,
                 invoices_table.c.expense_category,
+                invoices_table.c.expense_family,
+                invoices_table.c.expense_subtype,
+                invoices_table.c.pnl_bucket,
+                invoices_table.c.tax_model_targets,
             )
             .where(
                 (
@@ -3181,6 +3394,10 @@ def list_payments():
                 no_invoice_table.c.withholding_amount,
                 no_invoice_table.c.expense_type,
                 no_invoice_table.c.deductible,
+                no_invoice_table.c.expense_family,
+                no_invoice_table.c.expense_subtype,
+                no_invoice_table.c.pnl_bucket,
+                no_invoice_table.c.tax_model_targets,
             )
             .where(no_invoice_table.c.user_id == data_owner_id)
             .where(
@@ -3287,6 +3504,10 @@ def list_payments():
                     else None,
                     "total_amount": total_amount,
                     "expense_category": row["expense_category"] or "with_invoice",
+                    "expense_family": row.get("expense_family"),
+                    "expense_subtype": row.get("expense_subtype"),
+                    "pnl_bucket": row.get("pnl_bucket"),
+                    "tax_model_targets": parse_tax_model_targets(row.get("tax_model_targets")),
                     "amount": amount,
                     "type": "expense",
                 }
@@ -3345,6 +3566,10 @@ def list_payments():
                     "vat_amount_no_invoice": float(row.get("vat_amount") or 0),
                     "base_amount_no_invoice": float(row.get("base_amount") or row.get("amount") or 0),
                     "deductible": bool(row.get("deductible")),
+                    "expense_family": row.get("expense_family"),
+                    "expense_subtype": row.get("expense_subtype"),
+                    "pnl_bucket": row.get("pnl_bucket"),
+                    "tax_model_targets": parse_tax_model_targets(row.get("tax_model_targets")),
                     "amount": amount,
                     "gross_amount": gross_amount,
                     "type": "no_invoice",
@@ -3862,6 +4087,7 @@ def update_invoice(invoice_id):
         base_amount, vat_amount, total_amount = normalize_vat_amounts(
             base_amount, vat_rate, vat_amount, total_amount
         )
+    expense_profile = derive_invoice_profile(expense_category, vat_amount)
 
     updates = {
         "invoice_date": invoice_date,
@@ -3873,6 +4099,7 @@ def update_invoice(invoice_id):
         "vat_breakdown": vat_breakdown_json,
         "payment_date": payment_date,
         "expense_category": expense_category,
+        **expense_profile,
     }
     if payment_dates_payload is not None:
         updates["payment_dates"] = json.dumps(payment_dates) if payment_dates else None
@@ -3912,6 +4139,12 @@ def update_invoice(invoice_id):
                 "total_amount": total_amount,
                 "vat_breakdown": vat_breakdown,
                 "expense_category": expense_category,
+                "expense_family": expense_profile.get("expense_family"),
+                "expense_subtype": expense_profile.get("expense_subtype"),
+                "pnl_bucket": expense_profile.get("pnl_bucket"),
+                "tax_model_targets": parse_tax_model_targets(
+                    expense_profile.get("tax_model_targets")
+                ),
             },
         }
     )
@@ -4280,6 +4513,10 @@ def list_no_invoice_expenses():
                 no_invoice_table.c.withholding_amount,
                 no_invoice_table.c.expense_type,
                 no_invoice_table.c.deductible,
+                no_invoice_table.c.expense_family,
+                no_invoice_table.c.expense_subtype,
+                no_invoice_table.c.pnl_bucket,
+                no_invoice_table.c.tax_model_targets,
             )
             .where(no_invoice_table.c.user_id == data_owner_id)
             .where(
@@ -4307,6 +4544,10 @@ def list_no_invoice_expenses():
             "withholding_amount": float(row["withholding_amount"] or 0),
             "expense_type": row["expense_type"],
             "deductible": bool(row["deductible"]),
+            "expense_family": row.get("expense_family"),
+            "expense_subtype": row.get("expense_subtype"),
+            "pnl_bucket": row.get("pnl_bucket"),
+            "tax_model_targets": parse_tax_model_targets(row.get("tax_model_targets")),
         }
         for row in rows
     ]
@@ -4348,16 +4589,7 @@ def create_no_invoice_expense():
         errors.append("Concepto obligatorio.")
     if amount is None or amount < 0:
         errors.append("Importe inválido.")
-    if expense_type not in {
-        "nomina",
-        "seguridad_social",
-        "alquiler_local",
-        "alquiler_cabina",
-        "amortizacion",
-        "kilometraje",
-        "prestamo",
-        "otro",
-    }:
+    if expense_type not in ALLOWED_NO_INVOICE_EXPENSE_TYPES:
         errors.append("Tipo de gasto inválido.")
     if deductible is None:
         deductible = True
@@ -4416,6 +4648,12 @@ def create_no_invoice_expense():
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
 
+    expense_profile = derive_no_invoice_profile(
+        expense_type,
+        vat_deductible,
+        withholding_amount,
+    )
+
     with engine.begin() as conn:
         conn.execute(
             no_invoice_table.insert().values(
@@ -4434,6 +4672,7 @@ def create_no_invoice_expense():
                 withholding_amount=withholding_amount,
                 expense_type=expense_type,
                 deductible=bool(deductible),
+                **expense_profile,
                 created_at=datetime.utcnow().isoformat(),
             )
         )
@@ -4501,16 +4740,7 @@ def update_no_invoice_expense(expense_id):
         errors.append("Concepto obligatorio.")
     if amount is None or amount < 0:
         errors.append("Importe inválido.")
-    if expense_type not in {
-        "nomina",
-        "seguridad_social",
-        "alquiler_local",
-        "alquiler_cabina",
-        "amortizacion",
-        "kilometraje",
-        "prestamo",
-        "otro",
-    }:
+    if expense_type not in ALLOWED_NO_INVOICE_EXPENSE_TYPES:
         errors.append("Tipo de gasto inválido.")
     if deductible is None:
         deductible = True
@@ -4569,6 +4799,12 @@ def update_no_invoice_expense(expense_id):
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
 
+    expense_profile = derive_no_invoice_profile(
+        expense_type,
+        vat_deductible,
+        withholding_amount,
+    )
+
     with engine.begin() as conn:
         result = conn.execute(
             no_invoice_table.update()
@@ -4589,6 +4825,7 @@ def update_no_invoice_expense(expense_id):
                 withholding_amount=withholding_amount,
                 expense_type=expense_type,
                 deductible=bool(deductible),
+                **expense_profile,
             )
         )
 
@@ -4612,6 +4849,14 @@ def update_no_invoice_expense(expense_id):
                 "base_amount": float(base_amount or amount or 0),
                 "expense_type": expense_type,
                 "deductible": bool(deductible),
+                **{
+                    "expense_family": expense_profile.get("expense_family"),
+                    "expense_subtype": expense_profile.get("expense_subtype"),
+                    "pnl_bucket": expense_profile.get("pnl_bucket"),
+                    "tax_model_targets": parse_tax_model_targets(
+                        expense_profile.get("tax_model_targets")
+                    ),
+                },
             },
         }
     )

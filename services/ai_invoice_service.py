@@ -229,6 +229,56 @@ def _find_payment_dates_by_keywords(text: str, invoice_date_iso: Optional[str]) 
     return unique_dates
 
 
+def _resolve_payment_schedule(
+    extracted_text: str,
+    invoice_date: Optional[str],
+    raw_payment_dates: Any,
+    single_payment_date_raw: Any,
+    payment_terms_days_raw: Any,
+) -> Tuple[List[str], Optional[int]]:
+    payment_terms_days = _pick_first_non_empty(payment_terms_days_raw)
+    try:
+        payment_terms_days = int(payment_terms_days) if payment_terms_days is not None else None
+    except (TypeError, ValueError):
+        payment_terms_days = None
+    if payment_terms_days is not None and payment_terms_days <= 0:
+        payment_terms_days = None
+
+    payment_dates: List[str] = []
+    if isinstance(raw_payment_dates, list):
+        for item in raw_payment_dates:
+            normalized = _normalize_date(str(item)) if item is not None else None
+            if normalized:
+                payment_dates.append(normalized)
+    elif isinstance(raw_payment_dates, str):
+        for chunk in re.split(r"[;,]\s*", raw_payment_dates):
+            normalized = _normalize_date(chunk.strip())
+            if normalized:
+                payment_dates.append(normalized)
+
+    single_payment_date = _normalize_date(single_payment_date_raw)
+    if single_payment_date:
+        payment_dates.append(single_payment_date)
+
+    text_payment_dates = _find_payment_dates_by_keywords(extracted_text, invoice_date)
+    if text_payment_dates:
+        payment_dates = text_payment_dates
+
+    if not payment_dates and payment_terms_days is None:
+        payment_terms_days = extract_payment_terms_days(extracted_text)
+        if payment_terms_days is not None and payment_terms_days <= 0:
+            payment_terms_days = None
+
+    if not payment_dates and payment_terms_days is not None and invoice_date:
+        try:
+            base_date = date.fromisoformat(invoice_date)
+            payment_dates = [(base_date + timedelta(days=payment_terms_days)).isoformat()]
+        except ValueError:
+            payment_dates = []
+
+    return sorted({d for d in payment_dates if d}), payment_terms_days
+
+
 def _normalize_rate(value: Any) -> Optional[float]:
     if value is None or value == "":
         return None
@@ -2877,38 +2927,18 @@ def analyze_invoice(
     text_invoice_date = _extract_invoice_date_from_text(extracted_text)
     if text_invoice_date and (invoice_date is None or pdf_kind == "original"):
         invoice_date = text_invoice_date
-    payment_terms_days = data.get("payment_terms_days") or data.get("payment_terms")
-    try:
-        payment_terms_days = int(payment_terms_days) if payment_terms_days is not None else None
-    except (TypeError, ValueError):
-        payment_terms_days = None
-
-    payment_dates: List[str] = []
     raw_payment_dates = (
         data.get("payment_dates")
         or data.get("fechas_pago")
         or data.get("fechas_vencimiento")
         or data.get("vencimientos")
     )
-    if isinstance(raw_payment_dates, list):
-        for item in raw_payment_dates:
-            normalized = _normalize_date(str(item)) if item is not None else None
-            if normalized:
-                payment_dates.append(normalized)
-    elif isinstance(raw_payment_dates, str):
-        for chunk in re.split(r"[;,]\s*", raw_payment_dates):
-            normalized = _normalize_date(chunk.strip())
-            if normalized:
-                payment_dates.append(normalized)
-
-    single_payment_date = _normalize_date(
+    single_payment_date_raw = (
         data.get("payment_date")
         or data.get("fecha_pago")
         or data.get("fecha_vencimiento")
         or data.get("vencimiento")
     )
-    if single_payment_date:
-        payment_dates.append(single_payment_date)
     totals_payload = data.get("totals") if isinstance(data.get("totals"), dict) else {}
     base_amount = _normalize_amount(
         _pick_first_non_empty(
@@ -3010,19 +3040,13 @@ def analyze_invoice(
                 heuristic_client = None
             client_name = heuristic_client
 
-    if not payment_dates and payment_terms_days is None:
-        payment_terms_days = extract_payment_terms_days(extracted_text)
-    if not payment_dates and payment_terms_days is not None and invoice_date:
-        try:
-            base_date = date.fromisoformat(invoice_date)
-            payment_dates = [
-                (base_date + timedelta(days=payment_terms_days)).isoformat()
-            ]
-        except ValueError:
-            payment_dates = []
-    if not payment_dates:
-        payment_dates = _find_payment_dates_by_keywords(extracted_text, invoice_date)
-    payment_dates = sorted({d for d in payment_dates if d})
+    payment_dates, payment_terms_days = _resolve_payment_schedule(
+        extracted_text,
+        invoice_date,
+        raw_payment_dates,
+        single_payment_date_raw,
+        _pick_first_non_empty(data.get("payment_terms_days"), data.get("payment_terms")),
+    )
     payment_date = payment_dates[0] if payment_dates else None
 
     tax_summary = _extract_tax_summary_from_text(extracted_text)
