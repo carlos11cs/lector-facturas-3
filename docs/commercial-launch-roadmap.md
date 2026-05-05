@@ -21,6 +21,14 @@ Ledged must be able to:
   - `202`
 - keep P&L, balance sheet and treasury views coherent
 
+## Document Retention Policy
+Commercial launch is based on transient document processing:
+
+- uploaded PDFs and images are processed only for extraction
+- Ledged stores structured accounting and fiscal data, not the original document
+- users and firms remain responsible for preserving original invoices outside Ledged
+- generated reports may be downloaded or emailed, but uploaded source documents are not retained as an archive
+
 ## Deployment Plan
 
 ### Deploy 1: Expense Taxonomy and Navigation

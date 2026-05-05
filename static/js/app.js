@@ -2416,7 +2416,6 @@ function addFiles(fileList) {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       file,
       originalFilename: file.name,
-      storedFilename: "",
       date: new Date().toISOString().slice(0, 10),
       paymentDate: "",
       paymentDates: [],
@@ -2459,7 +2458,6 @@ function addIncomeFiles(fileList) {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       file,
       originalFilename: file.name,
-      storedFilename: "",
       date: new Date().toISOString().slice(0, 10),
       paymentDate: "",
       paymentDates: [],
@@ -3475,7 +3473,6 @@ function analyzeIncomeForItem(item) {
         return;
       }
       const extracted = data.extracted || {};
-      item.storedFilename = data.storedFilename || "";
       item.analysisText = extracted.analysis_text || "";
       item.analysisStatus = extracted.analysis_status || "ok";
       const extractedBreakdown = parseVatBreakdown(
@@ -3603,9 +3600,6 @@ function validateIncomePending() {
     if (item.analysisPending) {
       errors.push(`Análisis en proceso: ${item.file.name}`);
     }
-    if (!item.storedFilename) {
-      errors.push(`Análisis pendiente: ${item.file.name}`);
-    }
     if (!item.client.trim()) {
       errors.push(`Cliente obligatorio: ${item.file.name}`);
     }
@@ -3661,7 +3655,6 @@ function uploadIncomePending() {
         ? summarizeVatBreakdown(item.vatBreakdown || [])
         : null;
       return {
-        storedFilename: item.storedFilename,
         originalFilename: item.originalFilename,
         date: item.date,
         paymentDate: computePaymentDate(item.date, item.paymentDate),
@@ -3676,7 +3669,6 @@ function uploadIncomePending() {
         vatAmount: breakdownTotals ? breakdownTotals.vatAmount : normalized.vatAmount || item.vatAmount,
         total: breakdownTotals ? breakdownTotals.total : normalized.total || item.total,
         vatBreakdown: breakdownPayload,
-        analysisText: item.analysisText,
         companyId: getSelectedCompanyId(),
       };
     }),
@@ -3716,9 +3708,6 @@ function validatePending() {
     if (item.analysisPending) {
       errors.push(`Análisis en proceso: ${item.file.name}`);
     }
-    if (!item.storedFilename) {
-      errors.push(`Análisis pendiente: ${item.file.name}`);
-    }
     if (!item.supplier.trim()) {
       errors.push(`Proveedor obligatorio: ${item.file.name}`);
     }
@@ -3752,9 +3741,6 @@ function validatePendingOperationItems(items) {
   items.forEach((item) => {
     if (item.analysisPending) {
       errors.push(`Análisis en proceso: ${item.file.name}`);
-    }
-    if (!item.storedFilename) {
-      errors.push(`Análisis pendiente: ${item.file.name}`);
     }
     if (!item.date) {
       errors.push(`Fecha obligatoria: ${item.file.name}`);
@@ -3871,7 +3857,6 @@ function analyzeInvoiceForItem(item) {
         return;
       }
       const extracted = data.extracted || {};
-      item.storedFilename = data.storedFilename || "";
       item.analysisText = extracted.analysis_text || "";
       item.analysisStatus = extracted.analysis_status || "ok";
       const extractedBreakdown = parseVatBreakdown(
@@ -4037,7 +4022,6 @@ function uploadPending() {
         ? summarizeVatBreakdown(item.vatBreakdown || [])
         : null;
       return {
-        storedFilename: item.storedFilename,
         originalFilename: item.originalFilename,
         date: item.date,
         paymentDate: computePaymentDate(item.date, item.paymentDate),
@@ -4053,7 +4037,6 @@ function uploadPending() {
         vatAmount: breakdownTotals ? breakdownTotals.vatAmount : normalized.vatAmount || item.vatAmount,
         total: breakdownTotals ? breakdownTotals.total : normalized.total || item.total,
         vatBreakdown: breakdownPayload,
-        analysisText: item.analysisText,
       };
     }),
   };

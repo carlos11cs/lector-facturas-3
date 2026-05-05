@@ -8,7 +8,6 @@ import re
 import secrets
 from datetime import date, datetime, timedelta
 from functools import wraps
-from uuid import uuid4
 
 import httpx
 import fitz
@@ -31,7 +30,6 @@ from sqlalchemy import (
 )
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
-
 from services.ai_invoice_service import (
     analyze_invoice,
     _extract_pdf_text_from_bytes,
@@ -39,7 +37,6 @@ from services.ai_invoice_service import (
     _extract_image_text_ocr_from_bytes,
     extract_loan_schedule,
 )
-from services.storage_service import get_public_url, upload_bytes
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data.db")
@@ -157,7 +154,7 @@ invoices_table = Table(
     Column("user_id", Integer, nullable=False, server_default=str(DEFAULT_USER_ID)),
     Column("company_id", Integer, nullable=False),
     Column("original_filename", String, nullable=False),
-    Column("stored_filename", String, nullable=False),
+    Column("stored_filename", String),
     Column("invoice_date", String, nullable=False),
     Column("supplier", String, nullable=False),
     Column("base_amount", Float, nullable=False),
@@ -185,7 +182,7 @@ income_invoices_table = Table(
     Column("user_id", Integer, nullable=False, server_default=str(DEFAULT_USER_ID)),
     Column("company_id", Integer, nullable=False),
     Column("original_filename", String, nullable=False),
-    Column("stored_filename", String, nullable=False),
+    Column("stored_filename", String),
     Column("invoice_date", String, nullable=False),
     Column("client", String, nullable=False),
     Column("base_amount", Float, nullable=False),
@@ -319,8 +316,19 @@ def init_db():
     add_column_if_missing("invoices", "pnl_bucket", "VARCHAR")
     add_column_if_missing("invoices", "tax_model_targets", "TEXT")
     drop_not_null_if_needed("invoices", "vat_rate")
+    drop_not_null_if_needed("invoices", "stored_filename")
     if "invoices" in table_names:
         with engine.begin() as conn:
+            conn.execute(
+                invoices_table.update()
+                .where(invoices_table.c.stored_filename.is_not(None))
+                .values(stored_filename="")
+            )
+            conn.execute(
+                invoices_table.update()
+                .where(invoices_table.c.ocr_text.is_not(None))
+                .values(ocr_text=None)
+            )
             conn.execute(
                 invoices_table.update()
                 .where(invoices_table.c.user_id.is_(None))
@@ -451,6 +459,19 @@ def init_db():
     add_column_if_missing("income_invoices", "extraction_source", "VARCHAR")
     add_column_if_missing("income_invoices", "confidence_score", "FLOAT")
     drop_not_null_if_needed("income_invoices", "vat_rate")
+    drop_not_null_if_needed("income_invoices", "stored_filename")
+    if "income_invoices" in table_names:
+        with engine.begin() as conn:
+            conn.execute(
+                income_invoices_table.update()
+                .where(income_invoices_table.c.stored_filename.is_not(None))
+                .values(stored_filename="")
+            )
+            conn.execute(
+                income_invoices_table.update()
+                .where(income_invoices_table.c.ocr_text.is_not(None))
+                .values(ocr_text=None)
+            )
     if "income_invoices" in table_names:
         with engine.begin() as conn:
             conn.execute(
@@ -2804,7 +2825,6 @@ def upload_invoices():
                     key in entry for key in ("supplier", "base", "vat", "total", "vatAmount")
                 )
                 original_name = entry.get("originalFilename") or ""
-                stored_name = entry.get("storedFilename") or ""
                 invoice_date = entry.get("date") or date.today().isoformat()
                 entry_company_id = entry.get("company_id") or entry.get("companyId")
                 if entry_company_id:
@@ -2835,7 +2855,6 @@ def upload_invoices():
                     or entry.get("payment_date")
                     or (payment_dates[0] if payment_dates else None),
                 )
-                analysis_text = entry.get("analysisText") or entry.get("ocrText")
                 analysis_status = entry.get("analysisStatus") or entry.get("analysis_status") or "ok"
                 extraction_source = (
                     entry.get("extractionSource") or entry.get("extraction_source")
@@ -2843,9 +2862,6 @@ def upload_invoices():
                 confidence_score = entry.get("confidenceScore") or entry.get("confidence_score")
                 expense_category = entry.get("expenseCategory") or "with_invoice"
 
-                if not stored_name:
-                    errors.append(f"Archivo faltante en posición {idx + 1}.")
-                    continue
                 if not supplier:
                     app.logger.info(
                         "Proveedor vacío para %s. Se permite guardado manual.",
@@ -2892,18 +2908,12 @@ def upload_invoices():
 
                 created_at = datetime.utcnow().isoformat()
 
-                stored_value = (
-                    stored_name
-                    if stored_name.startswith("http")
-                    else get_public_url(stored_name)
-                )
-
                 conn.execute(
                     invoices_table.insert().values(
                         user_id=data_owner_id,
                         company_id=company_id,
                         original_filename=original_name,
-                        stored_filename=stored_value,
+                        stored_filename="",
                         invoice_date=invoice_date,
                         supplier=supplier,
                         base_amount=base_amount,
@@ -2913,7 +2923,7 @@ def upload_invoices():
                         vat_breakdown=vat_breakdown_json,
                         payment_date=payment_date,
                         payment_dates=json.dumps(payment_dates) if payment_dates else None,
-                        ocr_text=analysis_text,
+                        ocr_text=None,
                         extraction_source=extraction_source,
                         confidence_score=confidence_score,
                         expense_category=expense_category,
@@ -2922,7 +2932,7 @@ def upload_invoices():
                     )
                 )
                 inserted += 1
-                if analysis_text and analysis_status != "low_quality_scan":
+                if supplier and analysis_status != "low_quality_scan":
                     store_known_supplier(conn, data_owner_id, company_id, supplier)
 
         return jsonify({"ok": True, "inserted": inserted, "errors": errors})
@@ -3009,16 +3019,6 @@ def upload_invoices():
                 )
                 continue
 
-            file_bytes = file.read()
-            safe_name = secure_filename(original_name)
-            stored_name = f"{uuid4().hex}_{safe_name}"
-            try:
-                storage_url = upload_bytes(file_bytes, stored_name, file.mimetype)
-            except Exception:
-                app.logger.exception("Fallo al subir archivo a storage (%s)", stored_name)
-                errors.append(f"No se pudo almacenar el archivo {original_name}.")
-                continue
-
             # Guardado manual: no recalcular ni aplicar heurísticas semánticas.
             created_at = datetime.utcnow().isoformat()
             expense_profile = derive_invoice_profile("with_invoice", vat_amount)
@@ -3028,7 +3028,7 @@ def upload_invoices():
                     user_id=data_owner_id,
                     company_id=company_id,
                     original_filename=original_name,
-                    stored_filename=storage_url,
+                    stored_filename="",
                     invoice_date=invoice_date,
                     supplier=supplier,
                     base_amount=base_amount,
@@ -3077,8 +3077,6 @@ def analyze_invoice_api():
             known_suppliers = fetch_known_suppliers(conn, get_data_owner_id(), company_id)
     app.logger.info("Solicitud de análisis recibida: %s (%s)", original_name, file.mimetype)
     file_bytes = file.read()
-    safe_name = secure_filename(original_name)
-    stored_name = f"{uuid4().hex}_{safe_name}"
     fallback_status = None
     mime_lower = (file.mimetype or "").lower()
     if mime_lower.startswith("image/"):
@@ -3086,16 +3084,11 @@ def analyze_invoice_api():
     elif mime_lower == "application/pdf":
         if not _pdf_has_text(file_bytes, min_chars=100):
             fallback_status = "low_quality_scan"
-    try:
-        storage_url = upload_bytes(file_bytes, stored_name, file.mimetype)
-    except Exception:
-        app.logger.exception("Fallo al subir archivo a storage (%s)", stored_name)
-        return jsonify({"ok": False, "errors": ["No se pudo almacenar el archivo."]}), 500
 
     extracted = _analyze_invoice_with_timeout(
         file_bytes,
         original_name,
-        stored_name,
+        original_name,
         file.mimetype,
         document_type=document_type,
         company_names=company_names,
@@ -3105,7 +3098,7 @@ def analyze_invoice_api():
 
     app.logger.info(
         "AI extracted for %s: provider=%s date=%s payment=%s base=%s vat_rate=%s vat_amount=%s total=%s",
-        stored_name,
+        original_name,
         extracted.get("provider_name"),
         extracted.get("invoice_date"),
         extracted.get("payment_date"),
@@ -3118,9 +3111,10 @@ def analyze_invoice_api():
     return jsonify(
         {
             "ok": True,
-            "storedFilename": storage_url,
+            "storedFilename": "",
             "originalFilename": original_name,
             "companyId": company_id,
+            "transientProcessing": True,
             "extracted": extracted,
         }
     )
@@ -4105,12 +4099,6 @@ def update_invoice(invoice_id):
         updates["payment_dates"] = json.dumps(payment_dates) if payment_dates else None
 
     with engine.begin() as conn:
-        existing = conn.execute(
-            select(invoices_table.c.ocr_text)
-            .where(invoices_table.c.id == invoice_id)
-            .where(invoices_table.c.user_id == data_owner_id)
-            .where(invoices_table.c.company_id == company_id)
-        ).mappings().first()
         result = conn.execute(
             invoices_table.update()
             .where(invoices_table.c.id == invoice_id)
@@ -4118,7 +4106,7 @@ def update_invoice(invoice_id):
             .where(invoices_table.c.company_id == company_id)
             .values(**updates)
         )
-        if result.rowcount and existing and existing.get("ocr_text"):
+        if result.rowcount and supplier:
             store_known_supplier(conn, data_owner_id, company_id, supplier)
 
     if result.rowcount == 0:
@@ -4250,7 +4238,6 @@ def create_income_invoices():
     with engine.begin() as conn:
         for entry in entries:
             original_name = entry.get("originalFilename") or ""
-            stored_name = entry.get("storedFilename") or ""
             invoice_date = entry.get("date") or entry.get("invoice_date") or date.today().isoformat()
             client = (entry.get("client") or "").strip()
             base_amount = parse_amount(str(entry.get("base") or ""))
@@ -4271,15 +4258,11 @@ def create_income_invoices():
                 or entry.get("payment_date")
                 or (payment_dates[0] if payment_dates else None),
             )
-            analysis_text = entry.get("analysisText") or entry.get("ocrText")
             extraction_source = (
                 entry.get("extractionSource") or entry.get("extraction_source")
             )
             confidence_score = entry.get("confidenceScore") or entry.get("confidence_score")
 
-            if not stored_name:
-                errors.append(f"Archivo faltante para {original_name}.")
-                continue
             if not client:
                 app.logger.info(
                     "Cliente vacío para %s. Se permite guardado manual.",
@@ -4319,11 +4302,6 @@ def create_income_invoices():
                     base_amount, vat_rate_int, vat_amount, total_amount
                 )
 
-            stored_value = (
-                stored_name
-                if stored_name.startswith("http")
-                else get_public_url(stored_name)
-            )
             created_at = datetime.utcnow().isoformat()
 
             conn.execute(
@@ -4331,7 +4309,7 @@ def create_income_invoices():
                     user_id=data_owner_id,
                     company_id=company_id,
                     original_filename=original_name,
-                    stored_filename=stored_value,
+                    stored_filename="",
                     invoice_date=invoice_date,
                     client=client,
                     base_amount=base_amount,
@@ -4341,7 +4319,7 @@ def create_income_invoices():
                     vat_breakdown=vat_breakdown_json,
                     payment_date=payment_date,
                     payment_dates=json.dumps(payment_dates) if payment_dates else None,
-                    ocr_text=analysis_text,
+                    ocr_text=None,
                     extraction_source=extraction_source,
                     confidence_score=confidence_score,
                     created_at=created_at,
