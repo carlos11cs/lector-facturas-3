@@ -274,6 +274,23 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = os.getenv("ENV", "").lower() == "production"
 
 
+def static_asset_url(filename: str) -> str:
+    static_path = os.path.join(app.static_folder or "", filename)
+    version = None
+    try:
+        version = int(os.path.getmtime(static_path))
+    except OSError:
+        version = None
+    if version is None:
+        return url_for("static", filename=filename)
+    return url_for("static", filename=filename, v=version)
+
+
+@app.context_processor
+def inject_static_asset_url():
+    return {"static_asset_url": static_asset_url}
+
+
 def init_db():
     metadata.create_all(engine)
     inspector = inspect(engine)

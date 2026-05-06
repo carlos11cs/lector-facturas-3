@@ -94,6 +94,7 @@ const TIMEOUT_MESSAGE =
 const VAT_WARNING_MESSAGE =
   "Puede que la calidad de la imagen o la información sea dudosa. Por favor, revisa siempre las cantidades y los tipos de IVA.";
 const ANALYSIS_MAX_CONCURRENCY = 1;
+const ANALYSIS_PENDING_TIMEOUT_MS = 70 * 1000;
 
 const analysisTaskQueue = [];
 let activeAnalysisTasks = 0;
@@ -117,9 +118,36 @@ function abortPendingAnalysis(item) {
   item.analysisPending = false;
   item.analysisQueued = false;
   removeQueuedAnalysisTask(item.id);
+  if (item._analysisTimeoutId) {
+    clearTimeout(item._analysisTimeoutId);
+    item._analysisTimeoutId = null;
+  }
   if (item._analysisController) {
     item._analysisController.abort();
   }
+}
+
+function scheduleAnalysisTimeout(item, render) {
+  if (item._analysisTimeoutId) {
+    clearTimeout(item._analysisTimeoutId);
+  }
+  item._analysisTimeoutId = window.setTimeout(() => {
+    if (item._analysisCancelled || !isPendingUploadItemPresent(item) || !item.analysisPending) {
+      return;
+    }
+    removeQueuedAnalysisTask(item.id);
+    if (item._analysisController) {
+      item._analysisController.abort();
+    }
+    item.analysisPending = false;
+    item.analysisQueued = false;
+    item.analysisError = true;
+    item.analysisErrorMessage = TIMEOUT_MESSAGE;
+    item.analysisStatus = "timeout";
+    if (typeof render === "function") {
+      render();
+    }
+  }, ANALYSIS_PENDING_TIMEOUT_MS);
 }
 
 function processAnalysisQueue() {
@@ -147,6 +175,7 @@ function enqueueAnalysisTask(item, run, render) {
   item.analysisPending = true;
   item.analysisQueued = true;
   item._analysisCancelled = false;
+  scheduleAnalysisTimeout(item, render);
   analysisTaskQueue.push({ item, run, render });
   processAnalysisQueue();
 }
@@ -3590,6 +3619,10 @@ function analyzeIncomeForItem(item) {
       renderIncomeTable();
     })
     .finally(() => {
+      if (item._analysisTimeoutId) {
+        clearTimeout(item._analysisTimeoutId);
+        item._analysisTimeoutId = null;
+      }
       item._analysisController = null;
     });
 }
@@ -3979,6 +4012,10 @@ function analyzeInvoiceForItem(item) {
       renderTable();
     })
     .finally(() => {
+      if (item._analysisTimeoutId) {
+        clearTimeout(item._analysisTimeoutId);
+        item._analysisTimeoutId = null;
+      }
       item._analysisController = null;
     });
 }
