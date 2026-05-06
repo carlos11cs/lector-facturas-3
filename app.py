@@ -3128,7 +3128,7 @@ def analyze_invoice_api():
     return jsonify(
         {
             "ok": True,
-            "storedFilename": "",
+            "storedFilename": "__transient__",
             "originalFilename": original_name,
             "companyId": company_id,
             "transientProcessing": True,
