@@ -165,6 +165,56 @@ def _find_payment_date_by_keywords(text: str) -> Optional[str]:
     return None
 
 
+def _find_due_dates_in_due_context(text: str) -> List[str]:
+    if not text:
+        return []
+    due_keywords = [
+        "fecha de vencimiento",
+        "vencimiento",
+        "vence el",
+    ]
+    dates: List[str] = []
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for idx, line in enumerate(lines):
+        lowered = line.lower()
+        if not any(keyword in lowered for keyword in due_keywords):
+            continue
+        for match in re.findall(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", line):
+            normalized = _normalize_date(match)
+            if normalized:
+                dates.append(normalized)
+        for match in re.findall(r"\d{4}[/-]\d{1,2}[/-]\d{1,2}", line):
+            normalized = _normalize_date(match)
+            if normalized:
+                dates.append(normalized)
+        found_in_block = bool(dates)
+        for offset in range(1, 13):
+            if idx + offset >= len(lines):
+                break
+            candidate_line = lines[idx + offset]
+            candidate_lower = candidate_line.lower()
+            if any(keyword in candidate_lower for keyword in due_keywords):
+                break
+            if not _is_payment_schedule_continuation_line(candidate_line):
+                if found_in_block:
+                    break
+                continue
+            matched_any = False
+            for match in re.findall(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", candidate_line):
+                normalized = _normalize_date(match)
+                if normalized:
+                    dates.append(normalized)
+                    matched_any = True
+            for match in re.findall(r"\d{4}[/-]\d{1,2}[/-]\d{1,2}", candidate_line):
+                normalized = _normalize_date(match)
+                if normalized:
+                    dates.append(normalized)
+                    matched_any = True
+            if matched_any:
+                found_in_block = True
+    return sorted({d for d in dates if d})
+
+
 def _is_payment_schedule_continuation_line(line: str) -> bool:
     if not line:
         return False
@@ -304,9 +354,13 @@ def _resolve_payment_schedule(
     if single_payment_date:
         payment_dates.append(single_payment_date)
 
-    text_payment_dates = _find_payment_dates_by_keywords(extracted_text, invoice_date)
-    if text_payment_dates:
-        payment_dates = text_payment_dates
+    explicit_due_dates = _find_due_dates_in_due_context(extracted_text)
+    if explicit_due_dates:
+        payment_dates = explicit_due_dates
+    else:
+        text_payment_dates = _find_payment_dates_by_keywords(extracted_text, invoice_date)
+        if text_payment_dates:
+            payment_dates = text_payment_dates
 
     if not payment_dates and payment_terms_days is None:
         payment_terms_days = extract_payment_terms_days(extracted_text)
@@ -3112,10 +3166,20 @@ def analyze_invoice(
     text_amounts = _extract_amounts_from_text(extracted_text)
     text_total = text_amounts.get("total")
     if text_total is not None and amount_source != "regex_tax_summary":
-        if total_amount is None or text_total <= (total_amount + 0.02):
+        text_total_math_ok = _validate_math(base_amount, vat_amount, text_total)
+        current_math_ok = _validate_math(base_amount, vat_amount, total_amount)
+        can_override_from_text = (
+            total_amount is None
+            or base_amount is None
+            or vat_amount is None
+            or text_total_math_ok
+        )
+        if can_override_from_text and (total_amount is None or text_total <= (total_amount + 0.02)):
             total_amount = text_total
             if amount_source == "llm":
                 amount_source = "text_total"
+        elif current_math_ok:
+            text_total = None
         if text_amounts.get("base") is not None and base_amount is None:
             base_amount = text_amounts.get("base")
         if text_amounts.get("vat") is not None and vat_amount is None:

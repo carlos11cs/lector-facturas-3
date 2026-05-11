@@ -338,6 +338,43 @@ www.ysonut.com
 YSONUT SLU NIF/EORI: ESB61741112
 """
 
+RAIOLA_FIXTURE = """PAGADA
+Raiola Networks, S.L.
+Avda. de Magoi nº 66
+Semisótano Dcha
+27002 Lugo España
+CIF: B27453489
+Factura nºE202605-53115
+Fecha de la Factura: 11/05/2026
+Fecha de Vencimiento: 16/05/2026
+Facturado a
+KALOS HEALTH AND BEAUTY SL
+Descripción
+Total
+Hosting Base SSD 2.0 - fullfacevalencia.es (16/05/2026 - 15/05/2027)
+€98.95 EUR
+Subtotal
+€98.95 EUR
+21.00% IVA
+€20.78 EUR
+Saldo
+€0.00 EUR
+Total
+€119.73 EUR
+Transacciones
+Fecha de transacción
+Forma de pago
+ID Transacción
+Total
+11/05/2026
+Tarjeta de Crédito o Débito
+260511104624
+€119.73 EUR
+Pendiente
+€0.00 EUR
+PDF generado el 11/05/2026
+"""
+
 SKINTECH_FIXTURE = """30/04/2026
 ESB05410667
 C004609
@@ -697,6 +734,33 @@ class TestAiInvoiceService(unittest.TestCase):
             "2026-05-08",
         )
         self.assertEqual(payment_dates, ["2026-07-07"])
+
+    def test_explicit_due_date_beats_transaction_dates(self):
+        payment_dates, payment_terms_days = svc._resolve_payment_schedule(
+            RAIOLA_FIXTURE,
+            "2026-05-11",
+            ["2026-05-16"],
+            None,
+            5,
+        )
+        self.assertEqual(payment_terms_days, 5)
+        self.assertEqual(payment_dates, ["2026-05-16"])
+
+    def test_text_total_does_not_override_coherent_llm_total(self):
+        normalized = svc.normalize_and_validate_amounts(
+            {
+                "analysis_status": "ok",
+                "base_amount": 98.95,
+                "vat_amount": 20.78,
+                "total_amount": 119.73,
+                "vat_rate": 21.0,
+                "vat_breakdown": [{"rate": 21.0, "base": 98.95, "vat_amount": 20.78, "total": 119.73}],
+                "totals": {"base": 98.95, "vat": 20.78, "total": 119.73},
+                "amount_source": "llm",
+            }
+        )
+        self.assertEqual(normalized["analysis_status"], "ok")
+        self.assertAlmostEqual(normalized["total_amount"], 119.73, places=2)
 
     def test_explicit_payment_schedule_wins_over_zero_terms_days(self):
         payment_dates, payment_terms_days = svc._resolve_payment_schedule(
