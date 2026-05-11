@@ -165,6 +165,43 @@ def _find_payment_date_by_keywords(text: str) -> Optional[str]:
     return None
 
 
+def _is_payment_schedule_continuation_line(line: str) -> bool:
+    if not line:
+        return False
+    lowered = line.lower()
+    if re.search(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", line):
+        return True
+    if re.search(r"\d{4}[/-]\d{1,2}[/-]\d{1,2}", line):
+        return True
+    if re.search(r"\bES\d{2}\b", line):
+        return True
+    if re.search(r"CC\s*:", line, flags=re.IGNORECASE):
+        return True
+    if re.search(r"\d{1,3}\s*d[ií]as", lowered):
+        return True
+    if re.search(r"\d+[.,]\d{2}", line):
+        return True
+    schedule_keywords = (
+        "vencimiento",
+        "fecha de vencimiento",
+        "fecha de pago",
+        "fecha pago",
+        "forma de pago",
+        "importe",
+        "pendiente",
+        "domicili",
+        "transfer",
+        "banco",
+        "iban",
+        "giro",
+        "cuota",
+        "cliente",
+        "pago",
+        "pagos",
+    )
+    return any(keyword in lowered for keyword in schedule_keywords)
+
+
 def _find_payment_dates_by_keywords(text: str, invoice_date_iso: Optional[str]) -> List[str]:
     if not text:
         return []
@@ -211,20 +248,27 @@ def _find_payment_dates_by_keywords(text: str, invoice_date_iso: Optional[str]) 
         lowered = line.lower()
         if not any(keyword in lowered for keyword in keywords):
             continue
+        found_in_block = False
         for offset in range(1, 12):
             if idx + offset >= len(lines):
                 break
             candidate_line = lines[idx + offset]
             if any(keyword in candidate_line.lower() for keyword in keywords):
                 break
+            if not _is_payment_schedule_continuation_line(candidate_line):
+                if found_in_block:
+                    break
+                continue
             for match in re.findall(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", candidate_line):
                 normalized = _normalize_date(match)
                 if normalized:
                     dates.append(normalized)
+                    found_in_block = True
             for match in re.findall(r"\d{4}[/-]\d{1,2}[/-]\d{1,2}", candidate_line):
                 normalized = _normalize_date(match)
                 if normalized:
                     dates.append(normalized)
+                    found_in_block = True
     unique_dates = sorted({d for d in dates if d})
     return unique_dates
 

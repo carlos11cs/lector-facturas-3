@@ -139,6 +139,23 @@ VENCIMIENTO:
 27/06/2026
 """
 
+CANTABRIA_SINGLE_DUE_WITH_FOOTER_DATE_FIXTURE = """Industrial Farmacéutica Cantabria, S.A.
+FACTURA Nº
+FECHA
+26038145
+08/05/2026
+FORMA DE PAGO:
+Giro Bancario a la cuenta
+OBSERVACIONES:
+BANCO:
+**** **** **** ** ******1816
+VENCIMIENTO:
+60 dias fecha factura
+07/07/2026
+Cantabria Labs es una marca registrada de Industrial Farmacéutica Cantabria, S.A.
+Inscrita en el Reg. Merc. de Santander, Fecha 12/11/42, Libro 22 de Sociedades, Folio 105, Hoja 1.151, Inscripción 1ª
+"""
+
 YSONUT_FIXTURE = """YSONUT SLU - Calle Maldonado 50. 28006, Madrid - NIF: ESB61741112
 Factura Simplificada
 Fecha entrega 30/04/2026
@@ -673,6 +690,13 @@ class TestAiInvoiceService(unittest.TestCase):
     def test_ignore_legal_text_days_outside_payment_context(self):
         payment_dates = svc._find_payment_dates_by_keywords(YSONUT_LONG_FIXTURE, "2026-04-30")
         self.assertEqual(payment_dates, ["2026-05-31", "2026-06-15"])
+
+    def test_ignore_footer_dates_after_single_due_date_block(self):
+        payment_dates = svc._find_payment_dates_by_keywords(
+            CANTABRIA_SINGLE_DUE_WITH_FOOTER_DATE_FIXTURE,
+            "2026-05-08",
+        )
+        self.assertEqual(payment_dates, ["2026-07-07"])
 
     def test_explicit_payment_schedule_wins_over_zero_terms_days(self):
         payment_dates, payment_terms_days = svc._resolve_payment_schedule(
