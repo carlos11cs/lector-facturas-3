@@ -452,6 +452,60 @@ PHARMA GROUP SL, Pla de l'Estany 29, 17486 - Castelló d'Empúries o en la direc
 Impreso por SAP Business One
 """
 
+VERISURE_FIXTURE = """C/ Priégola 2 - 28224, Pozuelo de Alarcón, Madrid – España. Tel.: 910 121 122. RNSP2737
+C.I.F. A26106013 -
+Factura Cuota Mayo 2026
+76,85 €
+Total a pagar
+www.verisure.es
+KALOS HEALTH AND BEAUTY SL
+2605C00829192
+01/05/2026
+01/05/2026-31/05/2026
+Cuenta Bancaria:
+Factura Cuota Mayo 2026
+Concepto
+Cantidad
+Importe unitario
+Importe total
+ALARMA ANTI-INTRUSION
+1
+4,00 €
+4,00 €
+ALARMA ZEROVISION ANTI-INTRUSION
+1
+45,51 €
+45,51 €
+DISPOSITIVOS ADICIONALES
+1
+13,00 €
+13,00 €
+SERVICIOS CONFORT
+1
+2,00 €
+2,00 €
+DESCUENTO EN CUOTA SERVICIO AMPLIACION
+1
+-3,00 €
+-3,00 €
+OFERTA CUOTA FIDELIZACION
+1
+-1,00 €
+-1,00 €
+60,51 €
+Subtotal
+12,71 €
+73,22 €
+Total factura
+IVA  21 %
+TOTAL A PAGAR
+76,85 €
+Pago aplazado servicio de instalación dispositivos ampliados (2 de 36). Factura: 26OT000117440
+3,63 €
+Inscrita en el Reg. Merc. de Madrid – Tomo 9454 – Libro de Sociedades 0 – Folio 75 – Hoja M – 151.950 – Inscripción 3º. A los efectos informativos oportunos, Securitas Direct España
+S.A.U., como empresa inscrita en el Registro RII-AEE con el número 002846 y en el Registro RII-PYA con el número 655
+"""
+
 
 class TestAiInvoiceService(unittest.TestCase):
     def test_parse_eu_amount(self):
@@ -779,6 +833,39 @@ class TestAiInvoiceService(unittest.TestCase):
             ["KALOS HEALTH AND BEAUTY S.L."],
         )
         self.assertEqual(supplier, "Skin Tech Pharma Group, SLU")
+
+    def test_strip_inline_tax_id_handles_dotted_cif_labels(self):
+        cleaned = svc._strip_inline_tax_id("C.I.F. A26106013 -")
+        self.assertEqual(cleaned, "")
+
+    def test_extract_supplier_from_multiline_legal_footer(self):
+        supplier = svc._extract_supplier_from_text(
+            VERISURE_FIXTURE,
+            ["KALOS HEALTH AND BEAUTY S.L."],
+        )
+        self.assertEqual(supplier, "Securitas Direct España S.A.U")
+
+    def test_extract_amounts_prefers_total_factura_over_table_header(self):
+        amounts = svc._extract_amounts_from_text(VERISURE_FIXTURE)
+        self.assertAlmostEqual(amounts["base"], 60.51, places=2)
+        self.assertAlmostEqual(amounts["total"], 73.22, places=2)
+
+    def test_text_amount_fallbacks_replace_incoherent_llm_total(self):
+        base_amount, vat_amount, total_amount, amount_source = svc._apply_text_amount_fallbacks(
+            VERISURE_FIXTURE,
+            60.51,
+            12.71,
+            76.85,
+            "llm",
+        )
+        self.assertAlmostEqual(base_amount, 60.51, places=2)
+        self.assertAlmostEqual(vat_amount, 12.71, places=2)
+        self.assertAlmostEqual(total_amount, 73.22, places=2)
+        self.assertEqual(amount_source, "text_total")
+
+    def test_installment_lines_do_not_count_as_withholding(self):
+        withholding_amount = svc._extract_explicit_withholding_amount_from_text(VERISURE_FIXTURE)
+        self.assertIsNone(withholding_amount)
 
 
 if __name__ == "__main__":

@@ -564,6 +564,8 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
         forbid_if_contains: Optional[List[str]] = None,
         require_currency_on_keyword_line: bool = False,
         require_single_amount: bool = False,
+        lookahead: int = 7,
+        lookbehind: int = 0,
     ) -> Optional[float]:
         for idx, line in enumerate(lines):
             upper = line.upper()
@@ -579,6 +581,20 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
                     continue
                 if numbers:
                     amount = pick_best_amount(numbers)
+                if amount is None and lookbehind > 0:
+                    for offset in range(1, lookbehind + 1):
+                        if idx - offset < 0:
+                            break
+                        previous_line = lines[idx - offset]
+                        numbers = re.findall(
+                            r"\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+[.,]\d{2}",
+                            previous_line,
+                        )
+                        if not numbers:
+                            continue
+                        amount = pick_best_amount(numbers)
+                        if amount is not None:
+                            break
                 if amount is None:
                     # OCR may drop decimal separators; try to rebuild from plain digits.
                     raw_digits = re.findall(r"\b\d{4,6}\b", line)
@@ -587,7 +603,7 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
                         amount = parse_eu_amount(candidate[:-2] + "," + candidate[-2:])
                 if amount is None and idx + 1 < len(lines):
                     candidates = []
-                    for offset in range(1, 8):
+                    for offset in range(1, lookahead + 1):
                         if idx + offset >= len(lines):
                             break
                         next_line = lines[idx + offset]
@@ -608,20 +624,45 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
                     return amount
         return None
 
-    base_amount = find_amount_for_keywords(
-        ["BASE IMPONIBLE", "BASE IVA", "BASE", "TOTAL BRUTO"]
+    base_amount = (
+        find_amount_for_keywords(["BASE IMPONIBLE", "BASE IVA", "BASE", "TOTAL BRUTO"])
+        or find_amount_for_keywords(["SUBTOTAL"], lookahead=1, lookbehind=1)
     )
-    total_amount = find_amount_for_keywords(
-        [
-            "TOTAL FACTURA",
-            "TOTAL IVA INCLUIDO",
-            "TOTAL CON IVA",
-            "TOTAL A PAGAR",
-            "TOTAL EUR",
-            "TOTAL",
-        ],
-        forbid_if_contains=["BRUTO", "BASE", "IMPONIBLE", "I.V.A", "IVA", "REC.EQUIV"],
-        require_single_amount=True,
+    total_amount = (
+        find_amount_for_keywords(
+            ["TOTAL FACTURA"],
+            forbid_if_contains=["BRUTO", "BASE", "IMPONIBLE", "I.V.A", "IVA", "REC.EQUIV"],
+            require_single_amount=True,
+            lookahead=4,
+            lookbehind=1,
+        )
+        or find_amount_for_keywords(
+            ["TOTAL IVA INCLUIDO", "TOTAL CON IVA", "NETO A PAGAR"],
+            forbid_if_contains=["BRUTO", "BASE", "IMPONIBLE", "I.V.A", "IVA", "REC.EQUIV"],
+            require_single_amount=True,
+            lookahead=4,
+            lookbehind=1,
+        )
+        or find_amount_for_keywords(
+            ["TOTAL A PAGAR"],
+            forbid_if_contains=["BRUTO", "BASE", "IMPONIBLE", "I.V.A", "IVA", "REC.EQUIV"],
+            require_single_amount=True,
+            lookahead=2,
+            lookbehind=1,
+        )
+        or find_amount_for_keywords(
+            ["TOTAL EUR"],
+            forbid_if_contains=["BRUTO", "BASE", "IMPONIBLE", "I.V.A", "IVA", "REC.EQUIV"],
+            require_single_amount=True,
+            lookahead=3,
+        )
+        or find_amount_for_keywords(
+            ["TOTAL"],
+            forbid_if_contains=["BRUTO", "BASE", "IMPONIBLE", "I.V.A", "IVA", "REC.EQUIV"],
+            require_single_amount=True,
+            require_currency_on_keyword_line=True,
+            lookahead=1,
+        )
     )
     if total_amount is None:
         currency_matches = re.findall(
@@ -633,6 +674,44 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
             total_amount = _normalize_amount(currency_matches[-1])
     vat_amount = find_amount_for_keywords(["I.V.A", "IVA"])
     return {"base": base_amount, "vat": vat_amount, "total": total_amount}
+
+
+def _extract_explicit_withholding_amount_from_text(text: str) -> Optional[float]:
+    if not text:
+        return None
+    normalized_text = _normalize_ocr_amount_text(text)
+    lines = [line.strip() for line in normalized_text.splitlines() if line.strip()]
+    amount_pattern = re.compile(r"\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+[.,]\d{2}")
+    keywords = ("retención", "retencion", "withholding", "irpf")
+    stop_tokens = ("portes", "subtotal", "base", "iva", "impuesto", "factura", "pendiente")
+
+    for idx, line in enumerate(lines):
+        lowered = line.lower()
+        if not any(keyword in lowered for keyword in keywords):
+            continue
+
+        line_amounts = [_normalize_amount(raw) for raw in amount_pattern.findall(line)]
+        line_amounts = [value for value in line_amounts if value is not None]
+        if line_amounts:
+            return _round_amount(line_amounts[-1])
+
+        for offset in range(1, 3):
+            if idx + offset >= len(lines):
+                break
+            candidate = lines[idx + offset].strip()
+            if not candidate:
+                continue
+            candidate_lower = candidate.lower()
+            if any(token in candidate_lower for token in stop_tokens):
+                break
+            matches = amount_pattern.findall(candidate)
+            if not matches:
+                continue
+            parsed = _normalize_amount(matches[-1])
+            if parsed is not None:
+                return _round_amount(parsed)
+            break
+    return None
 
 
 def _extract_invoice_date_from_text(text: str) -> Optional[str]:
@@ -1247,6 +1326,37 @@ def _apply_tax_summary_override(
     return base_amount, vat_amount, total_amount, vat_rate, source
 
 
+def _apply_text_amount_fallbacks(
+    text: str,
+    base_amount: Optional[float],
+    vat_amount: Optional[float],
+    total_amount: Optional[float],
+    amount_source: Optional[str],
+) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[str]]:
+    text_amounts = _extract_amounts_from_text(text)
+    text_total = text_amounts.get("total")
+    if text_total is not None and amount_source != "regex_tax_summary":
+        text_total_math_ok = _validate_math(base_amount, vat_amount, text_total).get("is_consistent")
+        current_math_ok = _validate_math(base_amount, vat_amount, total_amount).get("is_consistent")
+        can_override_from_text = (
+            total_amount is None
+            or base_amount is None
+            or vat_amount is None
+            or bool(text_total_math_ok)
+        )
+        if can_override_from_text and (total_amount is None or text_total <= (total_amount + 0.02)):
+            total_amount = text_total
+            if amount_source == "llm":
+                amount_source = "text_total"
+        elif current_math_ok:
+            text_total = None
+    if text_amounts.get("base") is not None and base_amount is None:
+        base_amount = text_amounts.get("base")
+    if text_amounts.get("vat") is not None and vat_amount is None:
+        vat_amount = text_amounts.get("vat")
+    return base_amount, vat_amount, total_amount, amount_source
+
+
 def _maybe_override_amounts_from_text(
     text: str,
     base_amount: Optional[float],
@@ -1265,8 +1375,8 @@ def _maybe_override_amounts_from_text(
         tolerance = max(0.05, b * 0.01)
         return abs(a - b) > tolerance
 
-    math_ok = _validate_math(base_amount, vat_amount, total_amount)
-    text_math_ok = _validate_math(text_base, text_vat, text_total)
+    math_ok = _validate_math(base_amount, vat_amount, total_amount).get("is_consistent")
+    text_math_ok = _validate_math(text_base, text_vat, text_total).get("is_consistent")
     if text_math_ok and (not math_ok or is_significantly_different(base_amount, text_base) or is_significantly_different(total_amount, text_total)):
         base_amount = text_base
         vat_amount = text_vat
@@ -1487,6 +1597,8 @@ def has_legal_form(name: Optional[str]) -> bool:
 def _trim_company_name(value: Optional[str]) -> str:
     if not value:
         return ""
+    value = _strip_inline_tax_id(value)
+    value = re.sub(r"\s{2,}", " ", value).strip(" -–—|,;:")
     legal_form_pattern = (
         r"(?:"
         r"S\.?\s*L\.?\s*U\.?|"
@@ -1499,10 +1611,20 @@ def _trim_company_name(value: Optional[str]) -> str:
         r"LIMITED|LTD|INC|GMBH|SARL|BV|NV|SAS|COOPERATIVA|COOP"
         r")"
     )
-    match = re.search(rf"(.+?\b{legal_form_pattern}\b)", value, flags=re.IGNORECASE)
-    if match:
-        value = match.group(1)
-    value = _strip_inline_tax_id(value)
+    segment_candidates: List[str] = []
+    segments = [value] + [part.strip() for part in re.split(r"[,;|]", value) if part.strip()]
+    for segment in segments:
+        match = re.search(rf"(.+?\b{legal_form_pattern}\b)", segment, flags=re.IGNORECASE)
+        if not match:
+            continue
+        candidate = re.sub(r"\s{2,}", " ", match.group(1)).strip(" -–—|,;:")
+        if candidate:
+            segment_candidates.append(candidate)
+    if segment_candidates:
+        preferred = [
+            candidate for candidate in segment_candidates if not _looks_like_legal_or_footer_text(candidate)
+        ]
+        value = min(preferred or segment_candidates, key=len)
     value = re.sub(r"\s{2,}", " ", value).strip(" -–—|,;:")
     return value
 
@@ -1608,6 +1730,9 @@ def _is_valid_supplier(
         return False
     if _looks_like_legal_or_footer_text(value):
         return False
+    meaningful_tokens = re.findall(r"[A-Za-zÀ-ÿ]{2,}", value)
+    if len(meaningful_tokens) < 2:
+        return False
     has_form = has_legal_form(value)
     inline_tax = _has_tax_id(value) or _has_iban(value) or "iban" in value.lower()
     has_tax = bool(text and _supplier_has_near_tax_id_or_iban(text, value))
@@ -1707,6 +1832,12 @@ def _strip_inline_tax_id(value: str) -> str:
     if not value:
         return value
     cleaned = value
+    cleaned = re.sub(
+        r"(?:n[ºo]\s*)?(?:nif/cif/nie/vat|c\.?\s*i\.?\s*f\.?|n\.?\s*i\.?\s*f\.?|d\.?\s*n\.?\s*i\.?|v\.?\s*a\.?\s*t\.?|i\.?\s*v\.?\s*a\.?)\s*[:#-]?\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     cleaned = re.sub(r"(cif|nif|dni|vat|iva)\s*[:#-]?\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\b[A-HJ-NP-SUVW]\s?-?\d{7}\s?-?[0-9A-J]\b", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\b\d{8}\s?-?[A-Z]\b", "", cleaned, flags=re.IGNORECASE)
@@ -1947,12 +2078,21 @@ def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
                         return _trim_company_name(candidate)
 
     candidates = _extract_supplier_candidates(text, company_names)
-    if not candidates:
-        return None
     candidates.sort(key=lambda item: item[1], reverse=True)
     for best, score in candidates:
         if _is_valid_supplier(best, company_names, text):
             return _trim_company_name(best)
+    legal_form_fragment = re.compile(
+        r"^(?:S\.?\s*L\.?\s*U\.?|S\.?\s*A\.?\s*U\.?|S\.?\s*L\.?\s*L\.?|S\.?\s*L\.?\s*P\.?|S\.?\s*C\.?\s*P\.?|S\.?\s*R\.?\s*L\.?|S\.?\s*A\.?|LIMITED|LTD|INC|GMBH|SARL|BV|NV|SAS|COOPERATIVA|COOP)\b",
+        flags=re.IGNORECASE,
+    )
+    for idx in range(len(lines) - 1):
+        next_line = lines[idx + 1].strip()
+        if not legal_form_fragment.search(next_line):
+            continue
+        combined = f"{lines[idx]} {next_line}".strip()
+        if _is_valid_supplier(combined, company_names, text, require_tax_id=False):
+            return _trim_company_name(combined)
     return None
 
 
@@ -3088,6 +3228,11 @@ def analyze_invoice(
             data.get("retention_amount"),
         )
     )
+    explicit_withholding_amount = _extract_explicit_withholding_amount_from_text(extracted_text)
+    if explicit_withholding_amount is not None:
+        withholding_amount = explicit_withholding_amount
+    elif withholding_amount is not None:
+        withholding_amount = None
     amount_source = "llm" if data else "fallback"
 
     if company_names is None:
@@ -3163,27 +3308,13 @@ def analyze_invoice(
         vat_breakdown = summary_breakdown
 
     # Fallback to explicit amounts in text (e.g., "Total factura") if present.
-    text_amounts = _extract_amounts_from_text(extracted_text)
-    text_total = text_amounts.get("total")
-    if text_total is not None and amount_source != "regex_tax_summary":
-        text_total_math_ok = _validate_math(base_amount, vat_amount, text_total)
-        current_math_ok = _validate_math(base_amount, vat_amount, total_amount)
-        can_override_from_text = (
-            total_amount is None
-            or base_amount is None
-            or vat_amount is None
-            or text_total_math_ok
-        )
-        if can_override_from_text and (total_amount is None or text_total <= (total_amount + 0.02)):
-            total_amount = text_total
-            if amount_source == "llm":
-                amount_source = "text_total"
-        elif current_math_ok:
-            text_total = None
-        if text_amounts.get("base") is not None and base_amount is None:
-            base_amount = text_amounts.get("base")
-        if text_amounts.get("vat") is not None and vat_amount is None:
-            vat_amount = text_amounts.get("vat")
+    base_amount, vat_amount, total_amount, amount_source = _apply_text_amount_fallbacks(
+        extracted_text,
+        base_amount,
+        vat_amount,
+        total_amount,
+        amount_source,
+    )
 
     normalized = normalize_and_validate_amounts(
         {
