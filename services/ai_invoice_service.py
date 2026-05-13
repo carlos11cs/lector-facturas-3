@@ -1683,6 +1683,52 @@ def contains_forbidden_keyword(name: Optional[str]) -> bool:
     return any(keyword in lowered for keyword in forbidden)
 
 
+def _looks_like_address_line(value: Optional[str]) -> bool:
+    if not value:
+        return False
+    normalized = re.sub(r"\s{2,}", " ", value).strip()
+    if not normalized:
+        return False
+    lowered = normalized.lower()
+    street_tokens = [
+        "calle ",
+        "c/ ",
+        "cl. ",
+        "cl ",
+        "avda",
+        "avenida",
+        "paseo",
+        "plaza",
+        "camino",
+        "carretera",
+        "ronda",
+        "barrio",
+        "poligono",
+        "polígono",
+        "urbanizacion",
+        "urbanización",
+    ]
+    location_tokens = [
+        "codigo postal",
+        "código postal",
+        "población",
+        "poblacion",
+        "provincia",
+        "valencia",
+        "madrid",
+        "barcelona",
+        "girona",
+        "lugo",
+        "españa",
+        "spain",
+    ]
+    starts_with_street = any(lowered.startswith(token) for token in street_tokens)
+    has_postal_code = bool(re.search(r"\b\d{5}\b", normalized))
+    many_digits = sum(char.isdigit() for char in normalized) >= 3
+    has_location_token = any(token in lowered for token in location_tokens)
+    return starts_with_street or (has_postal_code and (many_digits or has_location_token))
+
+
 def _is_valid_client(
     candidate: Optional[str],
     company_names,
@@ -1696,6 +1742,8 @@ def _is_valid_client(
     if contains_forbidden_keyword(value):
         return False
     if _looks_like_metadata(value):
+        return False
+    if _looks_like_address_line(value):
         return False
     if _is_same_entity(value, company_names):
         return False
@@ -1727,6 +1775,8 @@ def _is_valid_supplier(
     if looks_like_person(value):
         return False
     if contains_forbidden_keyword(value):
+        return False
+    if _looks_like_address_line(value):
         return False
     if _looks_like_legal_or_footer_text(value):
         return False

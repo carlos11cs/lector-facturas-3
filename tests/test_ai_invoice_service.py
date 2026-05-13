@@ -845,6 +845,16 @@ class TestAiInvoiceService(unittest.TestCase):
         )
         self.assertEqual(supplier, "Securitas Direct España S.A.U")
 
+    def test_address_line_is_not_accepted_as_supplier(self):
+        self.assertFalse(
+            svc._is_valid_supplier(
+                "CALLE CERVANTES 25 BJ DRCHA",
+                ["KALOS HEALTH AND BEAUTY S.L."],
+                VERISURE_FIXTURE,
+                require_tax_id=False,
+            )
+        )
+
     def test_extract_amounts_prefers_total_factura_over_table_header(self):
         amounts = svc._extract_amounts_from_text(VERISURE_FIXTURE)
         self.assertAlmostEqual(amounts["base"], 60.51, places=2)
