@@ -1565,33 +1565,34 @@ def looks_like_person(name: Optional[str]) -> bool:
 def has_legal_form(name: Optional[str]) -> bool:
     if not name:
         return False
-    compact = re.sub(r"[\\s\\.]", "", name).upper()
-    legal_tokens = [
-        "SLU",
-        "SL",
-        "SLL",
-        "SAU",
-        "SA",
-        "SLP",
-        "SCP",
-        "SC",
-        "SCOOP",
-        "COOP",
-        "COOPERATIVA",
-        "AIE",
-        "UTE",
-        "CB",
-        "LTD",
-        "LIMITED",
-        "INC",
-        "GMBH",
-        "SARL",
-        "BV",
-        "NV",
-        "SAS",
-        "SRL",
+    patterns = [
+        r"(^|[^A-Z0-9])S\.?\s*L\.?\s*U\.?($|[^A-Z0-9])",
+        r"(^|[^A-Z0-9])S\.?\s*A\.?\s*U\.?($|[^A-Z0-9])",
+        r"(^|[^A-Z0-9])S\.?\s*L\.?\s*L\.?($|[^A-Z0-9])",
+        r"(^|[^A-Z0-9])S\.?\s*L\.?\s*P\.?($|[^A-Z0-9])",
+        r"(^|[^A-Z0-9])S\.?\s*C\.?\s*P\.?($|[^A-Z0-9])",
+        r"(^|[^A-Z0-9])S\.?\s*R\.?\s*L\.?($|[^A-Z0-9])",
+        r"(^|[^A-Z0-9])S\.?\s*A\.?($|[^A-Z0-9])",
+        r"(^|[^A-Z0-9])S\.?\s*L\.?($|[^A-Z0-9])",
+        r"(^|[^A-Z0-9])S\.?\s*C\.?($|[^A-Z0-9])",
+        r"\bSCOOP\b",
+        r"\bCOOP\b",
+        r"\bCOOPERATIVA\b",
+        r"\bAIE\b",
+        r"\bUTE\b",
+        r"\bCB\b",
+        r"\bLIMITED\b",
+        r"\bLTD\b",
+        r"\bINC\b",
+        r"\bGMBH\b",
+        r"\bSARL\b",
+        r"\bBV\b",
+        r"\bNV\b",
+        r"\bSAS\b",
+        r"\bSRL\b",
     ]
-    return any(token in compact for token in legal_tokens)
+    upper = str(name).upper()
+    return any(re.search(pattern, upper) for pattern in patterns)
 
 
 def _trim_company_name(value: Optional[str]) -> str:
@@ -1793,7 +1794,7 @@ def _is_valid_supplier(
             return False
     if _is_same_entity(value, company_names):
         return False
-    if require_tax_id and text and not (has_tax or inline_tax):
+    if require_tax_id and text and not has_form and not (has_tax or inline_tax):
         return False
     return True
 

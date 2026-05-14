@@ -838,6 +838,9 @@ class TestAiInvoiceService(unittest.TestCase):
         cleaned = svc._strip_inline_tax_id("C.I.F. A26106013 -")
         self.assertEqual(cleaned, "")
 
+    def test_legal_form_detection_does_not_match_plain_text(self):
+        self.assertFalse(svc.has_legal_form("DESCUENTO EN CUOTA SERVICIO AMPLIACION"))
+
     def test_extract_supplier_from_multiline_legal_footer(self):
         supplier = svc._extract_supplier_from_text(
             VERISURE_FIXTURE,
@@ -852,6 +855,16 @@ class TestAiInvoiceService(unittest.TestCase):
                 ["KALOS HEALTH AND BEAUTY S.L."],
                 VERISURE_FIXTURE,
                 require_tax_id=False,
+            )
+        )
+
+    def test_legal_form_supplier_is_valid_without_nearby_tax_id(self):
+        self.assertTrue(
+            svc._is_valid_supplier(
+                "Securitas Direct España S.A.U",
+                ["KALOS HEALTH AND BEAUTY S.L."],
+                VERISURE_FIXTURE,
+                require_tax_id=True,
             )
         )
 
