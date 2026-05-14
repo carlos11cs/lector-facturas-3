@@ -540,6 +540,15 @@ TOTAL FACTURA:
 704,94 €
 """
 
+MIXED_SUPPLIER_PRIORITY_FIXTURE = """JUAN PÉREZ GARCÍA
+N.I.F. 12345678Z
+KALOS HEALTH AND BEAUTY SL
+N.I.F. B05410667
+Proveedor:
+SUMINISTROS CLÍNICOS LEVANTE, S.L.
+Factura Número: A-25
+"""
+
 
 class TestAiInvoiceService(unittest.TestCase):
     def test_parse_eu_amount(self):
@@ -957,6 +966,13 @@ class TestAiInvoiceService(unittest.TestCase):
             ["KALOS HEALTH AND BEAUTY SL"],
         )
         self.assertEqual(supplier, "CRISTINA SIMÓ BESALDUCH")
+
+    def test_extract_supplier_prioritizes_legal_entity_over_autonomo(self):
+        supplier = svc._extract_supplier_from_text(
+            MIXED_SUPPLIER_PRIORITY_FIXTURE,
+            ["KALOS HEALTH AND BEAUTY SL"],
+        )
+        self.assertEqual(supplier, "SUMINISTROS CLÍNICOS LEVANTE, S.L.")
 
 
 if __name__ == "__main__":

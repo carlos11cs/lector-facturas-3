@@ -2020,6 +2020,48 @@ def _extract_supplier_candidates(text: str, company_names=None) -> List[Tuple[st
     return candidates
 
 
+def _supplier_candidate_priority(
+    candidate: Optional[str],
+    company_names,
+    text: Optional[str] = None,
+) -> Optional[int]:
+    if candidate is None:
+        return None
+    value = _trim_company_name(str(candidate).strip())
+    if not _is_valid_supplier(value, company_names, text, require_tax_id=True):
+        return None
+    if has_legal_form(value):
+        return 0
+    if looks_like_person(value):
+        return 1
+    return None
+
+
+def _pick_best_supplier_candidate(
+    candidates: List[Tuple[str, int, int]],
+    company_names,
+    text: Optional[str] = None,
+) -> Optional[str]:
+    ranked: List[Tuple[int, int, int, str]] = []
+    seen = set()
+    for candidate, score, position in candidates:
+        cleaned = _trim_company_name(candidate)
+        if not cleaned:
+            continue
+        normalized = _normalize_entity_name(cleaned)
+        if not normalized or normalized in seen:
+            continue
+        priority = _supplier_candidate_priority(cleaned, company_names, text)
+        if priority is None:
+            continue
+        ranked.append((priority, -score, position, cleaned))
+        seen.add(normalized)
+    if not ranked:
+        return None
+    ranked.sort()
+    return ranked[0][3]
+
+
 def _extract_client_candidates(text: str, company_names=None) -> List[Tuple[str, int]]:
     if not text:
         return []
@@ -2130,6 +2172,7 @@ def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
         "datos bancarios",
         "datos fiscales",
     ]
+    candidate_pool: List[Tuple[str, int, int]] = []
 
     for line in lines:
         lowered = line.lower()
@@ -2137,8 +2180,7 @@ def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
             match = re.split(r"en nombre de", line, flags=re.IGNORECASE)
             if len(match) > 1:
                 candidate = match[1].strip(" :-")
-                if _is_valid_supplier(candidate, company_names, text, require_tax_id=False):
-                    return candidate
+                candidate_pool.append((candidate, 120, 0))
 
     for idx, line in enumerate(lines):
         lowered = line.lower()
@@ -2148,31 +2190,26 @@ def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
                     parts = re.split(keyword, line, flags=re.IGNORECASE)
                     if len(parts) > 1:
                         candidate = parts[1].strip(" :-")
-                        if _is_valid_supplier(candidate, company_names, text):
-                            return candidate
+                        candidate_pool.append((candidate, 130, idx))
             for offset in (1, 2):
                 if idx + offset < len(lines):
                     candidate = lines[idx + offset].strip()
-                    if _is_valid_supplier(candidate, company_names, text):
-                        return candidate
+                    candidate_pool.append((candidate, 125 - offset, idx + offset))
 
     for idx, line in enumerate(lines):
         lowered = line.lower()
         if any(anchor in lowered for anchor in anchor_keywords):
             parts = line.split(":", 1)
-            if len(parts) > 1 and _is_valid_supplier(parts[1], company_names, text):
-                return _trim_company_name(parts[1].strip())
+            if len(parts) > 1:
+                candidate_pool.append((parts[1].strip(), 110, idx))
             for offset in (1, 2):
                 if idx + offset < len(lines):
                     candidate = lines[idx + offset].strip()
-                    if _is_valid_supplier(candidate, company_names, text):
-                        return _trim_company_name(candidate)
+                    candidate_pool.append((candidate, 105 - offset, idx + offset))
 
-    candidates = _extract_supplier_candidates(text, company_names)
-    candidates.sort(key=lambda item: item[1], reverse=True)
-    for best, score in candidates:
-        if _is_valid_supplier(best, company_names, text):
-            return _trim_company_name(best)
+    for idx, (candidate, score) in enumerate(_extract_supplier_candidates(text, company_names)):
+        candidate_pool.append((candidate, score, idx + 1000))
+
     legal_form_fragment = re.compile(
         r"^(?:S\.?\s*L\.?\s*U\.?|S\.?\s*A\.?\s*U\.?|S\.?\s*L\.?\s*L\.?|S\.?\s*L\.?\s*P\.?|S\.?\s*C\.?\s*P\.?|S\.?\s*R\.?\s*L\.?|S\.?\s*A\.?|LIMITED|LTD|INC|GMBH|SARL|BV|NV|SAS|COOPERATIVA|COOP)\b",
         flags=re.IGNORECASE,
@@ -2182,9 +2219,9 @@ def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
         if not legal_form_fragment.search(next_line):
             continue
         combined = f"{lines[idx]} {next_line}".strip()
-        if _is_valid_supplier(combined, company_names, text, require_tax_id=False):
-            return _trim_company_name(combined)
-    return None
+        candidate_pool.append((combined, 140, idx))
+
+    return _pick_best_supplier_candidate(candidate_pool, company_names, text)
 
 
 def _extract_supplier_from_text(text: str, company_names=None) -> Optional[str]:
