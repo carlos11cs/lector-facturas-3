@@ -1549,6 +1549,8 @@ def _is_same_entity(candidate: Optional[str], company_names) -> bool:
 def looks_like_person(name: Optional[str]) -> bool:
     if not name:
         return False
+    if any(token in name.lower() for token in ("www.", "@", ".com", ".es", ".net", "http")):
+        return False
     cleaned = re.sub(r"[^\w\s]", " ", name).strip()
     if not cleaned:
         return False
@@ -1557,7 +1559,26 @@ def looks_like_person(name: Optional[str]) -> bool:
         return False
     if has_legal_form(name):
         return False
-    if len(tokens) in {2, 3} and all(len(token) > 1 for token in tokens):
+    stop_tokens = {
+        "www",
+        "es",
+        "com",
+        "net",
+        "valencia",
+        "madrid",
+        "barcelona",
+        "girona",
+        "lugo",
+        "españa",
+        "spain",
+    }
+    lowered_tokens = [token.lower() for token in tokens]
+    if any(token in stop_tokens for token in lowered_tokens):
+        return False
+    if len(set(lowered_tokens)) < len(lowered_tokens):
+        return False
+    long_tokens = [token for token in tokens if len(token) >= 3]
+    if len(tokens) in {2, 3} and all(len(token) > 1 for token in tokens) and len(long_tokens) >= 2:
         return True
     return False
 
@@ -1693,6 +1714,7 @@ def _looks_like_address_line(value: Optional[str]) -> bool:
     lowered = normalized.lower()
     street_tokens = [
         "calle ",
+        "c/",
         "c/ ",
         "cl. ",
         "cl ",
@@ -1727,7 +1749,12 @@ def _looks_like_address_line(value: Optional[str]) -> bool:
     has_postal_code = bool(re.search(r"\b\d{5}\b", normalized))
     many_digits = sum(char.isdigit() for char in normalized) >= 3
     has_location_token = any(token in lowered for token in location_tokens)
-    return starts_with_street or (has_postal_code and (many_digits or has_location_token))
+    address_number_pattern = bool(re.search(r"(n[ºo]\.?|num(?:ero)?\.?)\s*\d+", lowered))
+    return (
+        starts_with_street
+        or address_number_pattern
+        or (has_postal_code and (many_digits or has_location_token))
+    )
 
 
 def _is_valid_client(
@@ -1773,8 +1800,6 @@ def _is_valid_supplier(
     value = _trim_company_name(value)
     if not value:
         return False
-    if looks_like_person(value):
-        return False
     if contains_forbidden_keyword(value):
         return False
     if _looks_like_address_line(value):
@@ -1787,10 +1812,12 @@ def _is_valid_supplier(
     has_form = has_legal_form(value)
     inline_tax = _has_tax_id(value) or _has_iban(value) or "iban" in value.lower()
     has_tax = bool(text and _supplier_has_near_tax_id_or_iban(text, value))
+    is_person = looks_like_person(value)
     if not has_form:
-        # Allow suppliers without legal form if they have tax id/IBAN inline
-        # or near the supplier line (autónomos / entidades sin forma jurídica).
-        if not (inline_tax or has_tax):
+        # For non-legal entities, only accept:
+        # - an inline tax id/IBAN, or
+        # - an autonomous person's full name with nearby tax id.
+        if not inline_tax and not (is_person and has_tax):
             return False
     if _is_same_entity(value, company_names):
         return False
@@ -1812,6 +1839,19 @@ def _looks_like_metadata(line: str) -> bool:
         "base",
         "importe",
         "pedido",
+        "codigo",
+        "código",
+        "cod.",
+        "referencia",
+        "direccion",
+        "dirección",
+        "población",
+        "poblacion",
+        "e-mail",
+        "email",
+        "operación",
+        "operacion",
+        "farmacia",
     ]
     if any(word in lowered for word in blocked):
         return True

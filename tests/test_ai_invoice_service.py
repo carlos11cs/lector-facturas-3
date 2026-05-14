@@ -506,6 +506,40 @@ Inscrita en el Reg. Merc. de Madrid – Tomo 9454 – Libro de Sociedades 0 – 
 S.A.U., como empresa inscrita en el Registro RII-AEE con el número 002846 y en el Registro RII-PYA con el número 655
 """
 
+AUTONOMO_PHARMACY_FIXTURE = """Código
+Descripción del Artículo
+%Ap. P.V.P Bruto P.V.P Neto
+Unid.
+Importe
+CRISTINA SIMÓ BESALDUCH
+CORREOS, 14
+VALENCIA (VALENCIA)
+Cod.Farmacia: 38
+N.I.F. 20903358S
+Factura Número: Q000081/2026
+KALOS HEALTH AND BEAUTY SL
+C/CERVANTES Nº25 BAJO
+VALENCIA
+N.I.F: B05410667
+Referencia: 1566
+Nombre:
+Dirección:
+Población:
+Fecha
+Fecha: 13/05/26
+%Iva
+C.P.: 46007
+E-Mail:
+N/A
+Operación nº B001207/2026
+BASE IMPONIBLE:
+TOTAL CUOTAS:
+TOTAL FACTURA:
+677,83 €
+27,11 €
+704,94 €
+"""
+
 
 class TestAiInvoiceService(unittest.TestCase):
     def test_parse_eu_amount(self):
@@ -841,6 +875,13 @@ class TestAiInvoiceService(unittest.TestCase):
     def test_legal_form_detection_does_not_match_plain_text(self):
         self.assertFalse(svc.has_legal_form("DESCUENTO EN CUOTA SERVICIO AMPLIACION"))
 
+    def test_person_detection_rejects_domains_and_locations(self):
+        self.assertFalse(svc.looks_like_person("www.verisure.es"))
+        self.assertFalse(svc.looks_like_person("VALENCIA (VALENCIA)"))
+
+    def test_metadata_detection_rejects_pharmacy_code_lines(self):
+        self.assertTrue(svc._looks_like_metadata("Cod.Farmacia: 38"))
+
     def test_extract_supplier_from_multiline_legal_footer(self):
         supplier = svc._extract_supplier_from_text(
             VERISURE_FIXTURE,
@@ -889,6 +930,33 @@ class TestAiInvoiceService(unittest.TestCase):
     def test_installment_lines_do_not_count_as_withholding(self):
         withholding_amount = svc._extract_explicit_withholding_amount_from_text(VERISURE_FIXTURE)
         self.assertIsNone(withholding_amount)
+
+    def test_autonomo_name_with_nearby_tax_id_is_valid_supplier(self):
+        self.assertTrue(
+            svc._is_valid_supplier(
+                "CRISTINA SIMÓ BESALDUCH",
+                ["KALOS HEALTH AND BEAUTY SL"],
+                AUTONOMO_PHARMACY_FIXTURE,
+                require_tax_id=True,
+            )
+        )
+
+    def test_address_line_with_customer_number_is_not_valid_supplier(self):
+        self.assertFalse(
+            svc._is_valid_supplier(
+                "C/CERVANTES Nº25 BAJO",
+                ["KALOS HEALTH AND BEAUTY SL"],
+                AUTONOMO_PHARMACY_FIXTURE,
+                require_tax_id=False,
+            )
+        )
+
+    def test_extract_supplier_prefers_autonomo_over_customer_address(self):
+        supplier = svc._extract_supplier_from_text(
+            AUTONOMO_PHARMACY_FIXTURE,
+            ["KALOS HEALTH AND BEAUTY SL"],
+        )
+        self.assertEqual(supplier, "CRISTINA SIMÓ BESALDUCH")
 
 
 if __name__ == "__main__":
