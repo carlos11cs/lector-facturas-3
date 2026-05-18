@@ -1039,6 +1039,26 @@ class TestAiInvoiceService(unittest.TestCase):
         self.assertAlmostEqual(amounts["vat"], 9.29, places=2)
         self.assertAlmostEqual(amounts["total"], 102.21, places=2)
 
+    def test_nonstandard_breakdown_does_not_override_coherent_totals(self):
+        normalized = svc.normalize_and_validate_amounts(
+            {
+                "analysis_status": "ok",
+                "base_amount": 1262.80,
+                "vat_amount": 0.0,
+                "total_amount": 1262.80,
+                "vat_breakdown": [
+                    {"base": 115.44, "vat_amount": 66.96, "rate": None},
+                    {"base": 160.00, "vat_amount": 92.80, "rate": None},
+                ],
+                "amount_source": "llm",
+            }
+        )
+        self.assertEqual(normalized["amount_source"], "llm")
+        self.assertAlmostEqual(normalized["base_amount"], 1262.80, places=2)
+        self.assertAlmostEqual(normalized["vat_amount"], 0.0, places=2)
+        self.assertAlmostEqual(normalized["total_amount"], 1262.80, places=2)
+        self.assertEqual(normalized["vat_breakdown"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

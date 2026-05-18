@@ -2576,6 +2576,10 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
         base_sum = round(sum(line["base"] or 0 for line in normalized_breakdown), 2)
         vat_sum = round(sum(line["vat_amount"] or 0 for line in normalized_breakdown), 2)
         total_sum = round(base_sum + vat_sum, 2)
+        supported_vat_rates = {0.0, 4.0, 10.0, 21.0}
+        breakdown_has_supported_rates = all(
+            line.get("rate") in supported_vat_rates for line in normalized_breakdown
+        )
 
         def totals_match(a: Optional[float], b: Optional[float]) -> bool:
             if a is None or b is None:
@@ -2621,10 +2625,20 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
                 and totals_match(vat_amount, vat_sum)
                 and totals_match(total_amount, total_sum)
             )
+            breakdown_looks_partial_or_non_tax = (
+                llm_consistent
+                and (
+                    not breakdown_has_supported_rates
+                    or (total_amount is not None and total_sum < total_amount - 0.02)
+                )
+            )
             # Prefer the line-level breakdown whenever it is coherent and the
             # aggregate totals do not match it. This keeps multi-IVA invoices
             # internally consistent without relying on a single aggregate guess.
-            if not llm_matches_breakdown:
+            if breakdown_looks_partial_or_non_tax:
+                normalized_breakdown = []
+                amount_source = amount_source or "llm"
+            elif not llm_matches_breakdown:
                 base_amount = base_sum
                 vat_amount = vat_sum
                 total_amount = total_sum
