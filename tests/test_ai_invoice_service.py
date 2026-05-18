@@ -549,6 +549,57 @@ SUMINISTROS CLÍNICOS LEVANTE, S.L.
 Factura Número: A-25
 """
 
+CONSENUR_FIXTURE = """Kalos Health And Beauty S.L
+C.I.F.: B05410667
+Vía CERVANTES 25 BAJO
+46007 VALENCIA(Valencia)
+España
+Consenur Sanitarios, S.L.
+C.I.F.: B86208824
+Vía Calle Río Ebro, s/n Polígono Industrial Finanzauto
+28500 Arganda del Rey, ARGANDA DEL REY (MADRID)
+Tlfno: 900922903 - Fax:
+Fecha:
+07/05/2026
+Nº Fact:
+1004187E2676973
+Vencimiento:
+07/05/2026
+Día de pago:
+Concepto
+DCS
+Cant. Unidad
+PrecioCant.
+ImporteTipoImp.
+Kalos Health And Beauty S.L - Vía CERVANTES 25 BAJO  46007 VALENCIA ( Valencia )
+30/06/2026
+Albaran:
+Nº Pedido:
+Cuota Trimestral Abril 2026 - Junio 2026
+1,00
+92,92 €
+92,92 €
+10,00%
+Tratamiento Residuos Biosanitarios
+TOTAL SERVICIOS:
+92,92 €
+Base Imponible: (10,00 %)
+92,92 €
+ Total IVA:
+9,29 €
+ Total Base Imponible:
+92,92 €
+ Total IVA:
+9,29 €
+ TOTAL FACTURA:
+102,21 €
+Forma de pago Pago domiciliado
+Nº Cuenta: ES3900492626802114161816
+Observaciones:
+CONSENUR SANITARIOS, S.L.U. Inscrita en el Registro Mercantil de Madrid al Tomo 28.907,  Folio 93, Hoja M-520536, Inscripción 62.
+1/1
+"""
+
 
 class TestAiInvoiceService(unittest.TestCase):
     def test_parse_eu_amount(self):
@@ -973,6 +1024,20 @@ class TestAiInvoiceService(unittest.TestCase):
             ["KALOS HEALTH AND BEAUTY SL"],
         )
         self.assertEqual(supplier, "SUMINISTROS CLÍNICOS LEVANTE, S.L.")
+
+    def test_tax_summary_ignores_percentages_inline_with_base_labels(self):
+        summary = svc._extract_tax_summary_from_text(CONSENUR_FIXTURE)
+        self.assertTrue(summary.get("found"))
+        self.assertAlmostEqual(summary.get("base_amount"), 92.92, places=2)
+        self.assertAlmostEqual(summary.get("vat_amount"), 9.29, places=2)
+        self.assertAlmostEqual(summary.get("total_amount"), 102.21, places=2)
+        self.assertAlmostEqual(summary.get("vat_rate"), 10.0, places=2)
+
+    def test_text_amount_extraction_ignores_inline_percentage_amounts(self):
+        amounts = svc._extract_amounts_from_text(CONSENUR_FIXTURE)
+        self.assertAlmostEqual(amounts["base"], 92.92, places=2)
+        self.assertAlmostEqual(amounts["vat"], 9.29, places=2)
+        self.assertAlmostEqual(amounts["total"], 102.21, places=2)
 
 
 if __name__ == "__main__":

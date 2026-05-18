@@ -558,6 +558,63 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
             return max(large_values)
         return values[-1]
 
+    def math_consistent(
+        base_amount: Optional[float],
+        vat_amount: Optional[float],
+        total_amount: Optional[float],
+    ) -> bool:
+        if base_amount is None or vat_amount is None or total_amount is None:
+            return False
+        difference = round((base_amount + vat_amount) - total_amount, 2)
+        tolerance = max(0.05, total_amount * 0.01)
+        return abs(difference) <= tolerance
+
+    def reconcile_base_and_vat_from_total(
+        base_amount: Optional[float],
+        vat_amount: Optional[float],
+        total_amount: Optional[float],
+    ) -> Tuple[Optional[float], Optional[float]]:
+        if total_amount is None or math_consistent(base_amount, vat_amount, total_amount):
+            return base_amount, vat_amount
+
+        currency_matches = re.findall(
+            r"(-?\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|-?\d+[.,]\d{2})\s*(?:EUR|€)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        candidates: List[float] = []
+        for raw in currency_matches:
+            parsed = _normalize_amount(raw)
+            if parsed is None or parsed < 0 or parsed > total_amount + 0.05:
+                continue
+            rounded = round(parsed, 2)
+            if rounded not in candidates:
+                candidates.append(rounded)
+
+        pair_candidates: List[Tuple[int, float, float, float]] = []
+        for left in candidates:
+            for right in candidates:
+                bigger = max(left, right)
+                smaller = min(left, right)
+                if bigger <= 0 or smaller < 0:
+                    continue
+                if abs((bigger + smaller) - total_amount) > 0.05:
+                    continue
+                implied_rate = (smaller / bigger) * 100 if bigger else None
+                rate_penalty = 1
+                if implied_rate is not None and any(
+                    abs(implied_rate - standard) <= 0.5 for standard in (0.0, 4.0, 10.0, 21.0)
+                ):
+                    rate_penalty = 0
+                pair_candidates.append((rate_penalty, -bigger, smaller, bigger))
+
+        if not pair_candidates:
+            return base_amount, vat_amount
+
+        pair_candidates.sort()
+        _, _, best_vat, best_base = pair_candidates[0]
+        return best_base, best_vat
+
     def find_amount_for_keywords(
         keywords: List[str],
         *,
@@ -566,14 +623,23 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
         require_single_amount: bool = False,
         lookahead: int = 7,
         lookbehind: int = 0,
+        ignore_inline_percentages: bool = False,
+        require_keyword_at_line_start: bool = False,
+        search_previous_before_next: bool = False,
+        skip_previous_if_prior_label_contains: Optional[List[str]] = None,
     ) -> Optional[float]:
         for idx, line in enumerate(lines):
             upper = line.upper()
             if any(keyword in upper for keyword in keywords):
+                if require_keyword_at_line_start:
+                    if not any(upper.startswith(keyword) for keyword in keywords):
+                        continue
                 if forbid_if_contains and any(token in upper for token in forbid_if_contains):
                     continue
                 amount = None
-                numbers = re.findall(r"\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+[.,]\d{2}", line)
+                numbers = []
+                if not (ignore_inline_percentages and "%" in line):
+                    numbers = re.findall(r"\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+[.,]\d{2}", line)
                 if require_currency_on_keyword_line and not numbers:
                     if "€" not in line and "EUR" not in upper:
                         continue
@@ -581,10 +647,25 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
                     continue
                 if numbers:
                     amount = pick_best_amount(numbers)
-                if amount is None and lookbehind > 0:
+                if amount is None:
+                    # OCR may drop decimal separators; try to rebuild from plain digits.
+                    raw_digits = re.findall(r"\b\d{4,6}\b", line)
+                    if raw_digits:
+                        candidate = raw_digits[-1]
+                        amount = parse_eu_amount(candidate[:-2] + "," + candidate[-2:])
+                if amount is None and search_previous_before_next and lookbehind > 0:
                     for offset in range(1, lookbehind + 1):
                         if idx - offset < 0:
                             break
+                        if (
+                            skip_previous_if_prior_label_contains
+                            and idx - offset - 1 >= 0
+                            and any(
+                                token in lines[idx - offset - 1].upper()
+                                for token in skip_previous_if_prior_label_contains
+                            )
+                        ):
+                            continue
                         previous_line = lines[idx - offset]
                         numbers = re.findall(
                             r"\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+[.,]\d{2}",
@@ -595,12 +676,6 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
                         amount = pick_best_amount(numbers)
                         if amount is not None:
                             break
-                if amount is None:
-                    # OCR may drop decimal separators; try to rebuild from plain digits.
-                    raw_digits = re.findall(r"\b\d{4,6}\b", line)
-                    if raw_digits:
-                        candidate = raw_digits[-1]
-                        amount = parse_eu_amount(candidate[:-2] + "," + candidate[-2:])
                 if amount is None and idx + 1 < len(lines):
                     candidates = []
                     for offset in range(1, lookahead + 1):
@@ -620,28 +695,57 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
                             break
                     if amount is None and candidates:
                         amount = pick_best_amount(candidates[0][1])
+                if amount is None and lookbehind > 0 and not search_previous_before_next:
+                    for offset in range(1, lookbehind + 1):
+                        if idx - offset < 0:
+                            break
+                        previous_line = lines[idx - offset]
+                        numbers = re.findall(
+                            r"\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+[.,]\d{2}",
+                            previous_line,
+                        )
+                        if not numbers:
+                            continue
+                        amount = pick_best_amount(numbers)
+                        if amount is not None:
+                            break
                 if amount is not None:
                     return amount
         return None
 
     base_amount = (
-        find_amount_for_keywords(["BASE IMPONIBLE", "BASE IVA", "BASE", "TOTAL BRUTO"])
+        find_amount_for_keywords(
+            ["BASE IMPONIBLE", "BASE IVA", "BASE I.V.A", "TOTAL BRUTO"],
+            ignore_inline_percentages=True,
+        )
         or find_amount_for_keywords(["SUBTOTAL"], lookahead=1, lookbehind=1)
+        or find_amount_for_keywords(
+            ["BASE"],
+            ignore_inline_percentages=True,
+            require_keyword_at_line_start=True,
+        )
     )
     total_amount = (
         find_amount_for_keywords(
             ["TOTAL FACTURA"],
             forbid_if_contains=["BRUTO", "BASE", "IMPONIBLE", "I.V.A", "IVA", "REC.EQUIV"],
             require_single_amount=True,
-            lookahead=4,
+            lookahead=0,
             lookbehind=1,
+            search_previous_before_next=True,
+            skip_previous_if_prior_label_contains=["I.V.A", "IVA", "BASE", "IMPONIBLE", "REC"],
+        )
+        or find_amount_for_keywords(
+            ["TOTAL FACTURA"],
+            forbid_if_contains=["BRUTO", "BASE", "IMPONIBLE", "I.V.A", "IVA", "REC.EQUIV"],
+            require_single_amount=True,
+            lookahead=4,
         )
         or find_amount_for_keywords(
             ["TOTAL IVA INCLUIDO", "TOTAL CON IVA", "NETO A PAGAR"],
             forbid_if_contains=["BRUTO", "BASE", "IMPONIBLE", "I.V.A", "IVA", "REC.EQUIV"],
             require_single_amount=True,
             lookahead=4,
-            lookbehind=1,
         )
         or find_amount_for_keywords(
             ["TOTAL A PAGAR"],
@@ -673,6 +777,7 @@ def _extract_amounts_from_text(text: str) -> Dict[str, Optional[float]]:
         if currency_matches:
             total_amount = _normalize_amount(currency_matches[-1])
     vat_amount = find_amount_for_keywords(["I.V.A", "IVA"])
+    base_amount, vat_amount = reconcile_base_and_vat_from_total(base_amount, vat_amount, total_amount)
     return {"base": base_amount, "vat": vat_amount, "total": total_amount}
 
 
@@ -1076,6 +1181,7 @@ def _extract_tax_summary_from_text(text: str) -> Dict[str, Any]:
         *,
         forbid_if_contains: Optional[List[str]] = None,
         prefer_last: bool = False,
+        ignore_inline_percentages: bool = False,
     ) -> Tuple[Optional[float], Optional[str]]:
         for idx, line in enumerate(block):
             upper = line.upper()
@@ -1087,6 +1193,8 @@ def _extract_tax_summary_from_text(text: str) -> Dict[str, Any]:
                     if idx + offset >= len(block):
                         break
                     next_line = block[idx + offset]
+                    if offset == 0 and ignore_inline_percentages and "%" in next_line:
+                        continue
                     matches = _EU_AMOUNT_RE.findall(next_line)
                     if matches:
                         candidates.extend(matches)
@@ -1125,11 +1233,13 @@ def _extract_tax_summary_from_text(text: str) -> Dict[str, Any]:
         ["BASE IMPONIBLE", "BASE IVA", "BASE I.V.A", "B.IMPON", "BASE"],
         forbid_if_contains=["TOTAL", "IVA", "I.V.A"],
         prefer_last=False,
+        ignore_inline_percentages=True,
     )
     vat_value, vat_raw = find_amount_after_keywords(
         ["I.V.A", "IVA"],
         forbid_if_contains=["REC", "RECARGO"],
         prefer_last=False,
+        ignore_inline_percentages=True,
     )
     total_value, total_raw = find_amount_after_keywords(
         ["TOTAL"],
