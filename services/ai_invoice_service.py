@@ -858,7 +858,85 @@ def _extract_numbered_tax_summary_from_text(text: str) -> Dict[str, Any]:
         return {"found": False}
 
     lines = [line.strip() for line in normalized_text.splitlines() if line.strip()]
-    start_idx = None
+    def parse_block(block: List[str]) -> Dict[str, Any]:
+        candidates: List[float] = []
+        amount_pattern = re.compile(r"\d{1,3}(?:[.\s]\d{3})*[.,]\d{2}|\d+[.,]\d{2}")
+        for line in block:
+            for raw in amount_pattern.findall(line):
+                parsed = _normalize_amount(raw)
+                if parsed is None or parsed < 0:
+                    continue
+                rounded = round(parsed, 2)
+                if rounded not in candidates:
+                    candidates.append(rounded)
+        if len(candidates) < 3:
+            return {"found": False}
+
+        total_triplet: Optional[Tuple[float, float, float]] = None
+        for total_candidate in sorted(candidates, reverse=True):
+            for base_candidate in sorted([v for v in candidates if v <= total_candidate], reverse=True):
+                vat_candidate = round(total_candidate - base_candidate, 2)
+                if vat_candidate < 0:
+                    continue
+                if any(abs(v - vat_candidate) <= 0.02 for v in candidates):
+                    total_triplet = (base_candidate, vat_candidate, total_candidate)
+                    break
+            if total_triplet:
+                break
+        if not total_triplet:
+            return {"found": False}
+
+        total_base, total_vat, total_amount = total_triplet
+        base_candidates = [value for value in candidates if 0 < value < total_base + 0.02]
+        line_candidates: List[Dict[str, Any]] = []
+        for base_candidate in base_candidates:
+            for rate in (21.0, 10.0, 4.0, 0.0):
+                vat_candidate = round(base_candidate * (rate / 100), 2)
+                if rate == 0.0:
+                    vat_match = abs(vat_candidate) <= 0.02
+                else:
+                    vat_match = any(abs(v - vat_candidate) <= 0.02 for v in candidates)
+                if not vat_match:
+                    continue
+                line_candidates.append(
+                    {
+                        "base": _round_amount(base_candidate),
+                        "vat_amount": _round_amount(vat_candidate),
+                        "rate": rate,
+                        "total": _round_amount(base_candidate + vat_candidate),
+                    }
+                )
+
+        breakdown: List[Dict[str, Any]] = []
+        seen = set()
+        for line in line_candidates:
+            key = (line["base"], line["vat_amount"], line["rate"])
+            if key not in seen:
+                breakdown.append(line)
+                seen.add(key)
+
+        resolved_breakdown: List[Dict[str, Any]] = []
+        for size in range(1, min(3, len(breakdown)) + 1):
+            for combo in combinations(breakdown, size):
+                combo_base = round(sum(line["base"] or 0 for line in combo), 2)
+                combo_vat = round(sum(line["vat_amount"] or 0 for line in combo), 2)
+                if abs(combo_base - total_base) <= 0.02 and abs(combo_vat - total_vat) <= 0.02:
+                    resolved_breakdown = list(combo)
+                    break
+            if resolved_breakdown:
+                break
+
+        return {
+            "found": True,
+            "base_amount": total_base,
+            "vat_amount": total_vat,
+            "total_amount": total_amount,
+            "vat_rate": resolved_breakdown[0]["rate"] if len(resolved_breakdown) == 1 else None,
+            "source": "regex_tax_summary",
+            "breakdown": resolved_breakdown,
+        }
+
+    start_indices = []
     for idx, line in enumerate(lines):
         upper = line.upper()
         if (
@@ -868,88 +946,28 @@ def _extract_numbered_tax_summary_from_text(text: str) -> Dict[str, Any]:
             or "BASE 2" in upper
             or "BASE 3" in upper
         ):
-            start_idx = idx
-            break
-    if start_idx is None:
+            start_indices.append(idx)
+    if not start_indices:
         return {"found": False}
 
-    block = lines[start_idx : start_idx + 25]
-    candidates: List[float] = []
-    amount_pattern = re.compile(r"\d{1,3}(?:[.\s]\d{3})*[.,]\d{2}|\d+[.,]\d{2}")
-    for line in block:
-        for raw in amount_pattern.findall(line):
-            parsed = _normalize_amount(raw)
-            if parsed is None or parsed < 0:
-                continue
-            rounded = round(parsed, 2)
-            if rounded not in candidates:
-                candidates.append(rounded)
-    if len(candidates) < 3:
+    summaries = []
+    for start_idx in start_indices:
+        block = lines[start_idx : start_idx + 30]
+        summary = parse_block(block)
+        if summary.get("found"):
+            summaries.append(summary)
+    if not summaries:
         return {"found": False}
 
-    total_triplet: Optional[Tuple[float, float, float]] = None
-    for total_candidate in sorted(candidates, reverse=True):
-        for base_candidate in sorted([v for v in candidates if v <= total_candidate], reverse=True):
-            vat_candidate = round(total_candidate - base_candidate, 2)
-            if vat_candidate < 0:
-                continue
-            if any(abs(v - vat_candidate) <= 0.02 for v in candidates):
-                total_triplet = (base_candidate, vat_candidate, total_candidate)
-                break
-        if total_triplet:
-            break
-    if not total_triplet:
-        return {"found": False}
-
-    total_base, total_vat, total_amount = total_triplet
-    base_candidates = [value for value in candidates if 0 < value < total_base + 0.02]
-    line_candidates: List[Dict[str, Any]] = []
-    for base_candidate in base_candidates:
-        for rate in (21.0, 10.0, 4.0, 0.0):
-            vat_candidate = round(base_candidate * (rate / 100), 2)
-            if rate == 0.0:
-                vat_match = abs(vat_candidate) <= 0.02
-            else:
-                vat_match = any(abs(v - vat_candidate) <= 0.02 for v in candidates)
-            if not vat_match:
-                continue
-            line_candidates.append(
-                {
-                    "base": _round_amount(base_candidate),
-                    "vat_amount": _round_amount(vat_candidate),
-                    "rate": rate,
-                    "total": _round_amount(base_candidate + vat_candidate),
-                }
-            )
-
-    breakdown: List[Dict[str, Any]] = []
-    seen = set()
-    for line in line_candidates:
-        key = (line["base"], line["vat_amount"], line["rate"])
-        if key not in seen:
-            breakdown.append(line)
-            seen.add(key)
-
-    resolved_breakdown: List[Dict[str, Any]] = []
-    for size in range(1, min(3, len(breakdown)) + 1):
-        for combo in combinations(breakdown, size):
-            combo_base = round(sum(line["base"] or 0 for line in combo), 2)
-            combo_vat = round(sum(line["vat_amount"] or 0 for line in combo), 2)
-            if abs(combo_base - total_base) <= 0.02 and abs(combo_vat - total_vat) <= 0.02:
-                resolved_breakdown = list(combo)
-                break
-        if resolved_breakdown:
-            break
-
-    return {
-        "found": True,
-        "base_amount": total_base,
-        "vat_amount": total_vat,
-        "total_amount": total_amount,
-        "vat_rate": resolved_breakdown[0]["rate"] if len(resolved_breakdown) == 1 else None,
-        "source": "regex_tax_summary",
-        "breakdown": resolved_breakdown,
-    }
+    summaries.sort(
+        key=lambda summary: (
+            len(summary.get("breakdown") or []),
+            summary.get("total_amount") or 0,
+            summary.get("base_amount") or 0,
+        ),
+        reverse=True,
+    )
+    return summaries[0]
 
 
 def _extract_vertical_tax_summary_from_text(text: str) -> Dict[str, Any]:

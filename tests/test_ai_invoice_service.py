@@ -113,6 +113,39 @@ I.V.A 3
 1.40
 """
 
+HENRY_SCHEIN_REPEATED_SUMMARY_FIXTURE = """BASE EXENTA
+TOTAL A PAGAR
+BASE 2
+BASE 1
+I.V.A 1
+I.V.A 2
+TOTAL BASE
+TOTAL I.V.A
+BASE 3 (4.0%)
+I.V.A 3
+INCOTERM
+REF
+OTRA PAGINA
+BASE EXENTA
+TOTAL A PAGAR
+BASE 2
+BASE 1
+TOTAL BASE
+190.29
+257.24
+EURO
+214.83
+24.54
+BASE 3 (4.0%)
+TOTAL I.V.A
+I.V.A 1
+I.V.A 2
+I.V.A 3
+39.96
+42.41
+2.45
+"""
+
 CANTABRIA_MULTIVAT_FIXTURE = """Industrial Farmacéutica Cantabria, S.A.
 IMPUESTOS
 TOTAL BRUTO
@@ -764,6 +797,13 @@ class TestAiInvoiceService(unittest.TestCase):
         self.assertAlmostEqual(summary.get("vat_amount"), 14.77, places=2)
         self.assertAlmostEqual(summary.get("total_amount"), 92.44, places=2)
         self.assertEqual(len(summary.get("breakdown") or []), 2)
+
+    def test_extract_repeated_numbered_tax_summary_prefers_complete_block(self):
+        summary = svc._extract_tax_summary_from_text(HENRY_SCHEIN_REPEATED_SUMMARY_FIXTURE)
+        self.assertTrue(summary.get("found"))
+        self.assertAlmostEqual(summary.get("base_amount"), 214.83, places=2)
+        self.assertAlmostEqual(summary.get("vat_amount"), 42.41, places=2)
+        self.assertAlmostEqual(summary.get("total_amount"), 257.24, places=2)
 
     def test_extract_invoice_date_dd_mm_yy_from_original_text(self):
         invoice_date = svc._extract_invoice_date_from_text(HENRY_SCHEIN_FIXTURE)
