@@ -600,6 +600,32 @@ CONSENUR SANITARIOS, S.L.U. Inscrita en el Registro Mercantil de Madrid al Tomo 
 1/1
 """
 
+MEDIDERMA_CLIENT_TYPO_FIXTURE = """FACTURA
+Cliente - Destinatario factura:
+KARLOS HEALTH AND BEAUTY S.L.
+C/ CERVANTES 25 BAJO,
+46007 VALENCIA
+Valencia
+España
+Cliente - Datos fiscales:
+KARLOS HEALTH AND BEAUTY S.L.
+C/ CERVANTES 25 BAJO,
+46007 VALENCIA
+Valencia
+España
+Nº cliente 138272 N.I.F. B05410667
+Nº de pedido del cliente WS464687
+Dirección Envío C/ CERVANTES 25 BAJO  VALENCIA 46007
+Factura Nº  122602793 de fecha 13.05.2026
+Albarán nº:  0081551593
+Artículo
+Material/Descripción
+TOTAL EUR
+Total EUR
+133,10
+MEDIDERMA, S.L.U. · N.I.F. ESB96188164 · Domicilio fiscal: C/ GRABADOR ESTEVE 3-1-1, 46004  VALENCIA (España)
+"""
+
 
 class TestAiInvoiceService(unittest.TestCase):
     def test_parse_eu_amount(self):
@@ -1024,6 +1050,33 @@ class TestAiInvoiceService(unittest.TestCase):
             ["KALOS HEALTH AND BEAUTY SL"],
         )
         self.assertEqual(supplier, "SUMINISTROS CLÍNICOS LEVANTE, S.L.")
+
+    def test_single_word_legal_entity_is_valid_supplier(self):
+        self.assertTrue(
+            svc._is_valid_supplier(
+                "MEDIDERMA, S.L.U.",
+                ["KALOS HEALTH AND BEAUTY S.L."],
+                MEDIDERMA_CLIENT_TYPO_FIXTURE,
+                require_tax_id=False,
+            )
+        )
+
+    def test_client_context_typo_is_not_valid_supplier(self):
+        self.assertFalse(
+            svc._is_valid_supplier(
+                "KARLOS HEALTH AND BEAUTY S.L.",
+                ["KALOS HEALTH AND BEAUTY S.L."],
+                MEDIDERMA_CLIENT_TYPO_FIXTURE,
+                require_tax_id=False,
+            )
+        )
+
+    def test_extract_supplier_ignores_client_typo_block(self):
+        supplier = svc._extract_supplier_from_text(
+            MEDIDERMA_CLIENT_TYPO_FIXTURE,
+            ["KALOS HEALTH AND BEAUTY S.L."],
+        )
+        self.assertEqual(supplier, "MEDIDERMA, S.L.U")
 
     def test_tax_summary_ignores_percentages_inline_with_base_labels(self):
         summary = svc._extract_tax_summary_from_text(CONSENUR_FIXTURE)

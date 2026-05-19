@@ -6,6 +6,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import date, timedelta
+from difflib import SequenceMatcher
 from itertools import combinations
 from typing import Any, Dict, Optional, List, Tuple
 
@@ -1651,7 +1652,15 @@ def _is_same_entity(candidate: Optional[str], company_names) -> bool:
     if not normalized:
         return False
     for name in company_names or []:
-        if normalized == _normalize_entity_name(name):
+        normalized_name = _normalize_entity_name(name)
+        if normalized == normalized_name:
+            return True
+        if (
+            normalized_name
+            and len(normalized) >= 10
+            and len(normalized_name) >= 10
+            and SequenceMatcher(None, normalized, normalized_name).ratio() >= 0.96
+        ):
             return True
     return False
 
@@ -1916,10 +1925,10 @@ def _is_valid_supplier(
         return False
     if _looks_like_legal_or_footer_text(value):
         return False
-    meaningful_tokens = re.findall(r"[A-Za-zÀ-ÿ]{2,}", value)
-    if len(meaningful_tokens) < 2:
-        return False
     has_form = has_legal_form(value)
+    meaningful_tokens = re.findall(r"[A-Za-zÀ-ÿ]{2,}", value)
+    if len(meaningful_tokens) < 2 and not has_form:
+        return False
     inline_tax = _has_tax_id(value) or _has_iban(value) or "iban" in value.lower()
     has_tax = bool(text and _supplier_has_near_tax_id_or_iban(text, value))
     is_person = looks_like_person(value)
@@ -1930,6 +1939,8 @@ def _is_valid_supplier(
         if not inline_tax and not (is_person and has_tax):
             return False
     if _is_same_entity(value, company_names):
+        return False
+    if _appears_in_customer_context(text, value):
         return False
     if require_tax_id and text and not has_form and not (has_tax or inline_tax):
         return False
@@ -2029,6 +2040,63 @@ def _supplier_has_near_tax_id_or_iban(text: str, supplier: str, window: int = 4)
     return False
 
 
+def _appears_in_customer_context(
+    text: Optional[str],
+    candidate: Optional[str],
+    lookahead: int = 6,
+) -> bool:
+    if not text or not candidate:
+        return False
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    normalized_candidate = _normalize_entity_name(_trim_company_name(candidate))
+    if not normalized_candidate:
+        return False
+
+    client_keywords = [
+        "cliente",
+        "datos cliente",
+        "datos fiscales",
+        "destinatario factura",
+        "facturado a",
+        "receptor",
+        "enviado a",
+        "bill to",
+        "ship to",
+    ]
+    stop_keywords = [
+        "factura nº",
+        "factura no",
+        "nº de factura",
+        "artículo",
+        "articulo",
+        "material/",
+        "concepto",
+        "b.impon",
+        "b. impon",
+        "forma de pago",
+    ]
+
+    for idx, line in enumerate(lines):
+        lowered = line.lower()
+        if not any(keyword in lowered for keyword in client_keywords):
+            continue
+        end = min(len(lines), idx + lookahead + 1)
+        for candidate_idx in range(idx, end):
+            if candidate_idx > idx:
+                candidate_lower = lines[candidate_idx].lower()
+                if any(stop in candidate_lower for stop in stop_keywords):
+                    break
+            normalized_line = _normalize_entity_name(lines[candidate_idx])
+            if not normalized_line:
+                continue
+            if (
+                normalized_candidate == normalized_line
+                or normalized_candidate in normalized_line
+            ):
+                return True
+    return False
+
+
 def _strip_inline_tax_id(value: str) -> str:
     if not value:
         return value
@@ -2084,6 +2152,9 @@ def _extract_supplier_candidates(text: str, company_names=None) -> List[Tuple[st
     ]
 
     header_lines = lines[:8]
+    client_context_lines = {
+        idx for idx, line in enumerate(lines) if _appears_in_customer_context(text, line)
+    }
     line_counts = {}
     for line in lines:
         key = _normalize_entity_name(line)
@@ -2093,6 +2164,8 @@ def _extract_supplier_candidates(text: str, company_names=None) -> List[Tuple[st
     candidates: List[Tuple[str, int]] = []
     for idx, line in enumerate(lines):
         lowered = line.lower()
+        if idx in client_context_lines:
+            continue
         if any(keyword in lowered for keyword in client_keywords):
             continue
         if any(keyword in lowered for keyword in operational_keywords) and not _contains_legal_form(line):
