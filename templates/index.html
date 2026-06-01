@@ -140,6 +140,14 @@
             <h3 id="paymentCalendarTitle"></h3>
             <button class="calendar-nav-btn" type="button" id="paymentNextMonth" aria-label="Mes siguiente">›</button>
           </div>
+          <div id="paymentDueAlert" class="payment-alert" hidden>
+            <div class="payment-alert-copy">
+              <p class="payment-alert-eyebrow">Hoy</p>
+              <h3>Pagos pendientes para hoy</h3>
+              <p id="paymentDueAlertSummary"></p>
+            </div>
+            <div id="paymentDueAlertList" class="payment-alert-list"></div>
+          </div>
           <p id="paymentMonthTotal" class="payment-month-total"></p>
           <p id="paymentMonthEmpty" class="empty">Sin movimientos previstos este mes.</p>
           <div id="paymentCalendar" class="calendar-wrapper"></div>

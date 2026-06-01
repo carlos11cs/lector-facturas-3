@@ -164,6 +164,7 @@ invoices_table = Table(
     Column("vat_breakdown", Text),
     Column("payment_date", String),
     Column("payment_dates", Text),
+    Column("payment_completed_dates", Text),
     Column("ocr_text", Text),
     Column("extraction_source", String),
     Column("confidence_score", Float),
@@ -192,6 +193,7 @@ income_invoices_table = Table(
     Column("vat_breakdown", Text),
     Column("payment_date", String),
     Column("payment_dates", Text),
+    Column("payment_completed_dates", Text),
     Column("ocr_text", Text),
     Column("extraction_source", String),
     Column("confidence_score", Float),
@@ -234,6 +236,7 @@ no_invoice_table = Table(
     Column("expense_date", String, nullable=False),
     Column("payment_date", String),
     Column("payment_dates", Text),
+    Column("payment_completed_dates", Text),
     Column("concept", String, nullable=False),
     Column("amount", Float, nullable=False),
     Column("interest_amount", Float),
@@ -260,6 +263,7 @@ loan_installments_table = Table(
     Column("bank_name", String),
     Column("concept", String, nullable=False),
     Column("payment_date", String, nullable=False),
+    Column("payment_completed_dates", Text),
     Column("total_amount", Float, nullable=False),
     Column("interest_amount", Float, nullable=False),
     Column("principal_amount", Float, nullable=False),
@@ -325,6 +329,7 @@ def init_db():
     add_column_if_missing("invoices", "company_id", "INTEGER")
     add_column_if_missing("invoices", "payment_date", "VARCHAR")
     add_column_if_missing("invoices", "payment_dates", "TEXT")
+    add_column_if_missing("invoices", "payment_completed_dates", "TEXT")
     add_column_if_missing("invoices", "vat_breakdown", "TEXT")
     add_column_if_missing("invoices", "extraction_source", "VARCHAR")
     add_column_if_missing("invoices", "confidence_score", "FLOAT")
@@ -403,11 +408,13 @@ def init_db():
     add_column_if_missing("no_invoice_expenses", "withholding_amount", "FLOAT")
     add_column_if_missing("no_invoice_expenses", "payment_date", "VARCHAR")
     add_column_if_missing("no_invoice_expenses", "payment_dates", "TEXT")
+    add_column_if_missing("no_invoice_expenses", "payment_completed_dates", "TEXT")
     add_column_if_missing("no_invoice_expenses", "expense_family", "VARCHAR")
     add_column_if_missing("no_invoice_expenses", "expense_subtype", "VARCHAR")
     add_column_if_missing("no_invoice_expenses", "pnl_bucket", "VARCHAR")
     add_column_if_missing("no_invoice_expenses", "tax_model_targets", "TEXT")
     add_column_if_missing("loan_installments", "bank_name", "VARCHAR")
+    add_column_if_missing("loan_installments", "payment_completed_dates", "TEXT")
     add_column_if_missing("companies", "vat_regime", "VARCHAR DEFAULT 'general'")
     add_column_if_missing("companies", "tax_periodicity", "VARCHAR DEFAULT 'quarterly'")
     add_column_if_missing("companies", "files_model_303", "BOOLEAN DEFAULT TRUE")
@@ -472,6 +479,7 @@ def init_db():
     add_column_if_missing("income_invoices", "company_id", "INTEGER")
     add_column_if_missing("income_invoices", "payment_date", "VARCHAR")
     add_column_if_missing("income_invoices", "payment_dates", "TEXT")
+    add_column_if_missing("income_invoices", "payment_completed_dates", "TEXT")
     add_column_if_missing("income_invoices", "vat_breakdown", "TEXT")
     add_column_if_missing("income_invoices", "extraction_source", "VARCHAR")
     add_column_if_missing("income_invoices", "confidence_score", "FLOAT")
@@ -952,6 +960,43 @@ def parse_payment_dates(raw_value):
         if norm:
             normalized.append(norm)
     return sorted(set(normalized))
+
+
+def serialize_payment_dates(values):
+    normalized = parse_payment_dates(values)
+    return json.dumps(normalized) if normalized else None
+
+
+def replace_payment_date(values, previous_date, next_date):
+    previous = normalize_date(previous_date)
+    updated = normalize_date(next_date)
+    dates = parse_payment_dates(values)
+    if previous:
+        dates = [item for item in dates if item != previous]
+    if updated:
+        dates.append(updated)
+    return sorted(set(dates))
+
+
+def is_trackable_payment_type(item_type):
+    return item_type in {"expense", "no_invoice", "loan_installment"}
+
+
+def resolve_payment_status(item_type, payment_date, completed_dates, today_iso=None):
+    if not is_trackable_payment_type(item_type):
+        return None
+    normalized_date = normalize_date(payment_date)
+    if not normalized_date:
+        return None
+    completed = set(parse_payment_dates(completed_dates))
+    if normalized_date in completed:
+        return "paid"
+    today_value = today_iso or date.today().isoformat()
+    if normalized_date < today_value:
+        return "overdue"
+    if normalized_date == today_value:
+        return "due_today"
+    return "pending"
 
 
 def parse_tax_model_targets(raw_value):
@@ -3363,6 +3408,7 @@ def list_payments():
                 invoices_table.c.invoice_date,
                 invoices_table.c.payment_date,
                 invoices_table.c.payment_dates,
+                invoices_table.c.payment_completed_dates,
                 invoices_table.c.supplier,
                 invoices_table.c.base_amount,
                 invoices_table.c.vat_rate,
@@ -3395,6 +3441,7 @@ def list_payments():
                 no_invoice_table.c.expense_date,
                 no_invoice_table.c.payment_date,
                 no_invoice_table.c.payment_dates,
+                no_invoice_table.c.payment_completed_dates,
                 no_invoice_table.c.concept,
                 no_invoice_table.c.amount,
                 no_invoice_table.c.interest_amount,
@@ -3423,6 +3470,7 @@ def list_payments():
             select(
                 loan_installments_table.c.id,
                 loan_installments_table.c.payment_date,
+                loan_installments_table.c.payment_completed_dates,
                 loan_installments_table.c.bank_name,
                 loan_installments_table.c.concept,
                 loan_installments_table.c.total_amount,
@@ -3446,6 +3494,7 @@ def list_payments():
                 income_invoices_table.c.invoice_date,
                 income_invoices_table.c.payment_date,
                 income_invoices_table.c.payment_dates,
+                income_invoices_table.c.payment_completed_dates,
                 income_invoices_table.c.client,
                 income_invoices_table.c.base_amount,
                 income_invoices_table.c.vat_rate,
@@ -3477,8 +3526,12 @@ def list_payments():
 
     items = []
     day_totals = {}
+    today_iso = today.isoformat()
+    today_pending = []
+    overdue_pending_count = 0
     for row in expense_rows:
         payment_dates = parse_payment_dates(row.get("payment_dates"))
+        completed_dates = parse_payment_dates(row.get("payment_completed_dates"))
         if not payment_dates:
             fallback = row["payment_date"] or compute_payment_date(row["invoice_date"], None)
             if fallback:
@@ -3496,6 +3549,23 @@ def list_payments():
                 payment_dt = date.fromisoformat(payment_date)
             except ValueError:
                 continue
+            status = resolve_payment_status("expense", payment_date, completed_dates, today_iso)
+            if status == "paid":
+                continue
+            if status == "due_today":
+                today_pending.append(
+                    {
+                        "id": row["id"],
+                        "type": "expense",
+                        "counterparty": row["supplier"],
+                        "concept": row["original_filename"],
+                        "payment_date": payment_date,
+                        "amount": amount,
+                        "status": status,
+                    }
+                )
+            elif status == "overdue":
+                overdue_pending_count += 1
             if payment_dt < start or payment_dt > end:
                 continue
             day = payment_dt.day
@@ -3507,9 +3577,10 @@ def list_payments():
                     "concept": row["original_filename"],
                     "payment_date": payment_date,
                     "payment_dates": payment_dates,
+                    "payment_completed_dates": completed_dates,
                     "invoice_date": row["invoice_date"],
                     "base_amount": float(row["base_amount"] or 0),
-            "vat_rate": int(row["vat_rate"]) if row["vat_rate"] is not None and row["vat_rate"] >= 0 else None,
+                    "vat_rate": int(row["vat_rate"]) if row["vat_rate"] is not None and row["vat_rate"] >= 0 else None,
                     "vat_amount": float(row["vat_amount"] or 0)
                     if row["vat_amount"] is not None
                     else None,
@@ -3520,12 +3591,14 @@ def list_payments():
                     "pnl_bucket": row.get("pnl_bucket"),
                     "tax_model_targets": parse_tax_model_targets(row.get("tax_model_targets")),
                     "amount": amount,
+                    "status": status,
                     "type": "expense",
                 }
             )
 
     for row in no_invoice_rows:
         payment_dates = parse_payment_dates(row.get("payment_dates"))
+        completed_dates = parse_payment_dates(row.get("payment_completed_dates"))
         if not payment_dates:
             fallback_payment_date = row.get("payment_date") or row.get("expense_date")
             if fallback_payment_date:
@@ -3548,6 +3621,23 @@ def list_payments():
                 payment_dt = date.fromisoformat(payment_date)
             except ValueError:
                 continue
+            status = resolve_payment_status("no_invoice", payment_date, completed_dates, today_iso)
+            if status == "paid":
+                continue
+            if status == "due_today":
+                today_pending.append(
+                    {
+                        "id": row["id"],
+                        "type": "no_invoice",
+                        "counterparty": row.get("concept"),
+                        "concept": row.get("concept"),
+                        "payment_date": payment_date,
+                        "amount": amount,
+                        "status": status,
+                    }
+                )
+            elif status == "overdue":
+                overdue_pending_count += 1
             if payment_dt < start or payment_dt > end:
                 continue
             day = payment_dt.day
@@ -3559,6 +3649,7 @@ def list_payments():
                     "concept": row.get("concept"),
                     "payment_date": payment_date,
                     "payment_dates": payment_dates,
+                    "payment_completed_dates": completed_dates,
                     "invoice_date": row.get("expense_date"),
                     "base_amount": amount,
                     "vat_rate": 0,
@@ -3583,18 +3674,39 @@ def list_payments():
                     "tax_model_targets": parse_tax_model_targets(row.get("tax_model_targets")),
                     "amount": amount,
                     "gross_amount": gross_amount,
+                    "status": status,
                     "type": "no_invoice",
                 }
             )
 
     for row in loan_rows:
         payment_date = row.get("payment_date")
+        completed_dates = parse_payment_dates(row.get("payment_completed_dates"))
         if not payment_date:
             continue
         try:
             payment_dt = date.fromisoformat(payment_date)
         except ValueError:
             continue
+        status = resolve_payment_status(
+            "loan_installment", payment_date, completed_dates, today_iso
+        )
+        if status == "paid":
+            continue
+        if status == "due_today":
+            today_pending.append(
+                {
+                    "id": row["id"],
+                    "type": "loan_installment",
+                    "counterparty": row.get("bank_name") or row.get("concept"),
+                    "concept": row.get("concept"),
+                    "payment_date": payment_date,
+                    "amount": float(row.get("total_amount") or 0),
+                    "status": status,
+                }
+            )
+        elif status == "overdue":
+            overdue_pending_count += 1
         if payment_dt < start or payment_dt > end:
             continue
         day = payment_dt.day
@@ -3608,6 +3720,7 @@ def list_payments():
                 "bank_name": row.get("bank_name"),
                 "payment_date": payment_date,
                 "payment_dates": [payment_date],
+                "payment_completed_dates": completed_dates,
                 "invoice_date": payment_date,
                 "base_amount": float(row.get("principal_amount") or 0),
                 "vat_rate": 0,
@@ -3616,6 +3729,7 @@ def list_payments():
                 "interest_amount": float(row.get("interest_amount") or 0),
                 "principal_amount": float(row.get("principal_amount") or 0),
                 "amount": amount,
+                "status": status,
                 "type": "loan_installment",
             }
         )
@@ -3650,6 +3764,9 @@ def list_payments():
                     "concept": row["original_filename"],
                     "payment_date": payment_date,
                     "payment_dates": payment_dates,
+                    "payment_completed_dates": parse_payment_dates(
+                        row.get("payment_completed_dates")
+                    ),
                     "invoice_date": row["invoice_date"],
                     "base_amount": float(row["base_amount"] or 0),
                     "vat_rate": int(row["vat_rate"]) if row["vat_rate"] is not None and row["vat_rate"] >= 0 else None,
@@ -3658,6 +3775,7 @@ def list_payments():
                     else None,
                     "total_amount": total_amount,
                     "amount": amount,
+                    "status": None,
                     "type": "income",
                 }
             )
@@ -3674,7 +3792,17 @@ def list_payments():
         day_totals[day] = round(day_totals.get(day, 0.0) + amount, 2)
         items.append(item)
 
-    return jsonify({"items": items, "dayTotals": day_totals})
+    today_pending.sort(key=lambda item: (item["payment_date"], item.get("counterparty") or ""))
+    items.sort(key=lambda item: (item.get("payment_date") or "", item.get("counterparty") or ""))
+
+    return jsonify(
+        {
+            "items": items,
+            "dayTotals": day_totals,
+            "todayPending": today_pending,
+            "overduePendingCount": overdue_pending_count,
+        }
+    )
 
 
 @app.route("/api/fiscal-models/summary")
@@ -4033,12 +4161,54 @@ def update_invoice(invoice_id):
     )
     payment_date = compute_payment_date(invoice_date, payment_date_input)
     if payment_only:
-        if not payment_date_input:
+        mark_paid = bool(payload.get("mark_paid") or payload.get("markPaid"))
+        reference_date = normalize_date(
+            payload.get("payment_reference_date") or payload.get("paymentReferenceDate")
+        )
+        if not payment_date_input and not mark_paid:
             return jsonify({"ok": False, "errors": ["Fecha de pago obligatoria."]}), 400
-        updates = {"payment_date": payment_date_input}
-        if payment_dates_payload is not None:
-            updates["payment_dates"] = json.dumps(payment_dates) if payment_dates else None
         with engine.begin() as conn:
+            current_row = conn.execute(
+                select(
+                    invoices_table.c.payment_date,
+                    invoices_table.c.payment_dates,
+                    invoices_table.c.payment_completed_dates,
+                    invoices_table.c.invoice_date,
+                )
+                .where(invoices_table.c.id == invoice_id)
+                .where(invoices_table.c.user_id == data_owner_id)
+                .where(invoices_table.c.company_id == company_id)
+            ).mappings().first()
+            if not current_row:
+                return jsonify({"ok": False, "errors": ["Factura no encontrada."]}), 404
+            existing_dates = parse_payment_dates(current_row.get("payment_dates"))
+            if not existing_dates:
+                fallback = current_row.get("payment_date") or compute_payment_date(
+                    current_row.get("invoice_date"), None
+                )
+                if fallback:
+                    existing_dates = [fallback]
+            updated_dates = payment_dates if payment_dates_payload is not None else existing_dates
+            if payment_date_input and reference_date and reference_date != normalize_date(payment_date_input):
+                updated_dates = replace_payment_date(updated_dates, reference_date, payment_date_input)
+            elif payment_date_input and not updated_dates:
+                updated_dates = [normalize_date(payment_date_input)]
+            completed_dates = parse_payment_dates(current_row.get("payment_completed_dates"))
+            if payment_date_input and reference_date and reference_date != normalize_date(payment_date_input):
+                completed_dates = replace_payment_date(
+                    completed_dates, reference_date, payment_date_input
+                )
+            if mark_paid:
+                completed_dates = replace_payment_date(
+                    completed_dates,
+                    None,
+                    reference_date or normalize_date(payment_date_input),
+                )
+            updates = {
+                "payment_date": updated_dates[0] if updated_dates else normalize_date(payment_date_input),
+                "payment_dates": serialize_payment_dates(updated_dates),
+                "payment_completed_dates": serialize_payment_dates(completed_dates),
+            }
             result = conn.execute(
                 invoices_table.update()
                 .where(invoices_table.c.id == invoice_id)
@@ -4046,8 +4216,6 @@ def update_invoice(invoice_id):
                 .where(invoices_table.c.company_id == company_id)
                 .values(**updates)
             )
-        if result.rowcount == 0:
-            return jsonify({"ok": False, "errors": ["Factura no encontrada."]}), 404
         return jsonify({"ok": True})
     supplier = (payload.get("supplier") or "").strip()
     base_amount = parse_amount(str(payload.get("base_amount") or ""))
@@ -4113,7 +4281,11 @@ def update_invoice(invoice_id):
         **expense_profile,
     }
     if payment_dates_payload is not None:
-        updates["payment_dates"] = json.dumps(payment_dates) if payment_dates else None
+        updates["payment_dates"] = serialize_payment_dates(payment_dates)
+    if "payment_completed_dates" in payload or "paymentCompletedDates" in payload:
+        updates["payment_completed_dates"] = serialize_payment_dates(
+            payload.get("payment_completed_dates") or payload.get("paymentCompletedDates")
+        )
 
     with engine.begin() as conn:
         result = conn.execute(
@@ -4366,12 +4538,54 @@ def update_income_invoice(invoice_id):
     )
     payment_date = compute_payment_date(invoice_date, payment_date_input)
     if payment_only:
-        if not payment_date_input:
+        mark_paid = bool(payload.get("mark_paid") or payload.get("markPaid"))
+        reference_date = normalize_date(
+            payload.get("payment_reference_date") or payload.get("paymentReferenceDate")
+        )
+        if not payment_date_input and not mark_paid:
             return jsonify({"ok": False, "errors": ["Fecha de pago obligatoria."]}), 400
-        updates = {"payment_date": payment_date_input}
-        if payment_dates_payload is not None:
-            updates["payment_dates"] = json.dumps(payment_dates) if payment_dates else None
         with engine.begin() as conn:
+            current_row = conn.execute(
+                select(
+                    income_invoices_table.c.payment_date,
+                    income_invoices_table.c.payment_dates,
+                    income_invoices_table.c.payment_completed_dates,
+                    income_invoices_table.c.invoice_date,
+                )
+                .where(income_invoices_table.c.id == invoice_id)
+                .where(income_invoices_table.c.user_id == data_owner_id)
+                .where(income_invoices_table.c.company_id == company_id)
+            ).mappings().first()
+            if not current_row:
+                return jsonify({"ok": False, "errors": ["Factura no encontrada."]}), 404
+            existing_dates = parse_payment_dates(current_row.get("payment_dates"))
+            if not existing_dates:
+                fallback = current_row.get("payment_date") or compute_payment_date(
+                    current_row.get("invoice_date"), None
+                )
+                if fallback:
+                    existing_dates = [fallback]
+            updated_dates = payment_dates if payment_dates_payload is not None else existing_dates
+            if payment_date_input and reference_date and reference_date != normalize_date(payment_date_input):
+                updated_dates = replace_payment_date(updated_dates, reference_date, payment_date_input)
+            elif payment_date_input and not updated_dates:
+                updated_dates = [normalize_date(payment_date_input)]
+            completed_dates = parse_payment_dates(current_row.get("payment_completed_dates"))
+            if payment_date_input and reference_date and reference_date != normalize_date(payment_date_input):
+                completed_dates = replace_payment_date(
+                    completed_dates, reference_date, payment_date_input
+                )
+            if mark_paid:
+                completed_dates = replace_payment_date(
+                    completed_dates,
+                    None,
+                    reference_date or normalize_date(payment_date_input),
+                )
+            updates = {
+                "payment_date": updated_dates[0] if updated_dates else normalize_date(payment_date_input),
+                "payment_dates": serialize_payment_dates(updated_dates),
+                "payment_completed_dates": serialize_payment_dates(completed_dates),
+            }
             result = conn.execute(
                 income_invoices_table.update()
                 .where(income_invoices_table.c.id == invoice_id)
@@ -4379,8 +4593,6 @@ def update_income_invoice(invoice_id):
                 .where(income_invoices_table.c.company_id == company_id)
                 .values(**updates)
             )
-        if result.rowcount == 0:
-            return jsonify({"ok": False, "errors": ["Factura no encontrada."]}), 404
         return jsonify({"ok": True})
     client = (payload.get("client") or "").strip()
     base_amount = parse_amount(str(payload.get("base_amount") or ""))
@@ -4438,7 +4650,11 @@ def update_income_invoice(invoice_id):
         "vat_breakdown": vat_breakdown_json,
     }
     if payment_dates_payload is not None:
-        updates["payment_dates"] = json.dumps(payment_dates) if payment_dates else None
+        updates["payment_dates"] = serialize_payment_dates(payment_dates)
+    if "payment_completed_dates" in payload or "paymentCompletedDates" in payload:
+        updates["payment_completed_dates"] = serialize_payment_dates(
+            payload.get("payment_completed_dates") or payload.get("paymentCompletedDates")
+        )
 
     with engine.begin() as conn:
         result = conn.execute(
@@ -4686,7 +4902,11 @@ def update_no_invoice_expense(expense_id):
     payment_only = payload.get("payment_only") or payload.get("paymentOnly")
     expense_date = payload.get("expense_date") or ""
     if payment_only:
-        if not expense_date:
+        mark_paid = bool(payload.get("mark_paid") or payload.get("markPaid"))
+        reference_date = normalize_date(
+            payload.get("payment_reference_date") or payload.get("paymentReferenceDate")
+        )
+        if not expense_date and not mark_paid:
             return jsonify({"ok": False, "errors": ["Fecha obligatoria."]}), 400
         payment_dates = parse_payment_dates(payload.get("payment_dates") or payload.get("paymentDates"))
         payment_date = compute_payment_date(
@@ -4696,19 +4916,53 @@ def update_no_invoice_expense(expense_id):
             or (payment_dates[0] if payment_dates else expense_date),
         )
         with engine.begin() as conn:
+            current_row = conn.execute(
+                select(
+                    no_invoice_table.c.expense_date,
+                    no_invoice_table.c.payment_date,
+                    no_invoice_table.c.payment_dates,
+                    no_invoice_table.c.payment_completed_dates,
+                )
+                .where(no_invoice_table.c.id == expense_id)
+                .where(no_invoice_table.c.user_id == data_owner_id)
+                .where(no_invoice_table.c.company_id == company_id)
+            ).mappings().first()
+            if not current_row:
+                return jsonify({"ok": False, "errors": ["Gasto no encontrado."]}), 404
+            effective_expense_date = expense_date or current_row.get("expense_date")
+            existing_dates = parse_payment_dates(current_row.get("payment_dates"))
+            if not existing_dates:
+                fallback = current_row.get("payment_date") or effective_expense_date
+                if fallback:
+                    existing_dates = [fallback]
+            updated_dates = payment_dates if payment_dates else existing_dates
+            if payment_date and reference_date and reference_date != normalize_date(payment_date):
+                updated_dates = replace_payment_date(updated_dates, reference_date, payment_date)
+            elif payment_date and not updated_dates:
+                updated_dates = [normalize_date(payment_date)]
+            completed_dates = parse_payment_dates(current_row.get("payment_completed_dates"))
+            if payment_date and reference_date and reference_date != normalize_date(payment_date):
+                completed_dates = replace_payment_date(
+                    completed_dates, reference_date, payment_date
+                )
+            if mark_paid:
+                completed_dates = replace_payment_date(
+                    completed_dates,
+                    None,
+                    reference_date or normalize_date(payment_date),
+                )
             result = conn.execute(
                 no_invoice_table.update()
                 .where(no_invoice_table.c.id == expense_id)
                 .where(no_invoice_table.c.user_id == data_owner_id)
                 .where(no_invoice_table.c.company_id == company_id)
                 .values(
-                    expense_date=expense_date,
-                    payment_date=payment_date,
-                    payment_dates=json.dumps(payment_dates) if payment_dates else json.dumps([payment_date]),
+                    expense_date=effective_expense_date,
+                    payment_date=updated_dates[0] if updated_dates else normalize_date(payment_date),
+                    payment_dates=serialize_payment_dates(updated_dates),
+                    payment_completed_dates=serialize_payment_dates(completed_dates),
                 )
             )
-        if result.rowcount == 0:
-            return jsonify({"ok": False, "errors": ["Gasto no encontrado."]}), 404
         return jsonify({"ok": True})
     concept = (payload.get("concept") or "").strip()
     amount = parse_amount(str(payload.get("amount") or ""))
@@ -4801,27 +5055,32 @@ def update_no_invoice_expense(expense_id):
     )
 
     with engine.begin() as conn:
+        values = {
+            "expense_date": expense_date,
+            "payment_date": payment_date,
+            "payment_dates": serialize_payment_dates(payment_dates if payment_dates else [payment_date]),
+            "concept": concept,
+            "amount": amount,
+            "interest_amount": interest_amount,
+            "vat_deductible": vat_deductible,
+            "vat_rate": vat_rate,
+            "vat_amount": vat_amount,
+            "base_amount": base_amount,
+            "withholding_amount": withholding_amount,
+            "expense_type": expense_type,
+            "deductible": bool(deductible),
+            **expense_profile,
+        }
+        if "payment_completed_dates" in payload or "paymentCompletedDates" in payload:
+            values["payment_completed_dates"] = serialize_payment_dates(
+                payload.get("payment_completed_dates") or payload.get("paymentCompletedDates")
+            )
         result = conn.execute(
             no_invoice_table.update()
             .where(no_invoice_table.c.id == expense_id)
             .where(no_invoice_table.c.user_id == data_owner_id)
             .where(no_invoice_table.c.company_id == company_id)
-            .values(
-                expense_date=expense_date,
-                payment_date=payment_date,
-                payment_dates=json.dumps(payment_dates) if payment_dates else json.dumps([payment_date]),
-                concept=concept,
-                amount=amount,
-                interest_amount=interest_amount,
-                vat_deductible=vat_deductible,
-                vat_rate=vat_rate,
-                vat_amount=vat_amount,
-                base_amount=base_amount,
-                withholding_amount=withholding_amount,
-                expense_type=expense_type,
-                deductible=bool(deductible),
-                **expense_profile,
-            )
+            .values(**values)
         )
 
     if result.rowcount == 0:
@@ -4977,6 +5236,7 @@ def create_loan_installment():
                 bank_name=bank_name or None,
                 concept=concept,
                 payment_date=payment_date,
+                payment_completed_dates=None,
                 total_amount=total_amount,
                 interest_amount=interest_amount,
                 principal_amount=principal_amount,
@@ -5004,18 +5264,45 @@ def update_loan_installment(installment_id):
     bank_name = (payload.get("bank_name") or payload.get("bankName") or "").strip()
 
     if payment_only:
-        if not payment_date:
+        mark_paid = bool(payload.get("mark_paid") or payload.get("markPaid"))
+        reference_date = normalize_date(
+            payload.get("payment_reference_date") or payload.get("paymentReferenceDate")
+        )
+        if not payment_date and not mark_paid:
             return jsonify({"ok": False, "errors": ["Fecha de pago obligatoria."]}), 400
         with engine.begin() as conn:
+            current_row = conn.execute(
+                select(
+                    loan_installments_table.c.payment_date,
+                    loan_installments_table.c.payment_completed_dates,
+                )
+                .where(loan_installments_table.c.id == installment_id)
+                .where(loan_installments_table.c.user_id == data_owner_id)
+                .where(loan_installments_table.c.company_id == company_id)
+            ).mappings().first()
+            if not current_row:
+                return jsonify({"ok": False, "errors": ["Cuota no encontrada."]}), 404
+            completed_dates = parse_payment_dates(current_row.get("payment_completed_dates"))
+            if payment_date and reference_date and reference_date != normalize_date(payment_date):
+                completed_dates = replace_payment_date(
+                    completed_dates, reference_date, payment_date
+                )
+            if mark_paid:
+                completed_dates = replace_payment_date(
+                    completed_dates,
+                    None,
+                    reference_date or normalize_date(payment_date) or current_row.get("payment_date"),
+                )
             result = conn.execute(
                 loan_installments_table.update()
                 .where(loan_installments_table.c.id == installment_id)
                 .where(loan_installments_table.c.user_id == data_owner_id)
                 .where(loan_installments_table.c.company_id == company_id)
-                .values(payment_date=payment_date)
+                .values(
+                    payment_date=normalize_date(payment_date) or current_row.get("payment_date"),
+                    payment_completed_dates=serialize_payment_dates(completed_dates),
+                )
             )
-            if result.rowcount == 0:
-                return jsonify({"ok": False, "errors": ["Cuota no encontrada."]}), 404
         return jsonify({"ok": True})
 
     errors = []
@@ -5045,19 +5332,24 @@ def update_loan_installment(installment_id):
 
     principal_amount = round(total_amount - interest_amount, 2)
     with engine.begin() as conn:
+        values = {
+            "payment_date": payment_date,
+            "bank_name": bank_name or None,
+            "concept": concept,
+            "total_amount": total_amount,
+            "interest_amount": interest_amount,
+            "principal_amount": principal_amount,
+        }
+        if "payment_completed_dates" in payload or "paymentCompletedDates" in payload:
+            values["payment_completed_dates"] = serialize_payment_dates(
+                payload.get("payment_completed_dates") or payload.get("paymentCompletedDates")
+            )
         result = conn.execute(
             loan_installments_table.update()
             .where(loan_installments_table.c.id == installment_id)
             .where(loan_installments_table.c.user_id == data_owner_id)
             .where(loan_installments_table.c.company_id == company_id)
-            .values(
-                payment_date=payment_date,
-                bank_name=bank_name or None,
-                concept=concept,
-                total_amount=total_amount,
-                interest_amount=interest_amount,
-                principal_amount=principal_amount,
-            )
+            .values(**values)
         )
         if result.rowcount == 0:
             return jsonify({"ok": False, "errors": ["Cuota no encontrada."]}), 404

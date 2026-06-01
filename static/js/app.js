@@ -810,6 +810,9 @@ const paymentPrevMonth = document.getElementById("paymentPrevMonth");
 const paymentNextMonth = document.getElementById("paymentNextMonth");
 const paymentMonthTotal = document.getElementById("paymentMonthTotal");
 const paymentMonthEmpty = document.getElementById("paymentMonthEmpty");
+const paymentDueAlert = document.getElementById("paymentDueAlert");
+const paymentDueAlertSummary = document.getElementById("paymentDueAlertSummary");
+const paymentDueAlertList = document.getElementById("paymentDueAlertList");
 const paymentDayTitle = document.getElementById("paymentDayTitle");
 const paymentDayList = document.getElementById("paymentDayList");
 const paymentDayTotal = document.getElementById("paymentDayTotal");
@@ -4886,6 +4889,12 @@ function renderPaymentCalendar(month, year, data) {
     if (total > 0) {
       cell.classList.add("has-payments");
     }
+    const dayItems = itemsByDay[day] || [];
+    if (dayItems.some((item) => item.status === "overdue")) {
+      cell.classList.add("has-overdue-payments");
+    } else if (dayItems.some((item) => item.status === "due_today")) {
+      cell.classList.add("has-due-today-payments");
+    }
     if (selectedPaymentDay === day) {
       cell.classList.add("selected");
     }
@@ -4898,7 +4907,131 @@ function renderPaymentCalendar(month, year, data) {
   }
 
   paymentCalendar.appendChild(grid);
+  renderPaymentDueAlert(data);
   renderPaymentDayDetails(selectedPaymentDay);
+}
+
+function getPaymentActionLabel(item) {
+  return item.type === "income" ? "Cobrado" : "Pagado";
+}
+
+function renderPaymentDueAlert(data) {
+  if (!paymentDueAlert || !paymentDueAlertSummary || !paymentDueAlertList) {
+    return;
+  }
+  const todayPending = Array.isArray(data?.todayPending) ? data.todayPending : [];
+  const overduePendingCount = Number(data?.overduePendingCount || 0);
+  if (!todayPending.length && overduePendingCount <= 0) {
+    paymentDueAlert.hidden = true;
+    paymentDueAlertList.innerHTML = "";
+    paymentDueAlertSummary.textContent = "";
+    return;
+  }
+
+  paymentDueAlert.hidden = false;
+  paymentDueAlertList.innerHTML = "";
+  if (todayPending.length) {
+    todayPending.forEach((item) => {
+      const row = document.createElement("div");
+      row.className = "payment-alert-item";
+      row.textContent = `${item.counterparty || item.concept || "Pago"} · ${
+        item.payment_date
+      } · ${formatCurrency(item.amount)}`;
+      paymentDueAlertList.appendChild(row);
+    });
+  } else if (overduePendingCount > 0) {
+    const row = document.createElement("div");
+    row.className = "payment-alert-item";
+    row.textContent = "No vencen pagos hoy, pero tienes pagos atrasados pendientes.";
+    paymentDueAlertList.appendChild(row);
+  }
+  const summaryParts = [];
+  if (todayPending.length) {
+    summaryParts.push(
+      `${todayPending.length} pago${todayPending.length === 1 ? "" : "s"} vencen hoy`
+    );
+  }
+  if (overduePendingCount > 0) {
+    summaryParts.push(
+      `${overduePendingCount} pago${overduePendingCount === 1 ? "" : "s"} atrasado${
+        overduePendingCount === 1 ? "" : "s"
+      }`
+    );
+  }
+  paymentDueAlertSummary.textContent = summaryParts.join(" · ");
+}
+
+function markPaymentAsPaid(item) {
+  const payload = {
+    payment_only: true,
+    mark_paid: true,
+    payment_date: item.payment_date,
+    payment_reference_date: item.payment_date,
+  };
+  if (item.type === "loan_installment") {
+    return fetch(withCompanyParam(`/api/loan-installments/${item.id}`), {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (!data.ok) {
+          alert((data.errors || ["Error al actualizar."]).join("\n"));
+          return;
+        }
+        refreshPayments();
+        refreshLoanInstallments();
+      })
+      .catch(() => {
+        alert("No se pudo marcar el pago como realizado.");
+      });
+  }
+  if (item.type === "no_invoice") {
+    payload.expense_date = item.invoice_date;
+    return fetch(withCompanyParam(`/api/expenses/no-invoice/${item.id}`), {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (!data.ok) {
+          alert((data.errors || ["Error al actualizar."]).join("\n"));
+          return;
+        }
+        refreshPayments();
+      })
+      .catch(() => {
+        alert("No se pudo marcar el pago como realizado.");
+      });
+  }
+  if (item.type === "expense") {
+    payload.invoice_date = item.invoice_date;
+    return fetch(withCompanyParam(`/api/invoices/${item.id}`), {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (!data.ok) {
+          alert((data.errors || ["Error al actualizar."]).join("\n"));
+          return;
+        }
+        refreshPayments();
+      })
+      .catch(() => {
+        alert("No se pudo marcar el pago como realizado.");
+      });
+  }
+  return Promise.resolve();
 }
 
 function updatePaymentDateFromCalendar(item, newDate) {
@@ -4909,6 +5042,7 @@ function updatePaymentDateFromCalendar(item, newDate) {
   if (item.type === "loan_installment") {
     const payload = {
       payment_date: newDate,
+      payment_reference_date: item.payment_date,
       payment_only: true,
     };
     const url = withCompanyParam(`/api/loan-installments/${item.id}`);
@@ -4934,7 +5068,9 @@ function updatePaymentDateFromCalendar(item, newDate) {
   }
   if (item.type === "no_invoice") {
     const payload = {
-      expense_date: newDate,
+      expense_date: item.invoice_date,
+      payment_date: newDate,
+      payment_reference_date: item.payment_date,
       payment_only: true,
     };
     const url = withCompanyParam(`/api/expenses/no-invoice/${item.id}`);
@@ -4971,6 +5107,7 @@ function updatePaymentDateFromCalendar(item, newDate) {
   const payload = {
     invoice_date: item.invoice_date,
     payment_date: newDate,
+    payment_reference_date: item.payment_date,
     payment_dates: updatedDates,
     payment_only: true,
   };
@@ -5027,6 +5164,9 @@ function renderPaymentDayDetails(day) {
   items.forEach((item) => {
     const row = document.createElement("div");
     row.className = "payment-day-item";
+    if (item.status) {
+      row.classList.add(`is-${item.status}`);
+    }
     const supplier = document.createElement("span");
     let label = "Proveedor";
     if (item.type === "income") {
@@ -5043,6 +5183,16 @@ function renderPaymentDayDetails(day) {
     concept.textContent = item.concept || "Factura";
     const dateLabel = document.createElement("span");
     dateLabel.textContent = item.payment_date;
+    if (item.status === "overdue") {
+      dateLabel.className = "payment-status-label payment-status-overdue";
+      dateLabel.textContent = `Atrasado · ${item.payment_date}`;
+    } else if (item.status === "due_today") {
+      dateLabel.className = "payment-status-label payment-status-due-today";
+      dateLabel.textContent = `Vence hoy · ${item.payment_date}`;
+    } else if (item.status === "pending") {
+      dateLabel.className = "payment-status-label payment-status-pending";
+      dateLabel.textContent = `Pendiente · ${item.payment_date}`;
+    }
     const amount = document.createElement("span");
     const amountLabel =
       item.type === "income"
@@ -5089,10 +5239,23 @@ function renderPaymentDayDetails(day) {
         editContainer.appendChild(cancelBtn);
       });
     }
+    let paidBtn = null;
+    if (["expense", "no_invoice", "loan_installment"].includes(item.type)) {
+      paidBtn = document.createElement("button");
+      paidBtn.type = "button";
+      paidBtn.className = "button primary small";
+      paidBtn.textContent = getPaymentActionLabel(item);
+      paidBtn.addEventListener("click", () => {
+        markPaymentAsPaid(item);
+      });
+    }
     row.appendChild(supplier);
     row.appendChild(concept);
     row.appendChild(dateLabel);
     row.appendChild(amount);
+    if (paidBtn) {
+      row.appendChild(paidBtn);
+    }
     if (editBtn) {
       row.appendChild(editBtn);
     }
@@ -5293,6 +5456,8 @@ function fetchPayments(month, year) {
     .then((data) => ({
       items: data.items || [],
       dayTotals: data.dayTotals || {},
+      todayPending: data.todayPending || [],
+      overduePendingCount: data.overduePendingCount || 0,
     }));
 }
 
