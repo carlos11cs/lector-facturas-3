@@ -4916,6 +4916,17 @@ function getPaymentActionLabel(item) {
   return item.type === "income" ? "Cobrado" : "Pagado";
 }
 
+function getAlertPendingPayments(data) {
+  if (!Array.isArray(data?.items)) {
+    return [];
+  }
+  return data.items.filter(
+    (item) =>
+      ["expense", "no_invoice", "loan_installment"].includes(item.type) &&
+      (item.status === "due_today" || item.status === "overdue")
+  );
+}
+
 function executePaymentStatusUpdate(item, payload, options = {}) {
   const { silent = false, skipRefresh = false } = options;
   const handleSuccess = () => {
@@ -5011,6 +5022,7 @@ function renderPaymentDueAlert(data) {
   if (!paymentDueAlert || !paymentDueAlertSummary || !paymentDueAlertList) {
     return;
   }
+  const alertPendingPayments = getAlertPendingPayments(data);
   const todayPending = Array.isArray(data?.todayPending) ? data.todayPending : [];
   const overduePendingCount = Number(data?.overduePendingCount || 0);
   if (!todayPending.length && overduePendingCount <= 0) {
@@ -5022,7 +5034,7 @@ function renderPaymentDueAlert(data) {
 
   paymentDueAlert.hidden = false;
   if (paymentClearAllBtn) {
-    paymentClearAllBtn.style.display = todayPending.length ? "inline-flex" : "none";
+    paymentClearAllBtn.style.display = alertPendingPayments.length ? "inline-flex" : "none";
   }
   paymentDueAlertList.innerHTML = "";
   if (todayPending.length) {
@@ -8137,10 +8149,7 @@ function bindEvents() {
   }
   if (paymentClearAllBtn) {
     paymentClearAllBtn.addEventListener("click", () => {
-      const todayPending = Array.isArray(currentPayments?.todayPending)
-        ? currentPayments.todayPending
-        : [];
-      markPaymentsAsPaid(todayPending);
+      markPaymentsAsPaid(getAlertPendingPayments(currentPayments));
     });
   }
   if (selectFilesBtn && fileInput) {
