@@ -3550,8 +3550,6 @@ def list_payments():
             except ValueError:
                 continue
             status = resolve_payment_status("expense", payment_date, completed_dates, today_iso)
-            if status == "paid":
-                continue
             if status == "due_today":
                 today_pending.append(
                     {
@@ -3622,8 +3620,6 @@ def list_payments():
             except ValueError:
                 continue
             status = resolve_payment_status("no_invoice", payment_date, completed_dates, today_iso)
-            if status == "paid":
-                continue
             if status == "due_today":
                 today_pending.append(
                     {
@@ -3691,8 +3687,6 @@ def list_payments():
         status = resolve_payment_status(
             "loan_installment", payment_date, completed_dates, today_iso
         )
-        if status == "paid":
-            continue
         if status == "due_today":
             today_pending.append(
                 {

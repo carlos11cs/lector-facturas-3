@@ -430,6 +430,12 @@ h1 {
   margin: 0;
 }
 
+.payment-alert-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: flex-start;
+}
+
 .payment-alert-eyebrow {
   font-size: 0.78rem;
   font-weight: 700;
@@ -509,6 +515,11 @@ h1 {
   border-color: rgba(198, 40, 40, 0.32);
 }
 
+.payment-day-item.is-paid {
+  background: #f2faf5;
+  border-color: rgba(34, 124, 101, 0.24);
+}
+
 .payment-status-label {
   display: inline-flex;
   align-items: center;
@@ -532,6 +543,11 @@ h1 {
 .payment-status-pending {
   background: rgba(34, 124, 101, 0.1);
   color: var(--accent-strong);
+}
+
+.payment-status-paid {
+  background: rgba(34, 124, 101, 0.14);
+  color: #1f6b53;
 }
 
 .payment-day-total {

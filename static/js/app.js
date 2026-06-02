@@ -813,6 +813,7 @@ const paymentMonthEmpty = document.getElementById("paymentMonthEmpty");
 const paymentDueAlert = document.getElementById("paymentDueAlert");
 const paymentDueAlertSummary = document.getElementById("paymentDueAlertSummary");
 const paymentDueAlertList = document.getElementById("paymentDueAlertList");
+const paymentClearAllBtn = document.getElementById("paymentClearAllBtn");
 const paymentDayTitle = document.getElementById("paymentDayTitle");
 const paymentDayList = document.getElementById("paymentDayList");
 const paymentDayTotal = document.getElementById("paymentDayTotal");
@@ -4915,6 +4916,97 @@ function getPaymentActionLabel(item) {
   return item.type === "income" ? "Cobrado" : "Pagado";
 }
 
+function executePaymentStatusUpdate(item, payload, options = {}) {
+  const { silent = false, skipRefresh = false } = options;
+  const handleSuccess = () => {
+    if (skipRefresh) {
+      return;
+    }
+    refreshPayments();
+    if (item.type === "loan_installment") {
+      refreshLoanInstallments();
+    }
+  };
+  const handleFailure = (data) => {
+    if (!silent) {
+      alert((data?.errors || ["Error al actualizar."]).join("\n"));
+    }
+  };
+  const handleCatch = (message) => {
+    if (!silent) {
+      alert(message);
+    }
+  };
+
+  if (item.type === "loan_installment") {
+    return fetch(withCompanyParam(`/api/loan-installments/${item.id}`), {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (!data.ok) {
+          handleFailure(data);
+          return false;
+        }
+        handleSuccess();
+        return true;
+      })
+      .catch(() => {
+        handleCatch("No se pudo marcar el pago como realizado.");
+        return false;
+      });
+  }
+  if (item.type === "no_invoice") {
+    return fetch(withCompanyParam(`/api/expenses/no-invoice/${item.id}`), {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (!data.ok) {
+          handleFailure(data);
+          return false;
+        }
+        handleSuccess();
+        return true;
+      })
+      .catch(() => {
+        handleCatch("No se pudo marcar el pago como realizado.");
+        return false;
+      });
+  }
+  if (item.type === "expense") {
+    return fetch(withCompanyParam(`/api/invoices/${item.id}`), {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (!data.ok) {
+          handleFailure(data);
+          return false;
+        }
+        handleSuccess();
+        return true;
+      })
+      .catch(() => {
+        handleCatch("No se pudo marcar el pago como realizado.");
+        return false;
+      });
+  }
+  return Promise.resolve(false);
+}
+
 function renderPaymentDueAlert(data) {
   if (!paymentDueAlert || !paymentDueAlertSummary || !paymentDueAlertList) {
     return;
@@ -4929,6 +5021,9 @@ function renderPaymentDueAlert(data) {
   }
 
   paymentDueAlert.hidden = false;
+  if (paymentClearAllBtn) {
+    paymentClearAllBtn.style.display = todayPending.length ? "inline-flex" : "none";
+  }
   paymentDueAlertList.innerHTML = "";
   if (todayPending.length) {
     todayPending.forEach((item) => {
@@ -4961,6 +5056,42 @@ function renderPaymentDueAlert(data) {
   paymentDueAlertSummary.textContent = summaryParts.join(" · ");
 }
 
+function markPaymentsAsPaid(items) {
+  const pendingItems = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (!pendingItems.length) {
+    return Promise.resolve();
+  }
+  const updates = pendingItems.map((item) => {
+    const payload = {
+      payment_only: true,
+      mark_paid: true,
+      payment_date: item.payment_date,
+      payment_reference_date: item.payment_date,
+    };
+    if (item.type === "no_invoice") {
+      payload.expense_date = item.invoice_date;
+    } else if (item.type === "expense") {
+      payload.invoice_date = item.invoice_date;
+    }
+    return executePaymentStatusUpdate(item, payload, {
+      silent: true,
+      skipRefresh: true,
+    });
+  });
+
+  return Promise.all(updates).then((results) => {
+    if (results.every(Boolean)) {
+      refreshPayments();
+      if (pendingItems.some((item) => item.type === "loan_installment")) {
+        refreshLoanInstallments();
+      }
+      return;
+    }
+    alert("No se pudieron marcar todos los pagos como realizados.");
+    refreshPayments();
+  });
+}
+
 function markPaymentAsPaid(item) {
   const payload = {
     payment_only: true,
@@ -4968,70 +5099,12 @@ function markPaymentAsPaid(item) {
     payment_date: item.payment_date,
     payment_reference_date: item.payment_date,
   };
-  if (item.type === "loan_installment") {
-    return fetch(withCompanyParam(`/api/loan-installments/${item.id}`), {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        if (!data.ok) {
-          alert((data.errors || ["Error al actualizar."]).join("\n"));
-          return;
-        }
-        refreshPayments();
-        refreshLoanInstallments();
-      })
-      .catch(() => {
-        alert("No se pudo marcar el pago como realizado.");
-      });
-  }
   if (item.type === "no_invoice") {
     payload.expense_date = item.invoice_date;
-    return fetch(withCompanyParam(`/api/expenses/no-invoice/${item.id}`), {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        if (!data.ok) {
-          alert((data.errors || ["Error al actualizar."]).join("\n"));
-          return;
-        }
-        refreshPayments();
-      })
-      .catch(() => {
-        alert("No se pudo marcar el pago como realizado.");
-      });
-  }
-  if (item.type === "expense") {
+  } else if (item.type === "expense") {
     payload.invoice_date = item.invoice_date;
-    return fetch(withCompanyParam(`/api/invoices/${item.id}`), {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        if (!data.ok) {
-          alert((data.errors || ["Error al actualizar."]).join("\n"));
-          return;
-        }
-        refreshPayments();
-      })
-      .catch(() => {
-        alert("No se pudo marcar el pago como realizado.");
-      });
   }
-  return Promise.resolve();
+  return executePaymentStatusUpdate(item, payload);
 }
 
 function updatePaymentDateFromCalendar(item, newDate) {
@@ -5192,6 +5265,9 @@ function renderPaymentDayDetails(day) {
     } else if (item.status === "pending") {
       dateLabel.className = "payment-status-label payment-status-pending";
       dateLabel.textContent = `Pendiente · ${item.payment_date}`;
+    } else if (item.status === "paid") {
+      dateLabel.className = "payment-status-label payment-status-paid";
+      dateLabel.textContent = `Pagado · ${item.payment_date}`;
     }
     const amount = document.createElement("span");
     const amountLabel =
@@ -5240,7 +5316,10 @@ function renderPaymentDayDetails(day) {
       });
     }
     let paidBtn = null;
-    if (["expense", "no_invoice", "loan_installment"].includes(item.type)) {
+    if (
+      ["expense", "no_invoice", "loan_installment"].includes(item.type) &&
+      item.status !== "paid"
+    ) {
       paidBtn = document.createElement("button");
       paidBtn.type = "button";
       paidBtn.className = "button primary small";
@@ -8055,6 +8134,14 @@ function bindEvents() {
   }
   if (paymentNextMonth) {
     paymentNextMonth.addEventListener("click", () => shiftCalendarMonth(1));
+  }
+  if (paymentClearAllBtn) {
+    paymentClearAllBtn.addEventListener("click", () => {
+      const todayPending = Array.isArray(currentPayments?.todayPending)
+        ? currentPayments.todayPending
+        : [];
+      markPaymentsAsPaid(todayPending);
+    });
   }
   if (selectFilesBtn && fileInput) {
     selectFilesBtn.addEventListener("click", () => {
