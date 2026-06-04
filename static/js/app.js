@@ -383,7 +383,162 @@ function updateBalanceTotals() {
 
 function syncBalanceStatementFields(netResult) {
   setBalanceInputValue("bsEquityResult", netResult);
+  setBalanceInputValue("bsLiabPayables", getBalancePayablesEstimate());
+  setBalanceInputValue("bsAssetCash", getBalanceCashEstimate());
   updateBalanceTotals();
+}
+
+function normalizePaymentDateList(value) {
+  if (Array.isArray(value)) {
+    return value.filter(Boolean).map((item) => String(item));
+  }
+  if (!value) {
+    return [];
+  }
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        return parsed.filter(Boolean).map((item) => String(item));
+      }
+    } catch (error) {
+      return [value];
+    }
+    return [];
+  }
+  return [];
+}
+
+function splitScheduledAmounts(totalAmount, paymentDates) {
+  const total = Number(totalAmount) || 0;
+  const dates = normalizePaymentDateList(paymentDates);
+  if (!dates.length) {
+    return [];
+  }
+  const splitAmount = roundAmount(total / dates.length);
+  const amounts = new Array(dates.length).fill(splitAmount);
+  if (dates.length > 1) {
+    amounts[dates.length - 1] = roundAmount(total - splitAmount * (dates.length - 1));
+  }
+  return amounts;
+}
+
+function getInvoicePaymentDates(invoice) {
+  const paymentDates = normalizePaymentDateList(invoice?.payment_dates);
+  if (paymentDates.length) {
+    return paymentDates;
+  }
+  if (invoice?.payment_date) {
+    return [invoice.payment_date];
+  }
+  if (invoice?.invoice_date) {
+    return [computePaymentDate(invoice.invoice_date, invoice.payment_date)];
+  }
+  return [];
+}
+
+function getNoInvoicePaymentDates(expense) {
+  const paymentDates = normalizePaymentDateList(expense?.payment_dates);
+  if (paymentDates.length) {
+    return paymentDates;
+  }
+  if (expense?.payment_date) {
+    return [expense.payment_date];
+  }
+  if (expense?.expense_date) {
+    return [expense.expense_date];
+  }
+  return [];
+}
+
+function getNoInvoiceCashAmount(expense) {
+  if (!expense) {
+    return 0;
+  }
+  if (expense.expense_type === "amortizacion") {
+    return 0;
+  }
+  if (expense.expense_type === "nomina") {
+    return Number(expense.payroll_net_amount) || Math.max((Number(expense.amount) || 0) - (Number(expense.withholding_amount) || 0), 0);
+  }
+  return Math.max((Number(expense.amount) || 0) - (Number(expense.withholding_amount) || 0), 0);
+}
+
+function sumOutstandingScheduledAmount(totalAmount, paymentDates, completedDates) {
+  const dates = normalizePaymentDateList(paymentDates);
+  if (!dates.length) {
+    return 0;
+  }
+  const completed = new Set(normalizePaymentDateList(completedDates));
+  const amounts = splitScheduledAmounts(totalAmount, dates);
+  return dates.reduce((sum, paymentDate, index) => {
+    if (completed.has(paymentDate)) {
+      return sum;
+    }
+    return sum + (Number(amounts[index]) || 0);
+  }, 0);
+}
+
+function getBalancePayablesEstimate() {
+  const invoicePayables = (currentInvoices || []).reduce((sum, invoice) => {
+    return (
+      sum +
+      sumOutstandingScheduledAmount(
+        Number(invoice.total_amount) || 0,
+        getInvoicePaymentDates(invoice),
+        invoice.payment_completed_dates
+      )
+    );
+  }, 0);
+
+  const noInvoicePayables = (currentNoInvoiceExpenses || []).reduce((sum, expense) => {
+    if (expense.expense_type === "prestamo" || expense.expense_type === "amortizacion") {
+      return sum;
+    }
+    return (
+      sum +
+      sumOutstandingScheduledAmount(
+        getNoInvoiceCashAmount(expense),
+        getNoInvoicePaymentDates(expense),
+        expense.payment_completed_dates
+      )
+    );
+  }, 0);
+
+  return roundAmount(invoicePayables + noInvoicePayables);
+}
+
+function getBalanceCashEstimate() {
+  const baseTotals = currentBillingSummary?.baseTotals || {};
+  const vatTotals = currentBillingSummary?.vatTotals || {};
+  const billingTreasury =
+    (Number(baseTotals["0"]) || 0) +
+    (Number(baseTotals["4"]) || 0) +
+    (Number(baseTotals["10"]) || 0) +
+    (Number(baseTotals["21"]) || 0) +
+    (Number(vatTotals["0"]) || 0) +
+    (Number(vatTotals["4"]) || 0) +
+    (Number(vatTotals["10"]) || 0) +
+    (Number(vatTotals["21"]) || 0);
+  const incomeInvoicesTreasury = (currentIncomeInvoices || []).reduce(
+    (sum, invoice) => sum + (Number(invoice.total_amount) || 0),
+    0
+  );
+  const invoiceOutflows = (currentInvoices || []).reduce(
+    (sum, invoice) => sum + (Number(invoice.total_amount) || 0),
+    0
+  );
+  const noInvoiceOutflows = (currentNoInvoiceExpenses || []).reduce(
+    (sum, expense) => sum + getNoInvoiceCashAmount(expense),
+    0
+  );
+  const loanOutflows = (currentLoanInstallments || []).reduce(
+    (sum, installment) => sum + (Number(installment.total_amount) || 0),
+    0
+  );
+  return roundAmount(
+    billingTreasury + incomeInvoicesTreasury - invoiceOutflows - noInvoiceOutflows - loanOutflows
+  );
 }
 
 function setPnlInputValue(id, value, auto = false) {

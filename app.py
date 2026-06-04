@@ -3343,6 +3343,8 @@ def list_invoices():
                 invoices_table.c.total_amount,
                 invoices_table.c.vat_breakdown,
                 invoices_table.c.payment_date,
+                invoices_table.c.payment_dates,
+                invoices_table.c.payment_completed_dates,
                 invoices_table.c.extraction_source,
                 invoices_table.c.confidence_score,
                 invoices_table.c.original_filename,
@@ -3364,6 +3366,9 @@ def list_invoices():
             "invoice_date": row["invoice_date"],
             "payment_date": row["payment_date"]
             or compute_payment_date(row["invoice_date"], row["payment_date"]),
+            "payment_dates": parse_payment_dates(row.get("payment_dates"))
+            or ([row["payment_date"]] if row.get("payment_date") else []),
+            "payment_completed_dates": parse_payment_dates(row.get("payment_completed_dates")),
             "supplier": row["supplier"],
             "base_amount": float(row["base_amount"]),
             "vat_rate": int(row["vat_rate"]) if row["vat_rate"] is not None and row["vat_rate"] >= 0 else None,
@@ -3464,6 +3469,7 @@ def list_payments():
                 no_invoice_table.c.payroll_employer_cost_amount,
                 no_invoice_table.c.expense_type,
                 no_invoice_table.c.deductible,
+                no_invoice_table.c.payment_completed_dates,
                 no_invoice_table.c.expense_family,
                 no_invoice_table.c.expense_subtype,
                 no_invoice_table.c.pnl_bucket,
@@ -4391,6 +4397,7 @@ def list_income_invoices():
                 income_invoices_table.c.invoice_date,
                 income_invoices_table.c.payment_date,
                 income_invoices_table.c.payment_dates,
+                income_invoices_table.c.payment_completed_dates,
                 income_invoices_table.c.client,
                 income_invoices_table.c.base_amount,
                 income_invoices_table.c.vat_rate,
@@ -4413,7 +4420,9 @@ def list_income_invoices():
             "invoice_date": row["invoice_date"],
             "payment_date": row["payment_date"]
             or compute_payment_date(row["invoice_date"], row["payment_date"]),
-            "payment_dates": row.get("payment_dates"),
+            "payment_dates": parse_payment_dates(row.get("payment_dates"))
+            or ([row["payment_date"]] if row.get("payment_date") else []),
+            "payment_completed_dates": parse_payment_dates(row.get("payment_completed_dates")),
             "client": row["client"],
             "base_amount": float(row["base_amount"]),
             "vat_rate": int(row["vat_rate"]) if row["vat_rate"] is not None else None,
@@ -4770,6 +4779,7 @@ def list_no_invoice_expenses():
             "payment_date": row["payment_date"] or row["expense_date"],
             "payment_dates": parse_payment_dates(row["payment_dates"])
             or ([row["payment_date"]] if row["payment_date"] else [row["expense_date"]]),
+            "payment_completed_dates": parse_payment_dates(row.get("payment_completed_dates")),
             "concept": row["concept"],
             "amount": float(row["amount"]),
             "interest_amount": float(row["interest_amount"] or 0),
@@ -5290,6 +5300,7 @@ def list_loan_installments():
             select(
                 loan_installments_table.c.id,
                 loan_installments_table.c.payment_date,
+                loan_installments_table.c.payment_completed_dates,
                 loan_installments_table.c.bank_name,
                 loan_installments_table.c.concept,
                 loan_installments_table.c.total_amount,
@@ -5309,6 +5320,7 @@ def list_loan_installments():
         {
             "id": row["id"],
             "payment_date": row["payment_date"],
+            "payment_completed_dates": parse_payment_dates(row.get("payment_completed_dates")),
             "bank_name": row.get("bank_name"),
             "concept": row["concept"],
             "total_amount": float(row["total_amount"] or 0),
