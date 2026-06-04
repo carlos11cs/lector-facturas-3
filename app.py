@@ -245,6 +245,11 @@ no_invoice_table = Table(
     Column("vat_amount", Float),
     Column("base_amount", Float),
     Column("withholding_amount", Float),
+    Column("payroll_employee_name", String),
+    Column("payroll_period", String),
+    Column("payroll_net_amount", Float),
+    Column("payroll_total_deductions_amount", Float),
+    Column("payroll_employer_cost_amount", Float),
     Column("expense_type", String, nullable=False),
     Column("deductible", Boolean, nullable=False),
     Column("expense_family", String),
@@ -406,6 +411,11 @@ def init_db():
     add_column_if_missing("no_invoice_expenses", "vat_amount", "FLOAT")
     add_column_if_missing("no_invoice_expenses", "base_amount", "FLOAT")
     add_column_if_missing("no_invoice_expenses", "withholding_amount", "FLOAT")
+    add_column_if_missing("no_invoice_expenses", "payroll_employee_name", "VARCHAR")
+    add_column_if_missing("no_invoice_expenses", "payroll_period", "VARCHAR")
+    add_column_if_missing("no_invoice_expenses", "payroll_net_amount", "FLOAT")
+    add_column_if_missing("no_invoice_expenses", "payroll_total_deductions_amount", "FLOAT")
+    add_column_if_missing("no_invoice_expenses", "payroll_employer_cost_amount", "FLOAT")
     add_column_if_missing("no_invoice_expenses", "payment_date", "VARCHAR")
     add_column_if_missing("no_invoice_expenses", "payment_dates", "TEXT")
     add_column_if_missing("no_invoice_expenses", "payment_completed_dates", "TEXT")
@@ -3450,6 +3460,11 @@ def list_payments():
                 no_invoice_table.c.vat_amount,
                 no_invoice_table.c.base_amount,
                 no_invoice_table.c.withholding_amount,
+                no_invoice_table.c.payroll_employee_name,
+                no_invoice_table.c.payroll_period,
+                no_invoice_table.c.payroll_net_amount,
+                no_invoice_table.c.payroll_total_deductions_amount,
+                no_invoice_table.c.payroll_employer_cost_amount,
                 no_invoice_table.c.expense_type,
                 no_invoice_table.c.deductible,
                 no_invoice_table.c.expense_family,
@@ -3605,13 +3620,18 @@ def list_payments():
             continue
         withholding_amount = float(row.get("withholding_amount") or 0)
         gross_amount = float(row.get("amount") or 0)
+        payroll_net_amount = float(row.get("payroll_net_amount") or 0)
+        payable_amount = (
+            payroll_net_amount
+            if row.get("expense_type") == "nomina" and payroll_net_amount > 0
+            else max(round(gross_amount - withholding_amount, 2), 0.0)
+        )
         split_count = len(payment_dates)
-        split_amount = round(max(round(gross_amount - withholding_amount, 2), 0.0) / split_count, 2)
+        split_amount = round(payable_amount / split_count, 2)
         amounts = [split_amount] * split_count
         if split_count > 1:
             amounts[-1] = round(
-                max(round(gross_amount - withholding_amount, 2), 0.0)
-                - split_amount * (split_count - 1),
+                payable_amount - split_amount * (split_count - 1),
                 2,
             )
         for payment_date, amount in zip(payment_dates, amounts):
@@ -3650,11 +3670,20 @@ def list_payments():
                     "base_amount": amount,
                     "vat_rate": 0,
                     "vat_amount": 0,
-                    "total_amount": max(round(gross_amount - withholding_amount, 2), 0.0),
+                    "total_amount": payable_amount,
                     "expense_category": "without_invoice",
                     "expense_type": row.get("expense_type"),
                     "interest_amount": float(row.get("interest_amount") or 0),
                     "withholding_amount": withholding_amount,
+                    "payroll_employee_name": row.get("payroll_employee_name"),
+                    "payroll_period": row.get("payroll_period"),
+                    "payroll_net_amount": payroll_net_amount,
+                    "payroll_total_deductions_amount": float(
+                        row.get("payroll_total_deductions_amount") or 0
+                    ),
+                    "payroll_employer_cost_amount": float(
+                        row.get("payroll_employer_cost_amount") or 0
+                    ),
                     "vat_deductible": bool(row.get("vat_deductible"))
                     if row.get("vat_deductible") is not None
                     else False,
@@ -4747,6 +4776,11 @@ def list_no_invoice_expenses():
             "vat_amount": float(row["vat_amount"] or 0),
             "base_amount": float(row["base_amount"] or row["amount"] or 0),
             "withholding_amount": float(row["withholding_amount"] or 0),
+            "payroll_employee_name": row.get("payroll_employee_name"),
+            "payroll_period": row.get("payroll_period"),
+            "payroll_net_amount": float(row["payroll_net_amount"] or 0),
+            "payroll_total_deductions_amount": float(row["payroll_total_deductions_amount"] or 0),
+            "payroll_employer_cost_amount": float(row["payroll_employer_cost_amount"] or 0),
             "expense_type": row["expense_type"],
             "deductible": bool(row["deductible"]),
             "expense_family": row.get("expense_family"),
@@ -4779,6 +4813,25 @@ def create_no_invoice_expense():
     vat_amount_payload = parse_amount(str(payload.get("vat_amount") or ""))
     base_amount_payload = parse_amount(str(payload.get("base_amount") or ""))
     withholding_amount = parse_amount(str(payload.get("withholding_amount") or ""))
+    payroll_employee_name = (payload.get("payroll_employee_name") or payload.get("payrollEmployeeName") or "").strip()
+    payroll_period = (payload.get("payroll_period") or payload.get("payrollPeriod") or "").strip()
+    payroll_net_amount = parse_amount(
+        str(payload.get("payroll_net_amount") or payload.get("payrollNetAmount") or "")
+    )
+    payroll_total_deductions_amount = parse_amount(
+        str(
+            payload.get("payroll_total_deductions_amount")
+            or payload.get("payrollTotalDeductionsAmount")
+            or ""
+        )
+    )
+    payroll_employer_cost_amount = parse_amount(
+        str(
+            payload.get("payroll_employer_cost_amount")
+            or payload.get("payrollEmployerCostAmount")
+            or ""
+        )
+    )
     deductible = payload.get("deductible")
     payment_date = compute_payment_date(
         expense_date,
@@ -4815,6 +4868,29 @@ def create_no_invoice_expense():
         deductible = False
     else:
         interest_amount = None
+
+    if expense_type in {"nomina", "seguridad_social"}:
+        deductible = True
+        vat_deductible = False
+        vat_rate = None
+        vat_amount = None
+    if expense_type == "nomina":
+        if payroll_total_deductions_amount is None and amount is not None and payroll_net_amount is not None:
+            payroll_total_deductions_amount = round(max(amount - payroll_net_amount, 0), 2)
+        if payroll_net_amount is None and amount is not None and payroll_total_deductions_amount is not None:
+            payroll_net_amount = round(max(amount - payroll_total_deductions_amount, 0), 2)
+        if payroll_net_amount is not None and amount is not None and payroll_net_amount > amount:
+            errors.append("El líquido no puede superar el bruto de la nómina.")
+        if (
+            payroll_total_deductions_amount is not None
+            and amount is not None
+            and payroll_total_deductions_amount > amount
+        ):
+            errors.append("Las deducciones no pueden superar el bruto de la nómina.")
+        if payroll_employer_cost_amount is not None and payroll_employer_cost_amount < 0:
+            errors.append("El coste empresa es inválido.")
+        if not payroll_employee_name and concept:
+            payroll_employee_name = concept.replace("Nomina", "").replace("Nómina", "").strip(" -")
 
     if withholding_amount < 0:
         errors.append("Retención inválida.")
@@ -4875,6 +4951,11 @@ def create_no_invoice_expense():
                 vat_amount=vat_amount,
                 base_amount=base_amount,
                 withholding_amount=withholding_amount,
+                payroll_employee_name=payroll_employee_name or None,
+                payroll_period=payroll_period or None,
+                payroll_net_amount=payroll_net_amount,
+                payroll_total_deductions_amount=payroll_total_deductions_amount,
+                payroll_employer_cost_amount=payroll_employer_cost_amount,
                 expense_type=expense_type,
                 deductible=bool(deductible),
                 **expense_profile,
@@ -4967,6 +5048,25 @@ def update_no_invoice_expense(expense_id):
     vat_amount_payload = parse_amount(str(payload.get("vat_amount") or ""))
     base_amount_payload = parse_amount(str(payload.get("base_amount") or ""))
     withholding_amount = parse_amount(str(payload.get("withholding_amount") or ""))
+    payroll_employee_name = (payload.get("payroll_employee_name") or payload.get("payrollEmployeeName") or "").strip()
+    payroll_period = (payload.get("payroll_period") or payload.get("payrollPeriod") or "").strip()
+    payroll_net_amount = parse_amount(
+        str(payload.get("payroll_net_amount") or payload.get("payrollNetAmount") or "")
+    )
+    payroll_total_deductions_amount = parse_amount(
+        str(
+            payload.get("payroll_total_deductions_amount")
+            or payload.get("payrollTotalDeductionsAmount")
+            or ""
+        )
+    )
+    payroll_employer_cost_amount = parse_amount(
+        str(
+            payload.get("payroll_employer_cost_amount")
+            or payload.get("payrollEmployerCostAmount")
+            or ""
+        )
+    )
     deductible = payload.get("deductible")
     payment_dates = parse_payment_dates(payload.get("payment_dates") or payload.get("paymentDates"))
     payment_date = compute_payment_date(
@@ -5004,6 +5104,29 @@ def update_no_invoice_expense(expense_id):
         deductible = False
     else:
         interest_amount = None
+
+    if expense_type in {"nomina", "seguridad_social"}:
+        deductible = True
+        vat_deductible = False
+        vat_rate = None
+        vat_amount = None
+    if expense_type == "nomina":
+        if payroll_total_deductions_amount is None and amount is not None and payroll_net_amount is not None:
+            payroll_total_deductions_amount = round(max(amount - payroll_net_amount, 0), 2)
+        if payroll_net_amount is None and amount is not None and payroll_total_deductions_amount is not None:
+            payroll_net_amount = round(max(amount - payroll_total_deductions_amount, 0), 2)
+        if payroll_net_amount is not None and amount is not None and payroll_net_amount > amount:
+            errors.append("El líquido no puede superar el bruto de la nómina.")
+        if (
+            payroll_total_deductions_amount is not None
+            and amount is not None
+            and payroll_total_deductions_amount > amount
+        ):
+            errors.append("Las deducciones no pueden superar el bruto de la nómina.")
+        if payroll_employer_cost_amount is not None and payroll_employer_cost_amount < 0:
+            errors.append("El coste empresa es inválido.")
+        if not payroll_employee_name and concept:
+            payroll_employee_name = concept.replace("Nomina", "").replace("Nómina", "").strip(" -")
 
     if withholding_amount < 0:
         errors.append("Retención inválida.")
@@ -5061,6 +5184,11 @@ def update_no_invoice_expense(expense_id):
             "vat_amount": vat_amount,
             "base_amount": base_amount,
             "withholding_amount": withholding_amount,
+            "payroll_employee_name": payroll_employee_name or None,
+            "payroll_period": payroll_period or None,
+            "payroll_net_amount": payroll_net_amount,
+            "payroll_total_deductions_amount": payroll_total_deductions_amount,
+            "payroll_employer_cost_amount": payroll_employer_cost_amount,
             "expense_type": expense_type,
             "deductible": bool(deductible),
             **expense_profile,
@@ -5097,6 +5225,15 @@ def update_no_invoice_expense(expense_id):
                 "base_amount": float(base_amount or amount or 0),
                 "expense_type": expense_type,
                 "deductible": bool(deductible),
+                "payroll_employee_name": payroll_employee_name or None,
+                "payroll_period": payroll_period or None,
+                "payroll_net_amount": float(payroll_net_amount or 0),
+                "payroll_total_deductions_amount": float(
+                    payroll_total_deductions_amount or 0
+                ),
+                "payroll_employer_cost_amount": float(
+                    payroll_employer_cost_amount or 0
+                ),
                 **{
                     "expense_family": expense_profile.get("expense_family"),
                     "expense_subtype": expense_profile.get("expense_subtype"),

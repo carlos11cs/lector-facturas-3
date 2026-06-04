@@ -820,6 +820,126 @@ def _extract_explicit_withholding_amount_from_text(text: str) -> Optional[float]
     return None
 
 
+def _extract_payroll_amount_by_label(text: str, labels: List[str]) -> Optional[float]:
+    if not text:
+        return None
+    normalized_text = _normalize_ocr_amount_text(text)
+    amount_pattern = re.compile(r"\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+[.,]\d{2}")
+    lines = [line.strip() for line in normalized_text.splitlines() if line.strip()]
+    for idx, line in enumerate(lines):
+        lowered = line.lower()
+        if not any(label in lowered for label in labels):
+            continue
+        candidates = [line]
+        if idx + 1 < len(lines):
+            candidates.append(lines[idx + 1])
+        for candidate in candidates:
+            matches = amount_pattern.findall(candidate)
+            if matches:
+                parsed = _normalize_amount(matches[-1])
+                if parsed is not None:
+                    return _round_amount(parsed)
+    return None
+
+
+def _extract_payroll_employee_name_from_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for idx, line in enumerate(lines):
+        lowered = line.lower()
+        if any(token in lowered for token in ("trabajador/a", "trabajador", "empleado/a", "empleado")):
+            for offset in range(1, 3):
+                if idx + offset >= len(lines):
+                    break
+                candidate = lines[idx + offset].strip(" :-")
+                if not candidate:
+                    continue
+                if any(ch.isdigit() for ch in candidate):
+                    continue
+                if len(candidate.split()) >= 2 and candidate.upper() == candidate:
+                    return candidate.title()
+                if len(candidate.split()) >= 2:
+                    return candidate
+    uppercase_candidates = [
+        line.strip(" :-")
+        for line in lines
+        if len(line.split()) >= 2 and line.upper() == line and not any(ch.isdigit() for ch in line)
+    ]
+    return uppercase_candidates[0].title() if uppercase_candidates else None
+
+
+def _extract_payroll_period_from_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+    normalized_text = _normalize_ocr_amount_text(text)
+    for line in normalized_text.splitlines():
+        lowered = line.lower()
+        if "periodo" not in lowered and "mens" not in lowered:
+            continue
+        dates = re.findall(r"\d{1,2}[./-]\d{1,2}[./-]\d{2,4}", line)
+        if dates:
+            normalized = _normalize_date(dates[-1].replace(".", "/"))
+            if normalized:
+                return normalized[:7]
+        month_match = re.search(
+            r"\b(ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)[a-z]*\s+(\d{2,4})\b",
+            lowered,
+        )
+        if month_match:
+            month_key, year = month_match.groups()
+            months = {
+                "ene": "01",
+                "feb": "02",
+                "mar": "03",
+                "abr": "04",
+                "may": "05",
+                "jun": "06",
+                "jul": "07",
+                "ago": "08",
+                "sep": "09",
+                "oct": "10",
+                "nov": "11",
+                "dic": "12",
+            }
+            year = f"20{year}" if len(year) == 2 else year
+            return f"{year}-{months[month_key]}"
+    return None
+
+
+def _extract_payroll_fields_from_text(text: str) -> Dict[str, Any]:
+    if not text:
+        return {}
+    gross_amount = _extract_payroll_amount_by_label(
+        text,
+        ["t. devengado", "total devengado", "rem. total", "rem total"],
+    )
+    deductions_amount = _extract_payroll_amount_by_label(
+        text,
+        ["t. a deducir", "total a deducir", "deducciones"],
+    )
+    net_amount = _extract_payroll_amount_by_label(
+        text,
+        ["liquido a percibir", "líquido a percibir", "neto a percibir"],
+    )
+    employer_cost_amount = _extract_payroll_amount_by_label(
+        text,
+        ["coste empresa", "costo empresa"],
+    )
+    if deductions_amount is None and gross_amount is not None and net_amount is not None:
+        deductions_amount = _round_amount(max(gross_amount - net_amount, 0))
+    employee_name = _extract_payroll_employee_name_from_text(text)
+    payroll_period = _extract_payroll_period_from_text(text)
+    return {
+        "employee_name": employee_name,
+        "gross_amount": gross_amount,
+        "payroll_total_deductions_amount": deductions_amount,
+        "payroll_net_amount": net_amount,
+        "payroll_employer_cost_amount": employer_cost_amount,
+        "payroll_period": payroll_period,
+    }
+
+
 def _extract_invoice_date_from_text(text: str) -> Optional[str]:
     if not text:
         return None
@@ -3399,12 +3519,13 @@ def analyze_invoice(
         prompt = (
             "Analiza el siguiente texto extraido de una nomina o documento de coste laboral. "
             "Devuelve SOLO JSON valido con estas claves: "
-            "supplier, invoice_date, payment_terms_days, payment_dates, withholding_amount, totals, vat_breakdown. "
-            "supplier debe ser el emisor o entidad asociada al documento si aparece. "
-            "totals es un objeto con {base, vat, total} (pueden ser null). "
-            "Si no hay IVA, usa vat = 0 o null y deja vat_breakdown vacio. "
-            "withholding_amount es la retencion si aparece en el documento. "
-            "Prioriza fecha, total del documento y retencion. "
+            "employee_name, employer_name, payroll_period, gross_amount, payroll_total_deductions_amount, payroll_net_amount, payroll_employer_cost_amount, withholding_amount, invoice_date, payment_dates. "
+            "employee_name es el trabajador de la nomina. employer_name es la empresa pagadora si aparece. "
+            "gross_amount es el total devengado. payroll_total_deductions_amount es el total a deducir. "
+            "payroll_net_amount es el liquido a percibir. payroll_employer_cost_amount es el coste empresa si aparece. "
+            "withholding_amount es la retencion IRPF si aparece de forma explicita; si no aparece, usa 0 o null. "
+            "No uses claves de IVA salvo que el documento realmente las tenga; en nominas normales no hay IVA. "
+            "Prioriza trabajador, periodo, fecha, bruto, deducciones, liquido y retencion. "
             "payment_dates debe ser una lista de fechas (YYYY-MM-DD) y puede estar vacia. "
             "Usa null si no puedes inferir un dato con seguridad. "
             "No incluyas texto adicional fuera del JSON.\n\n"
@@ -3556,6 +3677,53 @@ def analyze_invoice(
             data.get("total"),
         )
     )
+    payroll_fields = _extract_payroll_fields_from_text(extracted_text) if is_payroll_expense else {}
+    employee_name = (
+        data.get("employee_name")
+        or data.get("worker_name")
+        or data.get("employee")
+        or payroll_fields.get("employee_name")
+    )
+    payroll_period = (
+        data.get("payroll_period")
+        or data.get("period")
+        or payroll_fields.get("payroll_period")
+    )
+    payroll_net_amount = _normalize_amount(
+        _pick_first_non_empty(
+            data.get("payroll_net_amount"),
+            data.get("net_amount"),
+            data.get("liquido_a_percibir"),
+            data.get("liquido"),
+            payroll_fields.get("payroll_net_amount"),
+        )
+    )
+    payroll_total_deductions_amount = _normalize_amount(
+        _pick_first_non_empty(
+            data.get("payroll_total_deductions_amount"),
+            data.get("total_deductions_amount"),
+            data.get("deductions_amount"),
+            payroll_fields.get("payroll_total_deductions_amount"),
+        )
+    )
+    payroll_employer_cost_amount = _normalize_amount(
+        _pick_first_non_empty(
+            data.get("payroll_employer_cost_amount"),
+            data.get("employer_cost_amount"),
+            data.get("coste_empresa"),
+            payroll_fields.get("payroll_employer_cost_amount"),
+        )
+    )
+    gross_amount = _normalize_amount(
+        _pick_first_non_empty(
+            data.get("gross_amount"),
+            data.get("total_devengado"),
+            totals_payload.get("gross"),
+            payroll_fields.get("gross_amount"),
+            base_amount,
+            total_amount,
+        )
+    )
     vat_breakdown = (
         data.get("vat_breakdown")
         or data.get("iva_breakdown")
@@ -3606,6 +3774,14 @@ def analyze_invoice(
             ):
                 heuristic_supplier = None
             provider_name = heuristic_supplier
+        if is_payroll_expense:
+            employer_name = (
+                data.get("employer_name")
+                or data.get("company_name")
+                or data.get("supplier")
+                or provider_name
+            )
+            provider_name = employer_name.strip() if isinstance(employer_name, str) else employer_name
     else:
         client_source_text = embedded_text if pdf_kind == "original" else extracted_text
         client_name = client_name.strip() if isinstance(client_name, str) else client_name
@@ -3634,6 +3810,38 @@ def analyze_invoice(
         _pick_first_non_empty(data.get("payment_terms_days"), data.get("payment_terms")),
     )
     payment_date = payment_dates[0] if payment_dates else None
+
+    if is_payroll_expense:
+        if not payment_dates and invoice_date:
+            payment_dates = [invoice_date]
+            payment_date = invoice_date
+        if invoice_date is None and payroll_period:
+            invoice_date = f"{payroll_period}-01"
+        if gross_amount is not None:
+            base_amount = gross_amount
+            total_amount = gross_amount
+        elif base_amount is not None:
+            gross_amount = base_amount
+            total_amount = base_amount
+        vat_rate = 0
+        vat_amount = 0
+        vat_breakdown = []
+        if (
+            payroll_total_deductions_amount is None
+            and gross_amount is not None
+            and payroll_net_amount is not None
+        ):
+            payroll_total_deductions_amount = _round_amount(
+                max(gross_amount - payroll_net_amount, 0)
+            )
+        if (
+            payroll_net_amount is None
+            and gross_amount is not None
+            and payroll_total_deductions_amount is not None
+        ):
+            payroll_net_amount = _round_amount(
+                max(gross_amount - payroll_total_deductions_amount, 0)
+            )
 
     tax_summary = _extract_tax_summary_from_text(extracted_text)
     base_amount, vat_amount, total_amount, vat_rate, summary_source = _apply_tax_summary_override(
@@ -3744,6 +3952,11 @@ def analyze_invoice(
         "analysis_status": analysis_status,
         "supplier": provider_name,
         "provider_name": provider_name,
+        "employee_name": employee_name.strip() if isinstance(employee_name, str) else employee_name,
+        "payroll_period": payroll_period,
+        "payroll_net_amount": payroll_net_amount,
+        "payroll_total_deductions_amount": payroll_total_deductions_amount,
+        "payroll_employer_cost_amount": payroll_employer_cost_amount,
         "client_name": client_name,
         "client": client_name,
         "invoice_date": invoice_date,

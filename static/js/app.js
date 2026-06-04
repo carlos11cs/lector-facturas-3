@@ -598,7 +598,9 @@ function getEffectivePaymentDates(item) {
     dates.push(item.paymentDate);
   }
   if (!dates.length && item.date) {
-    const fallback = computePaymentDate(item.date, item.paymentDate);
+    const fallback = isPayrollUploadItem(item)
+      ? item.date
+      : computePaymentDate(item.date, item.paymentDate);
     if (fallback) {
       dates.push(fallback);
     }
@@ -716,6 +718,7 @@ const loanEmpty = document.getElementById("loanEmpty");
 const fileInput = document.getElementById("fileInput");
 const folderInput = document.getElementById("folderInput");
 const dropZone = document.getElementById("dropZone");
+const uploadTableHeadCells = document.querySelectorAll("#uploadTable thead th");
 const uploadTableBody = document.querySelector("#uploadTable tbody");
 const emptyMessage = document.getElementById("emptyMessage");
 const uploadBtn = document.getElementById("uploadBtn");
@@ -1237,6 +1240,7 @@ function toggleNoInvoiceVatFields({ typeValue, vatDeductibleValue }) {
   }
   const isLoan = typeValue === "prestamo";
   const blocksVat = isLoan || ["nomina", "seguridad_social"].includes(typeValue);
+  const forceDeductible = ["nomina", "seguridad_social"].includes(typeValue);
   if (blocksVat) {
     noInvoiceVatDeductible.value = "false";
     noInvoiceVatDeductible.disabled = true;
@@ -1254,7 +1258,12 @@ function toggleNoInvoiceVatFields({ typeValue, vatDeductibleValue }) {
     noInvoiceDeductible.value = "true";
     noInvoiceDeductible.disabled = true;
   } else {
-    noInvoiceDeductible.disabled = isLoan;
+    if (forceDeductible) {
+      noInvoiceDeductible.value = "true";
+      noInvoiceDeductible.disabled = true;
+    } else {
+      noInvoiceDeductible.disabled = isLoan;
+    }
     if (!blocksVat) {
       noInvoiceVatBase.value = "";
       noInvoiceVatAmount.value = "";
@@ -2190,6 +2199,29 @@ function updateExpenseUploadPanel(subview = currentExpenseSubview) {
   if (uploadBtn) {
     uploadBtn.textContent = config.buttonLabel;
   }
+  updateExpenseUploadTableHeaders(getExpenseUploadKind(subview));
+}
+
+function updateExpenseUploadTableHeaders(kind = getExpenseUploadKind()) {
+  if (!uploadTableHeadCells || uploadTableHeadCells.length < 8) {
+    return;
+  }
+  const labels =
+    kind === "payroll"
+      ? [
+          "Archivo",
+          "Fecha",
+          "Empleado",
+          "Bruto devengado (€)",
+          "Total deducciones (€)",
+          "Líquido (€)",
+          "Periodo",
+          "",
+        ]
+      : ["Archivo", "Fecha", "Proveedor", "Base imponible", "IVA", "IVA (€)", "Total (€)", ""];
+  uploadTableHeadCells.forEach((cell, index) => {
+    cell.textContent = labels[index] || "";
+  });
 }
 
 function setExpenseMode(mode) {
@@ -2460,6 +2492,9 @@ function addFiles(fileList) {
       vatBreakdown: [],
       vatBreakdownOpen: false,
       expenseUploadKind,
+      payrollPeriod: "",
+      payrollDeductionsAmount: "",
+      payrollEmployerCostAmount: "",
       withholdingAmount: "",
       analysisText: "",
       analysisPending: true,
@@ -2471,6 +2506,7 @@ function addFiles(fileList) {
         date: false,
         supplier: false,
         base: false,
+        payrollDeductionsAmount: false,
         vat: false,
         vatAmount: false,
         total: false,
@@ -2522,6 +2558,262 @@ function addIncomeFiles(fileList) {
   renderIncomeTable();
 }
 
+function appendPendingPaymentDatesRow(item) {
+  const paymentRow = document.createElement("tr");
+  paymentRow.className = "payment-dates-row";
+  const paymentCell = document.createElement("td");
+  paymentCell.colSpan = 8;
+  const paymentWrap = document.createElement("div");
+  paymentWrap.className = "payment-dates-wrap";
+  const paymentLabel = document.createElement("span");
+  paymentLabel.className = "field-label";
+  paymentLabel.textContent = "Fechas de pago";
+  paymentWrap.appendChild(paymentLabel);
+
+  const paymentInputs = document.createElement("div");
+  paymentInputs.className = "payment-dates-inputs";
+  const dates = getEffectivePaymentDates(item);
+  item.paymentDates = dates.slice();
+  item.paymentDate = dates[0] || "";
+
+  const renderPaymentInputs = () => {
+    paymentInputs.innerHTML = "";
+    (item.paymentDates || []).forEach((dateValue, idx) => {
+      const dateInput = document.createElement("input");
+      dateInput.type = "date";
+      dateInput.value = dateValue || "";
+      dateInput.disabled = item.analysisPending;
+      dateInput.addEventListener("change", () => {
+        item.paymentDates[idx] = dateInput.value;
+        item.paymentDate = item.paymentDates[0] || "";
+      });
+      paymentInputs.appendChild(dateInput);
+      if ((item.paymentDates || []).length > 1) {
+        const removeBtn = document.createElement("button");
+        removeBtn.type = "button";
+        removeBtn.className = "button ghost small";
+        removeBtn.textContent = "Quitar";
+        removeBtn.disabled = item.analysisPending;
+        removeBtn.addEventListener("click", () => {
+          item.paymentDates.splice(idx, 1);
+          item.paymentDate = item.paymentDates[0] || "";
+          renderPaymentInputs();
+        });
+        paymentInputs.appendChild(removeBtn);
+      }
+    });
+  };
+  renderPaymentInputs();
+
+  const quickActions = document.createElement("div");
+  quickActions.className = "payment-quick-actions";
+  [15, 30, 60, 90].forEach((days) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "button ghost small";
+    btn.textContent = `${days} días`;
+    btn.disabled = item.analysisPending;
+    btn.addEventListener("click", () => {
+      if (!item.date) {
+        alert("Selecciona primero la fecha del documento.");
+        return;
+      }
+      const newDate = addDaysToISO(item.date, days);
+      item.paymentDates = newDate ? [newDate] : [];
+      item.paymentDate = newDate || "";
+      renderPaymentInputs();
+    });
+    quickActions.appendChild(btn);
+  });
+
+  const addDateBtn = document.createElement("button");
+  addDateBtn.type = "button";
+  addDateBtn.className = "button ghost small";
+  addDateBtn.textContent = "Añadir fecha";
+  addDateBtn.disabled = item.analysisPending;
+  addDateBtn.addEventListener("click", () => {
+    item.paymentDates = item.paymentDates || [];
+    item.paymentDates.push("");
+    renderPaymentInputs();
+  });
+
+  paymentWrap.appendChild(paymentInputs);
+  paymentWrap.appendChild(quickActions);
+  paymentWrap.appendChild(addDateBtn);
+  paymentCell.appendChild(paymentWrap);
+  paymentRow.appendChild(paymentCell);
+  uploadTableBody.appendChild(paymentRow);
+}
+
+function appendPendingStatusRow(item) {
+  if (!item.analysisPending && !item.analysisError) {
+    return;
+  }
+  const statusRow = document.createElement("tr");
+  statusRow.className = "processing-row";
+  if (item.analysisError) {
+    statusRow.classList.add("error");
+  }
+  const statusTd = document.createElement("td");
+  statusTd.colSpan = 8;
+  const statusWrapper = document.createElement("div");
+  statusWrapper.className = "processing-status";
+  if (item.analysisPending) {
+    const spinner = document.createElement("span");
+    spinner.className = "spinner";
+    statusWrapper.appendChild(spinner);
+  }
+  const message = document.createElement("span");
+  message.textContent = item.analysisError
+    ? item.analysisErrorMessage || ANALYSIS_ERROR_MESSAGE
+    : item.analysisQueued
+      ? "Documento en cola… Se analiza de una en una para evitar bloqueos."
+      : "Analizando documento… Puede tardar hasta 1 minuto.";
+  statusWrapper.appendChild(message);
+  statusTd.appendChild(statusWrapper);
+  statusRow.appendChild(statusTd);
+  uploadTableBody.appendChild(statusRow);
+}
+
+function appendPayrollPendingRow(item) {
+  const tr = document.createElement("tr");
+  tr.dataset.id = item.id;
+  if (item.analysisPending) {
+    tr.classList.add("is-processing");
+  }
+
+  const nameTd = document.createElement("td");
+  nameTd.textContent = item.file.name;
+
+  const dateTd = document.createElement("td");
+  const dateInput = document.createElement("input");
+  dateInput.type = "date";
+  dateInput.value = item.date;
+  dateInput.disabled = item.analysisPending;
+  dateInput.addEventListener("change", () => {
+    item.date = dateInput.value;
+    item.touched.date = true;
+    if (!item.paymentDate) {
+      item.paymentDate = item.date;
+    }
+  });
+  dateTd.appendChild(dateInput);
+
+  const employeeTd = document.createElement("td");
+  const employeeInput = document.createElement("input");
+  employeeInput.type = "text";
+  employeeInput.placeholder = "Empleado";
+  employeeInput.value = item.supplier;
+  employeeInput.disabled = item.analysisPending;
+  employeeInput.addEventListener("input", () => {
+    item.supplier = employeeInput.value;
+    item.touched.supplier = true;
+  });
+  employeeTd.appendChild(employeeInput);
+
+  const grossTd = document.createElement("td");
+  const grossInput = document.createElement("input");
+  grossInput.type = "text";
+  grossInput.placeholder = "0,00";
+  grossInput.value = item.base;
+  grossInput.disabled = item.analysisPending;
+  attachAmountInputBehavior(grossInput);
+  grossInput.addEventListener("input", () => {
+    item.base = grossInput.value;
+    item.touched.base = true;
+    const netAmount = getPayrollNetAmount(item);
+    const grossAmount = getPayrollGrossAmount(item);
+    if (grossAmount !== null && netAmount !== null) {
+      item.payrollDeductionsAmount = formatAmountInput(
+        Math.max(grossAmount - netAmount, 0)
+      );
+      deductionsInput.value = item.payrollDeductionsAmount;
+    }
+  });
+  grossTd.appendChild(grossInput);
+
+  const deductionsTd = document.createElement("td");
+  const deductionsInput = document.createElement("input");
+  deductionsInput.type = "text";
+  deductionsInput.placeholder = "0,00";
+  deductionsInput.value = item.payrollDeductionsAmount || "";
+  deductionsInput.disabled = item.analysisPending;
+  attachAmountInputBehavior(deductionsInput);
+  deductionsInput.addEventListener("input", () => {
+    item.payrollDeductionsAmount = deductionsInput.value;
+    item.touched.payrollDeductionsAmount = true;
+    const grossAmount = getPayrollGrossAmount(item);
+    const deductionsAmount = getPayrollDeductionsAmount(item);
+    if (grossAmount !== null && deductionsAmount !== null) {
+      item.total = formatAmountInput(Math.max(grossAmount - deductionsAmount, 0));
+      netInput.value = item.total;
+    }
+  });
+  deductionsTd.appendChild(deductionsInput);
+
+  const netTd = document.createElement("td");
+  const netInput = document.createElement("input");
+  netInput.type = "text";
+  netInput.placeholder = "0,00";
+  netInput.value = item.total;
+  netInput.disabled = item.analysisPending;
+  attachAmountInputBehavior(netInput);
+  netInput.addEventListener("input", () => {
+    item.total = netInput.value;
+    item.touched.total = true;
+    const grossAmount = getPayrollGrossAmount(item);
+    const netAmount = getPayrollNetAmount(item);
+    if (grossAmount !== null && netAmount !== null) {
+      item.payrollDeductionsAmount = formatAmountInput(
+        Math.max(grossAmount - netAmount, 0)
+      );
+      deductionsInput.value = item.payrollDeductionsAmount;
+    }
+  });
+  netTd.appendChild(netInput);
+
+  const periodTd = document.createElement("td");
+  const periodInput = document.createElement("input");
+  periodInput.type = "text";
+  periodInput.placeholder = "YYYY-MM";
+  periodInput.value = item.payrollPeriod || "";
+  periodInput.disabled = item.analysisPending;
+  periodInput.addEventListener("input", () => {
+    item.payrollPeriod = periodInput.value;
+  });
+  periodTd.appendChild(periodInput);
+
+  const actionsTd = document.createElement("td");
+  actionsTd.classList.add("row-actions");
+  const removeBtn = document.createElement("button");
+  removeBtn.type = "button";
+  removeBtn.textContent = item.analysisPending ? "Cancelar" : "Quitar";
+  removeBtn.addEventListener("click", () => {
+    if (item.analysisPending) {
+      abortPendingAnalysis(item);
+    }
+    const index = pendingFiles.findIndex((entry) => entry.id === item.id);
+    if (index !== -1) {
+      pendingFiles.splice(index, 1);
+      renderTable();
+    }
+  });
+  actionsTd.appendChild(removeBtn);
+
+  tr.appendChild(nameTd);
+  tr.appendChild(dateTd);
+  tr.appendChild(employeeTd);
+  tr.appendChild(grossTd);
+  tr.appendChild(deductionsTd);
+  tr.appendChild(netTd);
+  tr.appendChild(periodTd);
+  tr.appendChild(actionsTd);
+  uploadTableBody.appendChild(tr);
+
+  appendPendingPaymentDatesRow(item);
+  appendPendingStatusRow(item);
+}
+
 function renderTable() {
   uploadTableBody.innerHTML = "";
   if (pendingFiles.length === 0) {
@@ -2553,6 +2845,10 @@ function renderTable() {
   }
 
   pendingFiles.forEach((item) => {
+    if (isPayrollUploadItem(item)) {
+      appendPayrollPendingRow(item);
+      return;
+    }
     const tr = document.createElement("tr");
     tr.dataset.id = item.id;
     if (item.analysisPending) {
@@ -3782,6 +4078,12 @@ function validatePendingOperationItems(items) {
     if (!item.date) {
       errors.push(`Fecha obligatoria: ${item.file.name}`);
     }
+    if (isPayrollUploadItem(item)) {
+      if (getPayrollGrossAmount(item) === null && getPayrollNetAmount(item) === null) {
+        errors.push(`Bruto o líquido obligatorio: ${item.file.name}`);
+      }
+      return;
+    }
     const normalized = normalizeInvoiceAmounts(item);
     const breakdownPayload = buildVatBreakdownPayload(item.vatBreakdown || []);
     const breakdownTotals = breakdownPayload.length
@@ -3800,7 +4102,89 @@ function validatePendingOperationItems(items) {
   return errors;
 }
 
+function isPayrollUploadItem(item) {
+  return (item?.expenseUploadKind || getExpenseUploadKind()) === "payroll";
+}
+
+function getPayrollGrossAmount(item) {
+  const explicitGross = parseNumberInput(item.base);
+  if (explicitGross !== null) {
+    return explicitGross;
+  }
+  const netAmount = parseNumberInput(item.total);
+  const deductionsAmount = parseNumberInput(item.payrollDeductionsAmount);
+  if (netAmount !== null && deductionsAmount !== null) {
+    return roundAmount(netAmount + deductionsAmount);
+  }
+  return null;
+}
+
+function getPayrollNetAmount(item) {
+  const netAmount = parseNumberInput(item.total);
+  if (netAmount !== null) {
+    return netAmount;
+  }
+  const grossAmount = parseNumberInput(item.base);
+  const deductionsAmount = parseNumberInput(item.payrollDeductionsAmount);
+  if (grossAmount !== null && deductionsAmount !== null) {
+    return roundAmount(Math.max(grossAmount - deductionsAmount, 0));
+  }
+  return null;
+}
+
+function getPayrollDeductionsAmount(item) {
+  const deductionsAmount = parseNumberInput(item.payrollDeductionsAmount);
+  if (deductionsAmount !== null) {
+    return deductionsAmount;
+  }
+  const grossAmount = parseNumberInput(item.base);
+  const netAmount = parseNumberInput(item.total);
+  if (grossAmount !== null && netAmount !== null) {
+    return roundAmount(Math.max(grossAmount - netAmount, 0));
+  }
+  return null;
+}
+
+function getPayrollConcept(item) {
+  const employeeName = (item.supplier || "").trim();
+  const periodLabel = (item.payrollPeriod || "").trim();
+  const parts = ["Nómina"];
+  if (employeeName) {
+    parts.push(employeeName);
+  }
+  if (periodLabel) {
+    parts.push(periodLabel);
+  }
+  return parts.join(" - ");
+}
+
 function getExpenseOperationPayload(item) {
+  if (isPayrollUploadItem(item)) {
+    const grossAmount = getPayrollGrossAmount(item);
+    const netAmount = getPayrollNetAmount(item);
+    const deductionsAmount = getPayrollDeductionsAmount(item);
+    return {
+      expense_date: item.date,
+      payment_date: item.paymentDate || item.date || "",
+      payment_dates: item.paymentDates && item.paymentDates.length ? item.paymentDates : [item.date],
+      concept: getPayrollConcept(item),
+      amount: grossAmount,
+      expense_type: "nomina",
+      interest_amount: null,
+      vat_deductible: false,
+      vat_rate: null,
+      vat_amount: null,
+      base_amount: grossAmount,
+      withholding_amount: parseNumberInput(item.withholdingAmount) || 0,
+      payroll_employee_name: (item.supplier || "").trim(),
+      payroll_period: (item.payrollPeriod || "").trim(),
+      payroll_net_amount: netAmount,
+      payroll_total_deductions_amount: deductionsAmount,
+      payroll_employer_cost_amount:
+        parseNumberInput(item.payrollEmployerCostAmount) || null,
+      deductible: true,
+    };
+  }
   const normalized = normalizeInvoiceAmounts(item);
   const breakdownPayload = buildVatBreakdownPayload(item.vatBreakdown || []);
   const breakdownTotals = breakdownPayload.length
@@ -3937,7 +4321,37 @@ function analyzeInvoiceForItem(item) {
         item.withholdingAmount = String(extracted.withholding_amount);
       }
 
-      if (!item.touched.supplier && extracted.provider_name) {
+      if (isPayrollUploadItem(item)) {
+        if (!item.touched.supplier && extracted.employee_name) {
+          item.supplier = extracted.employee_name;
+        }
+        if (!item.touched.base && extracted.base_amount !== null && extracted.base_amount !== undefined) {
+          item.base = String(extracted.base_amount);
+        }
+        if (
+          !item.touched.payrollDeductionsAmount &&
+          extracted.payroll_total_deductions_amount !== null &&
+          extracted.payroll_total_deductions_amount !== undefined
+        ) {
+          item.payrollDeductionsAmount = String(extracted.payroll_total_deductions_amount);
+        }
+        if (
+          !item.touched.total &&
+          extracted.payroll_net_amount !== null &&
+          extracted.payroll_net_amount !== undefined
+        ) {
+          item.total = String(extracted.payroll_net_amount);
+        }
+        if (!item.payrollPeriod && extracted.payroll_period) {
+          item.payrollPeriod = extracted.payroll_period;
+        }
+        if (
+          extracted.payroll_employer_cost_amount !== null &&
+          extracted.payroll_employer_cost_amount !== undefined
+        ) {
+          item.payrollEmployerCostAmount = String(extracted.payroll_employer_cost_amount);
+        }
+      } else if (!item.touched.supplier && extracted.provider_name) {
         if (!isSupplierSameAsCompany(extracted.provider_name)) {
           item.supplier = extracted.provider_name;
         } else {
@@ -3952,9 +4366,16 @@ function analyzeInvoiceForItem(item) {
       }
       if (!item.paymentDate) {
         const primaryDate = item.paymentDates[0] || extracted.payment_date;
-        item.paymentDate = computePaymentDate(item.date, primaryDate);
+        item.paymentDate = isPayrollUploadItem(item)
+          ? primaryDate || item.date
+          : computePaymentDate(item.date, primaryDate);
       }
-      if (!item.touched.base && extracted.base_amount !== null && extracted.base_amount !== undefined) {
+      if (
+        !isPayrollUploadItem(item) &&
+        !item.touched.base &&
+        extracted.base_amount !== null &&
+        extracted.base_amount !== undefined
+      ) {
         item.base = String(extracted.base_amount);
       }
       if (!item.touched.vat) {
@@ -3972,27 +4393,45 @@ function analyzeInvoiceForItem(item) {
       ) {
         item.vatAmount = String(extracted.vat_amount);
       }
-      if (!item.touched.total && extracted.total_amount !== null && extracted.total_amount !== undefined) {
+      if (
+        !isPayrollUploadItem(item) &&
+        !item.touched.total &&
+        extracted.total_amount !== null &&
+        extracted.total_amount !== undefined
+      ) {
         item.total = String(extracted.total_amount);
       }
 
-      const normalizedAmounts = normalizeInvoiceAmounts(item);
-      if (!item.touched.base && normalizedAmounts.base) {
-        item.base = normalizedAmounts.base;
-      }
-      if (!item.touched.vatAmount && normalizedAmounts.vatAmount) {
-        item.vatAmount = normalizedAmounts.vatAmount;
-      }
-      if (!item.touched.total && normalizedAmounts.total) {
-        item.total = normalizedAmounts.total;
+      if (!isPayrollUploadItem(item)) {
+        const normalizedAmounts = normalizeInvoiceAmounts(item);
+        if (!item.touched.base && normalizedAmounts.base) {
+          item.base = normalizedAmounts.base;
+        }
+        if (!item.touched.vatAmount && normalizedAmounts.vatAmount) {
+          item.vatAmount = normalizedAmounts.vatAmount;
+        }
+        if (!item.touched.total && normalizedAmounts.total) {
+          item.total = normalizedAmounts.total;
+        }
+      } else if (!item.payrollDeductionsAmount) {
+        const grossAmount = getPayrollGrossAmount(item);
+        const netAmount = getPayrollNetAmount(item);
+        if (grossAmount !== null && netAmount !== null) {
+          item.payrollDeductionsAmount = String(
+            roundAmount(Math.max(grossAmount - netAmount, 0))
+          );
+        }
       }
 
       item.analysisPending = false;
       item.analysisQueued = false;
       const hasExtractedValue = [
+        extracted.employee_name,
         extracted.provider_name,
         extracted.invoice_date,
         extracted.base_amount,
+        extracted.payroll_total_deductions_amount,
+        extracted.payroll_net_amount,
         extracted.vat_rate,
         extracted.vat_amount,
         extracted.total_amount,
