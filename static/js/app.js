@@ -323,6 +323,14 @@ function getBalanceInputValue(id) {
   return parsed === null ? 0 : parsed;
 }
 
+function setBalanceInputValue(id, value) {
+  const el = document.getElementById(id);
+  if (!el) {
+    return;
+  }
+  el.value = formatAmountInput(value);
+}
+
 function updateBalanceTotals() {
   if (!bsTotalAssets || !bsTotalLiabilities) {
     return;
@@ -371,6 +379,11 @@ function updateBalanceTotals() {
   }
   bsTotalAssets.textContent = formatCurrency(totalAssets);
   bsTotalLiabilities.textContent = formatCurrency(totalLiabilities);
+}
+
+function syncBalanceStatementFields(netResult) {
+  setBalanceInputValue("bsEquityResult", netResult);
+  updateBalanceTotals();
 }
 
 function setPnlInputValue(id, value, auto = false) {
@@ -7805,6 +7818,7 @@ function updatePnlSummary() {
   financialResultEl.textContent = formatCurrency(financialResult);
   preTaxEl.textContent = formatCurrency(preTax);
   netEl.textContent = formatCurrency(netResult);
+  syncBalanceStatementFields(netResult);
 }
 
 function exportPnlPdf() {

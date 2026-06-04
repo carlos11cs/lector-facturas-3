@@ -1111,6 +1111,17 @@ def derive_no_invoice_profile(expense_type, vat_deductible=False, withholding_am
     }
 
 
+def get_no_invoice_deductible_amount(row):
+    expense_type = row.get("expense_type")
+    if row.get("expense_family") == "financing" or expense_type == "prestamo":
+        return float(row.get("interest_amount") or 0)
+    if row.get("vat_deductible"):
+        return float(row.get("base_amount") or row.get("amount") or 0)
+    if not row.get("deductible"):
+        return 0.0
+    return float(row.get("amount") or 0)
+
+
 def parse_loan_date(value):
     normalized = normalize_date(value)
     if normalized:
@@ -1611,16 +1622,9 @@ def _build_tax_model_metrics(user_id, company_id, periods, conn):
                 elif "111" in tax_targets:
                     withholding_111 += withholding_amount
 
-            if row.get("expense_family") == "financing" or expense_type == "prestamo":
-                expense_base += float(row.get("interest_amount") or 0)
-                continue
+            expense_base += get_no_invoice_deductible_amount(row)
             if row.get("vat_deductible"):
-                expense_base += float(row.get("base_amount") or row.get("amount") or 0)
                 expense_vat += float(row.get("vat_amount") or 0)
-                continue
-            if not row.get("deductible"):
-                continue
-            expense_base += float(row.get("amount") or 0)
 
         loan_rows = conn.execute(
             select(loan_installments_table.c.interest_amount)
@@ -1888,16 +1892,9 @@ def _build_report_totals(user_id, company_id, months, year):
                 .where(no_invoice_table.c.expense_date.like(f"{prefix}%"))
             ).mappings().all()
             for row in no_invoice_rows:
-                if row.get("expense_family") == "financing" or row.get("expense_type") == "prestamo":
-                    expense_base += float(row.get("interest_amount") or 0)
-                    continue
+                expense_base += get_no_invoice_deductible_amount(row)
                 if row.get("vat_deductible"):
-                    expense_base += float(row.get("base_amount") or row.get("amount") or 0)
                     expense_vat += float(row.get("vat_amount") or 0)
-                    continue
-                if not row["deductible"]:
-                    continue
-                expense_base += float(row["amount"] or 0)
 
             loan_rows = conn.execute(
                 select(loan_installments_table.c.interest_amount)
@@ -4745,6 +4742,11 @@ def list_no_invoice_expenses():
                 no_invoice_table.c.vat_amount,
                 no_invoice_table.c.base_amount,
                 no_invoice_table.c.withholding_amount,
+                no_invoice_table.c.payroll_employee_name,
+                no_invoice_table.c.payroll_period,
+                no_invoice_table.c.payroll_net_amount,
+                no_invoice_table.c.payroll_total_deductions_amount,
+                no_invoice_table.c.payroll_employer_cost_amount,
                 no_invoice_table.c.expense_type,
                 no_invoice_table.c.deductible,
                 no_invoice_table.c.expense_family,
