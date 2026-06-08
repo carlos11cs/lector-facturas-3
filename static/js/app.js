@@ -5523,6 +5523,10 @@ function getPaymentActionLabel(item) {
   return item.type === "income" ? "Cobrado" : "Pagado";
 }
 
+function getPaymentUndoActionLabel(item) {
+  return item.type === "income" ? "No cobrado" : "No pagado";
+}
+
 function getAlertPendingPayments(data) {
   if (!Array.isArray(data?.items)) {
     return [];
@@ -5721,6 +5725,21 @@ function markPaymentAsPaid(item) {
   if (item.type === "no_invoice") {
     payload.expense_date = item.invoice_date;
   } else if (item.type === "expense") {
+    payload.invoice_date = item.invoice_date;
+  }
+  return executePaymentStatusUpdate(item, payload);
+}
+
+function markPaymentAsUnpaid(item) {
+  const payload = {
+    payment_only: true,
+    mark_unpaid: true,
+    payment_date: item.payment_date,
+    payment_reference_date: item.payment_date,
+  };
+  if (item.type === "no_invoice") {
+    payload.expense_date = item.invoice_date;
+  } else if (item.type === "expense" || item.type === "income") {
     payload.invoice_date = item.invoice_date;
   }
   return executePaymentStatusUpdate(item, payload);
@@ -5935,15 +5954,20 @@ function renderPaymentDayDetails(day) {
       });
     }
     let paidBtn = null;
-    if (
-      ["expense", "no_invoice", "loan_installment"].includes(item.type) &&
-      item.status !== "paid"
-    ) {
+    if (["expense", "no_invoice", "loan_installment"].includes(item.type)) {
       paidBtn = document.createElement("button");
       paidBtn.type = "button";
-      paidBtn.className = "button primary small";
-      paidBtn.textContent = getPaymentActionLabel(item);
+      paidBtn.className =
+        item.status === "paid" ? "button ghost small" : "button primary small";
+      paidBtn.textContent =
+        item.status === "paid"
+          ? getPaymentUndoActionLabel(item)
+          : getPaymentActionLabel(item);
       paidBtn.addEventListener("click", () => {
+        if (item.status === "paid") {
+          markPaymentAsUnpaid(item);
+          return;
+        }
         markPaymentAsPaid(item);
       });
     }

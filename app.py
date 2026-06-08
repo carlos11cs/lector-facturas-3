@@ -4188,10 +4188,11 @@ def update_invoice(invoice_id):
     payment_date = compute_payment_date(invoice_date, payment_date_input)
     if payment_only:
         mark_paid = bool(payload.get("mark_paid") or payload.get("markPaid"))
+        mark_unpaid = bool(payload.get("mark_unpaid") or payload.get("markUnpaid"))
         reference_date = normalize_date(
             payload.get("payment_reference_date") or payload.get("paymentReferenceDate")
         )
-        if not payment_date_input and not mark_paid:
+        if not payment_date_input and not mark_paid and not mark_unpaid:
             return jsonify({"ok": False, "errors": ["Fecha de pago obligatoria."]}), 400
         with engine.begin() as conn:
             current_row = conn.execute(
@@ -4229,6 +4230,12 @@ def update_invoice(invoice_id):
                     completed_dates,
                     None,
                     reference_date or normalize_date(payment_date_input),
+                )
+            if mark_unpaid:
+                completed_dates = replace_payment_date(
+                    completed_dates,
+                    reference_date or normalize_date(payment_date_input),
+                    None,
                 )
             updates = {
                 "payment_date": updated_dates[0] if updated_dates else normalize_date(payment_date_input),
@@ -4568,10 +4575,11 @@ def update_income_invoice(invoice_id):
     payment_date = compute_payment_date(invoice_date, payment_date_input)
     if payment_only:
         mark_paid = bool(payload.get("mark_paid") or payload.get("markPaid"))
+        mark_unpaid = bool(payload.get("mark_unpaid") or payload.get("markUnpaid"))
         reference_date = normalize_date(
             payload.get("payment_reference_date") or payload.get("paymentReferenceDate")
         )
-        if not payment_date_input and not mark_paid:
+        if not payment_date_input and not mark_paid and not mark_unpaid:
             return jsonify({"ok": False, "errors": ["Fecha de pago obligatoria."]}), 400
         with engine.begin() as conn:
             current_row = conn.execute(
@@ -4609,6 +4617,12 @@ def update_income_invoice(invoice_id):
                     completed_dates,
                     None,
                     reference_date or normalize_date(payment_date_input),
+                )
+            if mark_unpaid:
+                completed_dates = replace_payment_date(
+                    completed_dates,
+                    reference_date or normalize_date(payment_date_input),
+                    None,
                 )
             updates = {
                 "payment_date": updated_dates[0] if updated_dates else normalize_date(payment_date_input),
@@ -4990,10 +5004,11 @@ def update_no_invoice_expense(expense_id):
     expense_date = payload.get("expense_date") or ""
     if payment_only:
         mark_paid = bool(payload.get("mark_paid") or payload.get("markPaid"))
+        mark_unpaid = bool(payload.get("mark_unpaid") or payload.get("markUnpaid"))
         reference_date = normalize_date(
             payload.get("payment_reference_date") or payload.get("paymentReferenceDate")
         )
-        if not expense_date and not mark_paid:
+        if not expense_date and not mark_paid and not mark_unpaid:
             return jsonify({"ok": False, "errors": ["Fecha obligatoria."]}), 400
         payment_dates = parse_payment_dates(payload.get("payment_dates") or payload.get("paymentDates"))
         payment_date = compute_payment_date(
@@ -5037,6 +5052,12 @@ def update_no_invoice_expense(expense_id):
                     completed_dates,
                     None,
                     reference_date or normalize_date(payment_date),
+                )
+            if mark_unpaid:
+                completed_dates = replace_payment_date(
+                    completed_dates,
+                    reference_date or normalize_date(payment_date),
+                    None,
                 )
             result = conn.execute(
                 no_invoice_table.update()
@@ -5410,10 +5431,11 @@ def update_loan_installment(installment_id):
 
     if payment_only:
         mark_paid = bool(payload.get("mark_paid") or payload.get("markPaid"))
+        mark_unpaid = bool(payload.get("mark_unpaid") or payload.get("markUnpaid"))
         reference_date = normalize_date(
             payload.get("payment_reference_date") or payload.get("paymentReferenceDate")
         )
-        if not payment_date and not mark_paid:
+        if not payment_date and not mark_paid and not mark_unpaid:
             return jsonify({"ok": False, "errors": ["Fecha de pago obligatoria."]}), 400
         with engine.begin() as conn:
             current_row = conn.execute(
@@ -5437,6 +5459,12 @@ def update_loan_installment(installment_id):
                     completed_dates,
                     None,
                     reference_date or normalize_date(payment_date) or current_row.get("payment_date"),
+                )
+            if mark_unpaid:
+                completed_dates = replace_payment_date(
+                    completed_dates,
+                    reference_date or normalize_date(payment_date) or current_row.get("payment_date"),
+                    None,
                 )
             result = conn.execute(
                 loan_installments_table.update()
