@@ -12,6 +12,10 @@ from functools import wraps
 import httpx
 import fitz
 import openpyxl
+try:
+    import stripe
+except ImportError:  # pragma: no cover - dependency is required in deployment
+    stripe = None
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for, g
 from sqlalchemy import (
     Boolean,
@@ -46,6 +50,12 @@ DEFAULT_USER_ID = int(os.getenv("DEFAULT_USER_ID", "1"))
 OWNER_EMAIL = (os.getenv("OWNER_EMAIL") or "").strip().lower()
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 APP_FROM_EMAIL = os.getenv("APP_FROM_EMAIL", "no-reply@tuapp.com")
+APP_BASE_URL = (os.getenv("APP_BASE_URL") or "").strip().rstrip("/")
+STRIPE_SECRET_KEY = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+STRIPE_WEBHOOK_SECRET = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
+STRIPE_PRICE_STARTER = (os.getenv("STRIPE_PRICE_STARTER") or "").strip()
+STRIPE_PRICE_PRO = (os.getenv("STRIPE_PRICE_PRO") or "").strip()
+STRIPE_PRICE_ADVANCED = (os.getenv("STRIPE_PRICE_ADVANCED") or "").strip()
 RENT_WITHHOLDING_TYPES = {"alquiler_local", "alquiler_cabina"}
 EXCLUDED_111_TYPES = {"prestamo", "seguridad_social", "amortizacion", "kilometraje"}
 ALLOWED_NO_INVOICE_EXPENSE_TYPES = {
@@ -71,6 +81,14 @@ MONTH_LABELS_ES = {
     10: "Octubre",
     11: "Noviembre",
     12: "Diciembre",
+}
+STRIPE_PRICE_IDS = {
+    "starter": STRIPE_PRICE_STARTER,
+    "pro": STRIPE_PRICE_PRO,
+    "advanced": STRIPE_PRICE_ADVANCED,
+}
+STRIPE_PRICE_TO_PLAN = {
+    price_id: plan for plan, price_id in STRIPE_PRICE_IDS.items() if price_id
 }
 
 _raw_db_url = os.getenv("DATABASE_URL")
@@ -133,6 +151,9 @@ agencies_table = Table(
     Column("status", String, nullable=False),  # trial | active | suspended
     Column("stripe_customer_id", String),
     Column("stripe_subscription_id", String),
+    Column("stripe_price_id", String),
+    Column("stripe_subscription_status", String),
+    Column("stripe_current_period_end", String),
     Column("trial_ends_at", String),
     Column("created_at", String, nullable=False),
     Column("last_login_at", String),
@@ -283,6 +304,8 @@ app.config["SECRET_KEY"] = os.getenv("SECRET_KEY") or secrets.token_urlsafe(32)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = os.getenv("ENV", "").lower() == "production"
+if stripe and STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
 
 
 def static_asset_url(filename: str) -> str:
@@ -300,6 +323,184 @@ def static_asset_url(filename: str) -> str:
 @app.context_processor
 def inject_static_asset_url():
     return {"static_asset_url": static_asset_url}
+
+
+def get_app_base_url():
+    if APP_BASE_URL:
+        return APP_BASE_URL
+    return request.url_root.rstrip("/")
+
+
+def stripe_is_configured():
+    return bool(
+        stripe
+        and
+        STRIPE_SECRET_KEY
+        and STRIPE_WEBHOOK_SECRET
+        and STRIPE_PRICE_STARTER
+        and STRIPE_PRICE_PRO
+        and STRIPE_PRICE_ADVANCED
+    )
+
+
+def get_plan_label(plan):
+    return {
+        "starter": "Starter",
+        "pro": "Pro",
+        "advanced": "Business",
+    }.get((plan or "").strip().lower(), (plan or "-").title())
+
+
+def get_stripe_price_id(plan):
+    return STRIPE_PRICE_IDS.get((plan or "").strip().lower(), "")
+
+
+def get_plan_from_price_id(price_id):
+    return STRIPE_PRICE_TO_PLAN.get((price_id or "").strip(), "")
+
+
+def get_agency_id_for_user(user):
+    if not user:
+        return None
+    role = user.get("role")
+    if role == "agency":
+        return int(user.get("agency_id") or user["id"])
+    if role == "staff":
+        agency_id = user.get("agency_id")
+        return int(agency_id) if agency_id else None
+    return None
+
+
+def get_agency_row_for_user(user):
+    agency_id = get_agency_id_for_user(user)
+    if not agency_id:
+        return None
+    with engine.connect() as conn:
+        return conn.execute(
+            select(agencies_table).where(agencies_table.c.id == agency_id)
+        ).mappings().first()
+
+
+def format_iso_date_label(value):
+    if not value:
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            return datetime.utcfromtimestamp(value).strftime("%d/%m/%Y")
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).strftime("%d/%m/%Y")
+    except ValueError:
+        return str(value)
+
+
+def map_stripe_subscription_status(subscription_status):
+    status = (subscription_status or "").strip().lower()
+    if status in {"trialing", "active", "past_due"}:
+        return "active"
+    if status in {"canceled", "unpaid", "paused", "incomplete_expired"}:
+        return "suspended"
+    if status == "incomplete":
+        return "trial"
+    return None
+
+
+def sync_agency_billing_state(
+    conn,
+    agency_id,
+    *,
+    plan=None,
+    app_status=None,
+    stripe_customer_id=None,
+    stripe_subscription_id=None,
+    stripe_price_id=None,
+    stripe_subscription_status=None,
+    stripe_current_period_end=None,
+):
+    values = {}
+    if plan:
+        values["plan"] = plan
+    if app_status:
+        values["status"] = app_status
+        if app_status == "active":
+            values["trial_ends_at"] = None
+    if stripe_customer_id is not None:
+        values["stripe_customer_id"] = stripe_customer_id
+    if stripe_subscription_id is not None:
+        values["stripe_subscription_id"] = stripe_subscription_id
+    if stripe_price_id is not None:
+        values["stripe_price_id"] = stripe_price_id
+    if stripe_subscription_status is not None:
+        values["stripe_subscription_status"] = stripe_subscription_status
+    if stripe_current_period_end is not None:
+        values["stripe_current_period_end"] = stripe_current_period_end
+    if values:
+        conn.execute(
+            agencies_table.update().where(agencies_table.c.id == agency_id).values(**values)
+        )
+    if app_status:
+        conn.execute(
+            users_table.update()
+            .where(users_table.c.agency_id == agency_id)
+            .values(is_active=app_status != "suspended")
+        )
+
+
+def get_billing_context_for_user(user):
+    agency = get_agency_row_for_user(user)
+    if not agency or user.get("role") != "agency":
+        return None
+    subscription_status = agency.get("stripe_subscription_status")
+    status = agency.get("status") or "trial"
+    return {
+        "plan": agency.get("plan") or "starter",
+        "plan_label": get_plan_label(agency.get("plan")),
+        "status": status,
+        "status_label": {
+            "active": "Activa",
+            "trial": "Trial",
+            "suspended": "Suspendida",
+        }.get(status, status.title()),
+        "stripe_status_label": subscription_status.replace("_", " ").title()
+        if subscription_status
+        else None,
+        "trial_ends_label": format_iso_date_label(agency.get("trial_ends_at")),
+        "current_period_end_label": format_iso_date_label(
+            agency.get("stripe_current_period_end")
+        ),
+        "has_customer": bool(agency.get("stripe_customer_id")),
+        "has_subscription": bool(agency.get("stripe_subscription_id")),
+        "can_manage": user.get("role") == "agency",
+        "stripe_ready": stripe_is_configured(),
+    }
+
+
+def get_billing_message():
+    billing_state = (request.args.get("billing") or "").strip().lower()
+    billing_error = (request.args.get("billing_error") or "").strip().lower()
+    if billing_state == "success":
+        return {"type": "success", "text": "Suscripción activada. Stripe ha confirmado el alta."}
+    if billing_state == "cancelled":
+        return {"type": "warning", "text": "El proceso de pago se canceló antes de completarse."}
+    if billing_error == "not_configured":
+        return {
+            "type": "warning",
+            "text": "Stripe no está configurado todavía en producción. Faltan variables de entorno.",
+        }
+    if billing_error == "not_available":
+        return {
+            "type": "warning",
+            "text": "No se pudo abrir la facturación porque esta gestoría no tiene cliente de Stripe asociado.",
+        }
+    if billing_error == "checkout_failed":
+        return {
+            "type": "warning",
+            "text": "No se pudo iniciar el checkout de Stripe. Revisa la configuración de precios y claves.",
+        }
+    if billing_error == "portal_failed":
+        return {
+            "type": "warning",
+            "text": "No se pudo abrir el portal de facturación de Stripe.",
+        }
+    return None
 
 
 def init_db():
@@ -559,6 +760,9 @@ def init_db():
     add_column_if_missing("agencies", "status", "VARCHAR")
     add_column_if_missing("agencies", "stripe_customer_id", "VARCHAR")
     add_column_if_missing("agencies", "stripe_subscription_id", "VARCHAR")
+    add_column_if_missing("agencies", "stripe_price_id", "VARCHAR")
+    add_column_if_missing("agencies", "stripe_subscription_status", "VARCHAR")
+    add_column_if_missing("agencies", "stripe_current_period_end", "VARCHAR")
     add_column_if_missing("agencies", "trial_ends_at", "VARCHAR")
     add_column_if_missing("agencies", "last_login_at", "VARCHAR")
     if "agencies" in table_names:
@@ -588,6 +792,9 @@ def init_db():
                         status="trial",
                         stripe_customer_id=None,
                         stripe_subscription_id=None,
+                        stripe_price_id=None,
+                        stripe_subscription_status=None,
+                        stripe_current_period_end=None,
                         trial_ends_at=trial_ends,
                         created_at=created_at,
                         last_login_at=None,
@@ -670,6 +877,8 @@ def load_user_and_enforce_auth():
     g.current_user = get_current_user()
     path = request.path or ""
     if path.startswith("/static/"):
+        return None
+    if path == "/api/stripe/webhook":
         return None
     if path.startswith("/login") or path.startswith("/register"):
         return None
@@ -2293,7 +2502,164 @@ def landing_alias():
 
 @app.route("/app")
 def app_home():
-    return render_template("index.html", user=g.current_user)
+    return render_template(
+        "index.html",
+        user=g.current_user,
+        billing_context=get_billing_context_for_user(g.current_user),
+        billing_message=get_billing_message(),
+    )
+
+
+@app.route("/billing/checkout", methods=["POST"])
+def start_stripe_checkout():
+    user = g.current_user or {}
+    if user.get("role") != "agency":
+        return redirect(url_for("app_home"))
+    if not stripe_is_configured():
+        return redirect(url_for("app_home", billing_error="not_configured"))
+    plan = (request.form.get("plan") or "").strip().lower()
+    if plan not in {"starter", "pro", "advanced"}:
+        return redirect(url_for("app_home", billing_error="checkout_failed"))
+    agency = get_agency_row_for_user(user)
+    if not agency:
+        return redirect(url_for("app_home", billing_error="checkout_failed"))
+    if agency.get("stripe_subscription_id"):
+        return redirect(url_for("open_stripe_portal"))
+    customer_id = agency.get("stripe_customer_id")
+    try:
+        if not customer_id:
+            customer = stripe.Customer.create(
+                email=agency.get("email") or user.get("email"),
+                name=agency.get("name") or agency.get("email") or user.get("email"),
+                metadata={"agency_id": str(agency["id"])},
+            )
+            customer_id = customer.get("id")
+            with engine.begin() as conn:
+                sync_agency_billing_state(
+                    conn,
+                    agency["id"],
+                    stripe_customer_id=customer_id,
+                )
+        checkout_session = stripe.checkout.Session.create(
+            mode="subscription",
+            customer=customer_id,
+            client_reference_id=str(agency["id"]),
+            line_items=[{"price": get_stripe_price_id(plan), "quantity": 1}],
+            metadata={"agency_id": str(agency["id"]), "plan": plan},
+            subscription_data={"metadata": {"agency_id": str(agency["id"]), "plan": plan}},
+            success_url=f"{get_app_base_url()}{url_for('app_home')}?billing=success",
+            cancel_url=f"{get_app_base_url()}{url_for('app_home')}?billing=cancelled",
+            allow_promotion_codes=True,
+        )
+    except Exception:
+        app.logger.exception("Stripe checkout creation failed")
+        return redirect(url_for("app_home", billing_error="checkout_failed"))
+    return redirect(checkout_session.get("url"), code=303)
+
+
+@app.route("/billing/portal", methods=["POST", "GET"])
+def open_stripe_portal():
+    user = g.current_user or {}
+    if user.get("role") != "agency":
+        return redirect(url_for("app_home"))
+    if not stripe_is_configured():
+        return redirect(url_for("app_home", billing_error="not_configured"))
+    agency = get_agency_row_for_user(user)
+    if not agency or not agency.get("stripe_customer_id"):
+        return redirect(url_for("app_home", billing_error="not_available"))
+    try:
+        portal_session = stripe.billing_portal.Session.create(
+            customer=agency["stripe_customer_id"],
+            return_url=f"{get_app_base_url()}{url_for('app_home')}",
+        )
+    except Exception:
+        app.logger.exception("Stripe billing portal creation failed")
+        return redirect(url_for("app_home", billing_error="portal_failed"))
+    return redirect(portal_session.get("url"), code=303)
+
+
+@app.route("/api/stripe/webhook", methods=["POST"])
+def stripe_webhook():
+    if not stripe_is_configured():
+        return jsonify({"ok": False, "error": "stripe_not_configured"}), 503
+    payload = request.get_data(as_text=False)
+    signature = request.headers.get("Stripe-Signature", "")
+    try:
+        event = stripe.Webhook.construct_event(
+            payload=payload,
+            sig_header=signature,
+            secret=STRIPE_WEBHOOK_SECRET,
+        )
+    except ValueError:
+        return jsonify({"ok": False, "error": "invalid_payload"}), 400
+    except stripe.error.SignatureVerificationError:
+        return jsonify({"ok": False, "error": "invalid_signature"}), 400
+
+    event_type = event.get("type")
+    data_object = (event.get("data") or {}).get("object") or {}
+
+    try:
+        with engine.begin() as conn:
+            if event_type == "checkout.session.completed":
+                agency_id = (
+                    (data_object.get("metadata") or {}).get("agency_id")
+                    or data_object.get("client_reference_id")
+                )
+                if agency_id:
+                    sync_agency_billing_state(
+                        conn,
+                        int(agency_id),
+                        plan=(data_object.get("metadata") or {}).get("plan") or "starter",
+                        app_status="active",
+                        stripe_customer_id=data_object.get("customer"),
+                        stripe_subscription_id=data_object.get("subscription"),
+                    )
+            elif event_type in {
+                "customer.subscription.created",
+                "customer.subscription.updated",
+                "customer.subscription.deleted",
+            }:
+                metadata = data_object.get("metadata") or {}
+                agency_id = metadata.get("agency_id")
+                price_id = ""
+                items = ((data_object.get("items") or {}).get("data") or [])
+                if items:
+                    price_id = ((items[0].get("price") or {}).get("id") or "").strip()
+                plan = metadata.get("plan") or get_plan_from_price_id(price_id) or "starter"
+                current_period_end = data_object.get("current_period_end")
+                resolved_status = map_stripe_subscription_status(data_object.get("status"))
+                if not agency_id:
+                    lookup = conn.execute(
+                        select(agencies_table.c.id).where(
+                            (agencies_table.c.stripe_customer_id == data_object.get("customer"))
+                            | (
+                                agencies_table.c.stripe_subscription_id
+                                == data_object.get("id")
+                            )
+                        )
+                    ).first()
+                    agency_id = lookup[0] if lookup else None
+                if agency_id:
+                    sync_agency_billing_state(
+                        conn,
+                        int(agency_id),
+                        plan=plan,
+                        app_status=resolved_status,
+                        stripe_customer_id=data_object.get("customer"),
+                        stripe_subscription_id=data_object.get("id"),
+                        stripe_price_id=price_id or None,
+                        stripe_subscription_status=data_object.get("status"),
+                        stripe_current_period_end=(
+                            datetime.utcfromtimestamp(current_period_end).isoformat()
+                            if current_period_end
+                            else None
+                        ),
+                    )
+    except Exception:
+        app.logger.exception("Stripe webhook processing failed")
+        return jsonify({"ok": False, "error": "webhook_processing_failed"}), 500
+
+    return jsonify({"ok": True})
 
 
 @app.route("/admin")

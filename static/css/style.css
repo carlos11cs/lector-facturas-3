@@ -153,6 +153,68 @@ h1 {
   color: var(--muted);
 }
 
+.billing-access-box {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: var(--shadow);
+}
+
+.billing-access-copy {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.billing-access-copy strong {
+  color: var(--text);
+}
+
+.billing-access-actions,
+.billing-plan-form {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.billing-plan-form select {
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: #f8fbf8;
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
+.billing-message {
+  width: 100%;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  font-size: 0.92rem;
+}
+
+.billing-message-success {
+  background: rgba(34, 124, 101, 0.1);
+  color: var(--accent-strong);
+  border-color: rgba(34, 124, 101, 0.24);
+}
+
+.billing-message-warning {
+  background: rgba(210, 122, 31, 0.12);
+  color: #8a4f12;
+  border-color: rgba(210, 122, 31, 0.25);
+}
+
 .field {
   display: flex;
   flex-direction: column;

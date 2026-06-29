@@ -87,6 +87,44 @@
             <a class="button ghost" href="{{ url_for('logout') }}">Cerrar sesión</a>
           </div>
         </div>
+        {% if billing_context %}
+        <div class="billing-access-box">
+          <div class="billing-access-copy">
+            <strong>Suscripción {{ billing_context.plan_label }}</strong>
+            <span>Estado interno: {{ billing_context.status_label }}</span>
+            {% if billing_context.stripe_status_label %}
+            <span>Stripe: {{ billing_context.stripe_status_label }}</span>
+            {% endif %}
+            {% if billing_context.trial_ends_label %}
+            <span>Trial hasta {{ billing_context.trial_ends_label }}</span>
+            {% endif %}
+            {% if billing_context.current_period_end_label %}
+            <span>Renovación / fin de periodo: {{ billing_context.current_period_end_label }}</span>
+            {% endif %}
+          </div>
+          <div class="billing-access-actions">
+            {% if billing_context.has_subscription %}
+            <form method="post" action="{{ url_for('open_stripe_portal') }}">
+              <button type="submit" class="button primary">Gestionar suscripción</button>
+            </form>
+            {% else %}
+            <form method="post" action="{{ url_for('start_stripe_checkout') }}" class="billing-plan-form">
+              <select name="plan" {% if not billing_context.stripe_ready %}disabled{% endif %}>
+                <option value="starter" {% if billing_context.plan == 'starter' %}selected{% endif %}>Starter</option>
+                <option value="pro" {% if billing_context.plan == 'pro' %}selected{% endif %}>Pro</option>
+                <option value="advanced" {% if billing_context.plan == 'advanced' %}selected{% endif %}>Business</option>
+              </select>
+              <button type="submit" class="button primary" {% if not billing_context.stripe_ready %}disabled{% endif %}>Activar suscripción</button>
+            </form>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+        {% if billing_message %}
+        <div class="billing-message billing-message-{{ billing_message.type }}">
+          {{ billing_message.text }}
+        </div>
+        {% endif %}
       </header>
 
       <div class="global-processing" id="globalProcessing" role="status" aria-live="polite">
