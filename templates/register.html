@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Registro · Lector de Facturas</title>
+  <title>Acceso restringido · Lector de Facturas</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
 </head>
 <body class="auth-page">
@@ -19,19 +19,14 @@
       </span>
       <span class="brand-title">Ledged</span>
     </div>
-    <h1>Crear cuenta</h1>
-    <p class="auth-subtitle">Registro exclusivo para gestorías.</p>
+    <h1>Acceso restringido</h1>
+    <p class="auth-subtitle">Las altas publicas estan cerradas. El acceso se habilita solo manualmente o por invitacion.</p>
     {% if error %}
       <p class="auth-error">{{ error }}</p>
     {% endif %}
-    <form method="post" class="auth-form">
-      <label for="email">Email</label>
-      <input type="email" id="email" name="email" required />
-      <label for="password">Contraseña</label>
-      <input type="password" id="password" name="password" required />
-      <button type="submit" class="button primary">Crear cuenta</button>
-    </form>
     <div class="auth-links">
+      <a href="mailto:soporte@ledged.app?subject=Solicitud%20de%20acceso%20a%20Ledged">Solicitar invitacion</a>
+      <span>·</span>
       <a href="{{ url_for('login') }}">Ya tengo cuenta</a>
     </div>
   </div>

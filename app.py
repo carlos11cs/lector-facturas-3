@@ -2176,69 +2176,12 @@ def login():
 
 @app.route("/register", methods=["GET", "POST"])
 def register():
-    if request.method == "GET":
-        return render_template("register.html")
-    payload = request.form or request.get_json(silent=True) or {}
-    email = _normalize_email(payload.get("email"))
-    password = payload.get("password") or ""
-    if not email or not password:
-        return render_template("register.html", error="Email y contraseña obligatorios.")
-    if len(password) < 8:
-        return render_template(
-            "register.html", error="La contraseña debe tener al menos 8 caracteres."
-        )
-    role = "agency"
-    plan = "trial"
-    if OWNER_EMAIL and email == OWNER_EMAIL:
-        role = "owner"
-        plan = "premium"
-    with engine.begin() as conn:
-        owner_exists = conn.execute(
-            select(users_table.c.id).where(users_table.c.role == "owner")
-        ).first()
-        if owner_exists and role == "owner":
-            return render_template("register.html", error="El usuario propietario ya existe.")
-        exists = conn.execute(
-            select(users_table.c.id).where(users_table.c.email == email)
-        ).first()
-        if exists:
-            return render_template("register.html", error="El email ya está registrado.")
-        result = conn.execute(
-            users_table.insert().values(
-                email=email,
-                password_hash=generate_password_hash(password),
-                role=role,
-                plan=plan,
-                agency_id=None,
-                created_at=datetime.utcnow().isoformat(),
-                is_active=True,
-            )
-        )
-        new_user_id = result.inserted_primary_key[0]
-        conn.execute(
-            users_table.update()
-            .where(users_table.c.id == new_user_id)
-            .values(agency_id=new_user_id)
-        )
-        if role == "agency":
-            trial_ends = (datetime.utcnow() + timedelta(days=14)).isoformat()
-            conn.execute(
-                agencies_table.insert().values(
-                    id=new_user_id,
-                    name=email,
-                    email=email,
-                    phone=None,
-                    plan="starter",
-                    status="trial",
-                    stripe_customer_id=None,
-                    stripe_subscription_id=None,
-                    trial_ends_at=trial_ends,
-                    created_at=datetime.utcnow().isoformat(),
-                    last_login_at=None,
-                )
-            )
-        session["user_id"] = new_user_id
-    return redirect(url_for("app_home"))
+    message = "Altas cerradas temporalmente. El acceso se concede solo de forma manual o por invitacion."
+    if request.method == "POST":
+        if request.is_json:
+            return jsonify({"ok": False, "errors": [message]}), 403
+        return render_template("register.html", registration_closed=True, error=message), 403
+    return render_template("register.html", registration_closed=True), 403
 
 
 @app.route("/logout")
