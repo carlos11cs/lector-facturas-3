@@ -169,6 +169,22 @@ password_resets_table = Table(
     Column("used_at", String),
 )
 
+user_invitations_table = Table(
+    "user_invitations",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("email", String, nullable=False),
+    Column("role", String, nullable=False),  # agency | staff
+    Column("agency_id", Integer, nullable=True),
+    Column("name", String),
+    Column("plan", String),
+    Column("token", String, nullable=False),
+    Column("expires_at", String, nullable=False),
+    Column("accepted_at", String),
+    Column("created_by_user_id", Integer, nullable=False),
+    Column("created_at", String, nullable=False),
+)
+
 invoices_table = Table(
     "invoices",
     metadata,
@@ -351,6 +367,13 @@ def get_plan_label(plan):
     }.get((plan or "").strip().lower(), (plan or "-").title())
 
 
+def get_role_label(role):
+    return {
+        "agency": "gestoría",
+        "staff": "trabajador",
+    }.get((role or "").strip().lower(), role or "usuario")
+
+
 def get_stripe_price_id(plan):
     return STRIPE_PRICE_IDS.get((plan or "").strip().lower(), "")
 
@@ -379,6 +402,15 @@ def get_agency_row_for_user(user):
         return conn.execute(
             select(agencies_table).where(agencies_table.c.id == agency_id)
         ).mappings().first()
+
+
+def get_user_email(user_id):
+    if not user_id:
+        return None
+    with engine.connect() as conn:
+        return conn.execute(
+            select(users_table.c.email).where(users_table.c.id == user_id)
+        ).scalar_one_or_none()
 
 
 def format_iso_date_label(value):
@@ -501,6 +533,92 @@ def get_billing_message():
             "text": "No se pudo abrir el portal de facturación de Stripe.",
         }
     return None
+
+
+def build_invitation_email_html(recipient_email, role, invite_link, sender_name=None, agency_name=None):
+    intro = (
+        "Has recibido una invitacion para acceder a Ledged como trabajador."
+        if role == "staff"
+        else "Has recibido una invitacion para dar de alta tu gestoría en Ledged."
+    )
+    sender_block = f"<p><strong>Invitado por:</strong> {sender_name}</p>" if sender_name else ""
+    agency_block = f"<p><strong>Gestoría:</strong> {agency_name}</p>" if agency_name else ""
+    return f"""
+    <div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;color:#1d2420">
+      <h2 style="margin-bottom:12px">Invitacion a Ledged</h2>
+      <p>Hola {recipient_email},</p>
+      <p>{intro}</p>
+      {sender_block}
+      {agency_block}
+      <p>Para activar tu acceso y definir tu contraseña, usa este enlace:</p>
+      <p><a href="{invite_link}" style="display:inline-block;padding:12px 18px;background:#227c65;color:#ffffff;text-decoration:none;border-radius:999px">Aceptar invitacion</a></p>
+      <p>Si el boton no funciona, copia y pega esta URL en tu navegador:</p>
+      <p><a href="{invite_link}">{invite_link}</a></p>
+      <p>Este enlace caduca en 7 dias.</p>
+    </div>
+    """
+
+
+def create_user_invitation(
+    *,
+    email,
+    role,
+    created_by_user_id,
+    agency_id=None,
+    name=None,
+    plan=None,
+):
+    email = _normalize_email(email)
+    token = secrets.token_urlsafe(32)
+    created_at = datetime.utcnow().isoformat()
+    expires_at = (datetime.utcnow() + timedelta(days=7)).isoformat()
+    with engine.begin() as conn:
+        existing_user = conn.execute(
+            select(users_table.c.id).where(users_table.c.email == email)
+        ).first()
+        if existing_user:
+            return {"ok": False, "errors": ["El email ya está registrado."]}
+        existing_invite = conn.execute(
+            select(user_invitations_table.c.id)
+            .where(user_invitations_table.c.email == email)
+            .where(user_invitations_table.c.role == role)
+            .where(user_invitations_table.c.accepted_at.is_(None))
+            .where(user_invitations_table.c.expires_at >= created_at)
+        ).first()
+        if existing_invite:
+            return {"ok": False, "errors": ["Ya existe una invitación pendiente para ese email."]}
+        conn.execute(
+            user_invitations_table.insert().values(
+                email=email,
+                role=role,
+                agency_id=agency_id,
+                name=name,
+                plan=plan,
+                token=token,
+                expires_at=expires_at,
+                accepted_at=None,
+                created_by_user_id=created_by_user_id,
+                created_at=created_at,
+            )
+        )
+    return {"ok": True, "token": token}
+
+
+def send_user_invitation_email(*, email, role, token, sender_name=None, agency_name=None, reply_to=None):
+    invite_link = f"{get_app_base_url()}{url_for('accept_invitation', token=token)}"
+    subject = (
+        "Invitación a Ledged"
+        if role == "agency"
+        else "Invitación a tu cuenta de Ledged"
+    )
+    html = build_invitation_email_html(
+        email,
+        role,
+        invite_link,
+        sender_name=sender_name,
+        agency_name=agency_name,
+    )
+    return send_email(email, subject, html, reply_to=reply_to)
 
 
 def init_db():
@@ -879,6 +997,8 @@ def load_user_and_enforce_auth():
     if path.startswith("/static/"):
         return None
     if path == "/api/stripe/webhook":
+        return None
+    if path.startswith("/invite/"):
         return None
     if path.startswith("/login") or path.startswith("/register"):
         return None
@@ -2349,7 +2469,9 @@ def get_agency_email_for_user(user_id):
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "GET":
-        return render_template("login.html")
+        invited = (request.args.get("invited") or "").strip().lower()
+        message = "Cuenta activada. Ya puedes iniciar sesión." if invited == "1" else None
+        return render_template("login.html", message=message)
     payload = request.form or request.get_json(silent=True) or {}
     email = _normalize_email(payload.get("email"))
     password = payload.get("password") or ""
@@ -2484,6 +2606,125 @@ def reset_password(token):
             .values(used_at=now)
         )
     return redirect(url_for("login"))
+
+
+@app.route("/invite/<token>", methods=["GET", "POST"])
+def accept_invitation(token):
+    now = datetime.utcnow().isoformat()
+    with engine.connect() as conn:
+        invitation = conn.execute(
+            select(user_invitations_table).where(user_invitations_table.c.token == token)
+        ).mappings().first()
+    if (
+        not invitation
+        or invitation.get("accepted_at")
+        or invitation.get("expires_at", "") < now
+    ):
+        return render_template(
+            "invite_accept.html",
+            invitation=None,
+            error="La invitación no es válida o ha caducado.",
+        )
+
+    if request.method == "GET":
+        return render_template("invite_accept.html", invitation=invitation)
+
+    password = request.form.get("password") or ""
+    if len(password) < 8:
+        return render_template(
+            "invite_accept.html",
+            invitation=invitation,
+            error="La contraseña debe tener al menos 8 caracteres.",
+        )
+
+    created_at = datetime.utcnow().isoformat()
+    with engine.begin() as conn:
+        fresh_invitation = conn.execute(
+            select(user_invitations_table).where(user_invitations_table.c.token == token)
+        ).mappings().first()
+        if (
+            not fresh_invitation
+            or fresh_invitation.get("accepted_at")
+            or fresh_invitation.get("expires_at", "") < created_at
+        ):
+            return render_template(
+                "invite_accept.html",
+                invitation=None,
+                error="La invitación no es válida o ha caducado.",
+            )
+
+        existing_user = conn.execute(
+            select(users_table.c.id).where(users_table.c.email == fresh_invitation["email"])
+        ).first()
+        if existing_user:
+            conn.execute(
+                user_invitations_table.update()
+                .where(user_invitations_table.c.id == fresh_invitation["id"])
+                .values(accepted_at=created_at)
+            )
+            return redirect(url_for("login", invited="1"))
+
+        if fresh_invitation["role"] == "agency":
+            plan = (fresh_invitation.get("plan") or "starter").strip().lower()
+            trial_ends = (datetime.utcnow() + timedelta(days=14)).isoformat()
+            result = conn.execute(
+                users_table.insert().values(
+                    email=fresh_invitation["email"],
+                    password_hash=generate_password_hash(password),
+                    role="agency",
+                    plan="trial",
+                    agency_id=None,
+                    created_at=created_at,
+                    is_active=True,
+                )
+            )
+            new_user_id = result.inserted_primary_key[0]
+            conn.execute(
+                users_table.update()
+                .where(users_table.c.id == new_user_id)
+                .values(agency_id=new_user_id)
+            )
+            conn.execute(
+                agencies_table.insert().values(
+                    id=new_user_id,
+                    name=fresh_invitation.get("name") or fresh_invitation["email"],
+                    email=fresh_invitation["email"],
+                    phone=None,
+                    plan=plan if plan in {"starter", "pro", "advanced"} else "starter",
+                    status="trial",
+                    stripe_customer_id=None,
+                    stripe_subscription_id=None,
+                    stripe_price_id=None,
+                    stripe_subscription_status=None,
+                    stripe_current_period_end=None,
+                    trial_ends_at=trial_ends,
+                    created_at=created_at,
+                    last_login_at=None,
+                )
+            )
+        else:
+            agency_id = fresh_invitation.get("agency_id")
+            agency_plan = conn.execute(
+                select(users_table.c.plan).where(users_table.c.id == agency_id)
+            ).scalar_one_or_none()
+            conn.execute(
+                users_table.insert().values(
+                    email=fresh_invitation["email"],
+                    password_hash=generate_password_hash(password),
+                    role="staff",
+                    plan=agency_plan or "trial",
+                    agency_id=agency_id,
+                    created_at=created_at,
+                    is_active=True,
+                )
+            )
+
+        conn.execute(
+            user_invitations_table.update()
+            .where(user_invitations_table.c.id == fresh_invitation["id"])
+            .values(accepted_at=created_at)
+        )
+    return redirect(url_for("login", invited="1"))
 
 
 @app.route("/")
@@ -2717,6 +2958,11 @@ def admin_dashboard():
             "type": "success",
             "text": "Gestoría creada correctamente. Ya puedes entrar con esa cuenta.",
         }
+    elif admin_message == "agency_invited":
+        flash = {
+            "type": "success",
+            "text": "Invitación enviada a la gestoría. El alta se completará cuando acepte el email.",
+        }
     elif admin_error == "missing_fields":
         flash = {
             "type": "warning",
@@ -2731,6 +2977,16 @@ def admin_dashboard():
         flash = {
             "type": "warning",
             "text": "Ese email ya está registrado.",
+        }
+    elif admin_error == "invite_exists":
+        flash = {
+            "type": "warning",
+            "text": "Ya existe una invitación pendiente para ese email.",
+        }
+    elif admin_error == "invite_send_failed":
+        flash = {
+            "type": "warning",
+            "text": "La invitación se creó pero el email no pudo enviarse. Revisa la configuración de Resend.",
         }
     return render_template("admin.html", agencies=view_rows, flash=flash)
 
@@ -2795,6 +3051,47 @@ def admin_create_agency():
             )
         )
     return redirect(url_for("admin_dashboard", message="agency_created"))
+
+
+@app.route("/admin/agency/invite", methods=["POST"])
+@require_owner
+def admin_invite_agency():
+    name = (request.form.get("name") or "").strip()
+    email = _normalize_email(request.form.get("email"))
+    plan = (request.form.get("plan") or "starter").strip().lower()
+    if not name or not email:
+        return redirect(url_for("admin_dashboard", error="missing_fields"))
+    if plan not in {"starter", "pro", "advanced"}:
+        plan = "starter"
+    result = create_user_invitation(
+        email=email,
+        role="agency",
+        created_by_user_id=int(g.current_user["id"]),
+        name=name,
+        plan=plan,
+    )
+    if not result.get("ok"):
+        errors = result.get("errors") or []
+        if any("pendiente" in error.lower() for error in errors):
+            return redirect(url_for("admin_dashboard", error="invite_exists"))
+        return redirect(url_for("admin_dashboard", error="email_exists"))
+    sent = send_user_invitation_email(
+        email=email,
+        role="agency",
+        token=result["token"],
+        sender_name=g.current_user.get("email"),
+        agency_name=name,
+        reply_to=g.current_user.get("email"),
+    )
+    if not sent:
+        with engine.begin() as conn:
+            conn.execute(
+                user_invitations_table.delete().where(
+                    user_invitations_table.c.token == result["token"]
+                )
+            )
+        return redirect(url_for("admin_dashboard", error="invite_send_failed"))
+    return redirect(url_for("admin_dashboard", message="agency_invited"))
 
 
 @app.route("/admin/agency/<int:agency_id>/plan", methods=["POST"])
@@ -3242,6 +3539,47 @@ def create_staff():
         )
         staff_id = result.inserted_primary_key[0]
     return jsonify({"ok": True, "id": staff_id})
+
+
+@app.route("/api/staff/invite", methods=["POST"])
+def invite_staff():
+    user_id = get_current_user_id()
+    role = (g.current_user or {}).get("role")
+    if role == "staff":
+        return jsonify({"ok": False, "errors": ["No autorizado."]}), 403
+    payload = request.get_json(silent=True) or {}
+    email = _normalize_email(payload.get("email"))
+    if not email:
+        return jsonify({"ok": False, "errors": ["Email obligatorio."]}), 400
+
+    sender_name = (g.current_user or {}).get("email")
+    agency = get_agency_row_for_user(g.current_user or {})
+    agency_name = agency.get("name") if agency else None
+    result = create_user_invitation(
+        email=email,
+        role="staff",
+        created_by_user_id=user_id,
+        agency_id=get_agency_id_for_user(g.current_user or {}),
+    )
+    if not result.get("ok"):
+        return jsonify(result), 400
+    sent = send_user_invitation_email(
+        email=email,
+        role="staff",
+        token=result["token"],
+        sender_name=sender_name,
+        agency_name=agency_name,
+        reply_to=sender_name,
+    )
+    if not sent:
+        with engine.begin() as conn:
+            conn.execute(
+                user_invitations_table.delete().where(
+                    user_invitations_table.c.token == result["token"]
+                )
+            )
+        return jsonify({"ok": False, "errors": ["No se pudo enviar la invitación."]}), 500
+    return jsonify({"ok": True})
 
 
 @app.route("/api/staff/<int:staff_id>", methods=["PUT"])

@@ -1128,7 +1128,6 @@ const companySaveBtn = document.getElementById("companySaveBtn");
 const companiesTableBody = document.querySelector("#companiesTable tbody");
 const companiesEmpty = document.getElementById("companiesEmpty");
 const staffEmail = document.getElementById("staffEmail");
-const staffPassword = document.getElementById("staffPassword");
 const staffSaveBtn = document.getElementById("staffSaveBtn");
 const staffTableBody = document.querySelector("#staffTable tbody");
 const staffEmpty = document.getElementById("staffEmpty");
@@ -2274,34 +2273,32 @@ function deleteCompany(companyId) {
 }
 
 function saveStaff() {
-  if (!staffEmail || !staffPassword || !staffSaveBtn) {
+  if (!staffEmail || !staffSaveBtn) {
     return;
   }
-  if (!staffEmail.value || !staffPassword.value) {
-    alert("Email y contraseña son obligatorios.");
+  if (!staffEmail.value) {
+    alert("El email es obligatorio.");
     return;
   }
   staffSaveBtn.disabled = true;
-  fetch("/api/staff", {
+  fetch("/api/staff/invite", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       email: staffEmail.value,
-      password: staffPassword.value,
     }),
   })
     .then((res) => res.json())
     .then((data) => {
       if (!data.ok) {
-        alert((data.errors || ["Error al crear el trabajador."]).join("\n"));
+        alert((data.errors || ["Error al enviar la invitación."]).join("\n"));
         return;
       }
       staffEmail.value = "";
-      staffPassword.value = "";
-      loadStaff().then(() => renderCompaniesTable(companies));
+      alert("Invitación enviada correctamente.");
     })
     .catch(() => {
-      alert("No se pudo crear el trabajador.");
+      alert("No se pudo enviar la invitación.");
     })
     .finally(() => {
       staffSaveBtn.disabled = false;

@@ -25,8 +25,36 @@
     <section class="panel">
       <div class="panel-header compact">
         <div>
+          <h2>Invitar gestoría</h2>
+          <p>Envía un correo para que la propia gestoría active su acceso y defina contraseña.</p>
+        </div>
+      </div>
+      <form method="post" action="{{ url_for('admin_invite_agency') }}" class="billing-form admin-create-form">
+        <div class="field">
+          <label for="agencyInviteName">Nombre</label>
+          <input id="agencyInviteName" name="name" type="text" placeholder="Ej. Gestoría Demo" required />
+        </div>
+        <div class="field">
+          <label for="agencyInviteEmail">Email</label>
+          <input id="agencyInviteEmail" name="email" type="email" placeholder="demo@gestoria.com" required />
+        </div>
+        <div class="field">
+          <label for="agencyInvitePlan">Plan inicial</label>
+          <select id="agencyInvitePlan" name="plan">
+            <option value="starter">starter</option>
+            <option value="pro">pro</option>
+            <option value="advanced">advanced</option>
+          </select>
+        </div>
+        <button type="submit" class="button primary">Enviar invitación</button>
+      </form>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header compact">
+        <div>
           <h2>Nueva gestoría</h2>
-          <p>Alta manual para pruebas o invitación privada sin reabrir el registro público.</p>
+          <p>Alta manual para pruebas internas cuando no quieras usar el flujo de invitación.</p>
         </div>
       </div>
       <form method="post" action="{{ url_for('admin_create_agency') }}" class="billing-form admin-create-form">

@@ -993,6 +993,12 @@ h1 {
   border-radius: 12px;
 }
 
+.panel-helper {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 .auth-links {
   margin-top: 16px;
   display: flex;

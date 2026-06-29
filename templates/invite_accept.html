@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Acceso · Lector de Facturas</title>
+  <title>Aceptar invitación · Ledged</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
 </head>
 <body class="auth-page">
@@ -19,25 +19,24 @@
       </span>
       <span class="brand-title">Ledged</span>
     </div>
-    <h1>Iniciar sesión</h1>
-    <p class="auth-subtitle">Accede a tu panel contable.</p>
-    {% if message %}
-      <p class="auth-message">{{ message }}</p>
+    <h1>Aceptar invitación</h1>
+    {% if invitation %}
+      <p class="auth-subtitle">Vas a activar el acceso de {{ invitation.email }} como {{ 'gestoría' if invitation.role == 'agency' else 'trabajador' }}.</p>
+    {% else %}
+      <p class="auth-subtitle">El enlace no está disponible.</p>
     {% endif %}
     {% if error %}
       <p class="auth-error">{{ error }}</p>
     {% endif %}
+    {% if invitation %}
     <form method="post" class="auth-form">
-      <label for="email">Email</label>
-      <input type="email" id="email" name="email" required />
-      <label for="password">Contraseña</label>
+      <label for="password">Define tu contraseña</label>
       <input type="password" id="password" name="password" required />
-      <button type="submit" class="button primary">Entrar</button>
+      <button type="submit" class="button primary">Activar acceso</button>
     </form>
+    {% endif %}
     <div class="auth-links">
-      <a href="{{ url_for('reset_password_request') }}">¿Has olvidado tu contraseña?</a>
-      <span>·</span>
-      <a href="mailto:soporte@ledged.app?subject=Solicitud%20de%20acceso%20a%20Ledged">Solicitar acceso</a>
+      <a href="{{ url_for('login') }}">Volver al login</a>
     </div>
   </div>
   <footer class="legal-footer">
