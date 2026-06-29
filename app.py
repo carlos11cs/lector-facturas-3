@@ -50,6 +50,8 @@ DEFAULT_USER_ID = int(os.getenv("DEFAULT_USER_ID", "1"))
 OWNER_EMAIL = (os.getenv("OWNER_EMAIL") or "").strip().lower()
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 APP_FROM_EMAIL = os.getenv("APP_FROM_EMAIL", "no-reply@tuapp.com")
+ACCESS_FROM_EMAIL = os.getenv("ACCESS_FROM_EMAIL", "").strip()
+REPORTS_FROM_EMAIL = os.getenv("REPORTS_FROM_EMAIL", "").strip()
 APP_BASE_URL = (os.getenv("APP_BASE_URL") or "").strip().rstrip("/")
 STRIPE_SECRET_KEY = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
 STRIPE_WEBHOOK_SECRET = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
@@ -374,6 +376,14 @@ def get_role_label(role):
     }.get((role or "").strip().lower(), role or "usuario")
 
 
+def get_access_from_email():
+    return ACCESS_FROM_EMAIL or APP_FROM_EMAIL
+
+
+def get_reports_from_email():
+    return REPORTS_FROM_EMAIL or APP_FROM_EMAIL
+
+
 def get_stripe_price_id(plan):
     return STRIPE_PRICE_IDS.get((plan or "").strip().lower(), "")
 
@@ -618,7 +628,13 @@ def send_user_invitation_email(*, email, role, token, sender_name=None, agency_n
         sender_name=sender_name,
         agency_name=agency_name,
     )
-    return send_email(email, subject, html, reply_to=reply_to)
+    return send_email(
+        email,
+        subject,
+        html,
+        reply_to=reply_to,
+        from_email=get_access_from_email(),
+    )
 
 
 def init_db():
@@ -2425,15 +2441,21 @@ def _normalize_email(value):
     return (value or "").strip().lower()
 
 
-def send_email(to_email, subject, html_content, reply_to=None):
+def send_email(to_email, subject, html_content, reply_to=None, from_email=None):
     if not RESEND_API_KEY:
         app.logger.warning("RESEND_API_KEY no configurada. Email no enviado.")
         return False
-    if APP_FROM_EMAIL.strip().lower() == "soporte@ledged.app":
+    sender = (from_email or APP_FROM_EMAIL or "").strip()
+    sender_lower = sender.lower()
+    if (
+        not sender
+        or sender_lower == "soporte@ledged.app"
+        or sender_lower.endswith("<soporte@ledged.app>")
+    ):
         app.logger.warning("APP_FROM_EMAIL inválido para envíos automáticos.")
         return False
     payload = {
-        "from": APP_FROM_EMAIL,
+        "from": sender,
         "to": [to_email],
         "subject": subject,
         "html": html_content,
@@ -2555,7 +2577,13 @@ def reset_password_request():
         <p><a href="{reset_link}">Restablecer contraseña</a></p>
         """
         reply_to = get_agency_email_for_user(row["id"])
-        send_email(email, "Restablece tu contraseña", html, reply_to=reply_to)
+        send_email(
+            email,
+            "Restablece tu contraseña",
+            html,
+            reply_to=reply_to,
+            from_email=get_access_from_email(),
+        )
     return render_template(
         "reset_request.html",
         message="Si el email existe, recibirás un enlace de recuperación.",
@@ -4810,6 +4838,7 @@ def quarterly_report_email():
         f"Informe fiscal {period_label}",
         html,
         reply_to=reply_to,
+        from_email=get_reports_from_email(),
     )
     if not sent:
         return jsonify({"ok": False, "errors": ["No se pudo enviar el email."]}), 500
@@ -4892,6 +4921,7 @@ def pnl_email():
         f"P&G {period_label}".strip(),
         html,
         reply_to=reply_to,
+        from_email=get_reports_from_email(),
     )
     if not sent:
         return jsonify({"ok": False, "errors": ["No se pudo enviar el P&G."]}), 500
@@ -4968,6 +4998,7 @@ def balance_email():
         f"Balance de situación {period_label}".strip(),
         html,
         reply_to=reply_to,
+        from_email=get_reports_from_email(),
     )
     if not sent:
         return jsonify({"ok": False, "errors": ["No se pudo enviar el balance."]}), 500

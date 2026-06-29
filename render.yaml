@@ -27,6 +27,10 @@ services:
         value: "120"
       - key: EASYOCR_MODEL_STORAGE_DIRECTORY
         value: "/opt/easyocr-models"
+      - key: ACCESS_FROM_EMAIL
+        sync: false
+      - key: REPORTS_FROM_EMAIL
+        sync: false
       - key: APP_BASE_URL
         sync: false
       - key: STRIPE_SECRET_KEY
