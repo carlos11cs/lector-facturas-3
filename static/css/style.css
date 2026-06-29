@@ -31,7 +31,7 @@ body {
 }
 
 .admin-page {
-  max-width: 1200px;
+  max-width: 1440px;
   margin: 32px auto 48px;
   padding: 0 24px;
   display: flex;
@@ -1198,7 +1198,51 @@ h1 {
 }
 
 .admin-create-form {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 18px 20px;
   align-items: end;
+}
+
+.admin-panel-card {
+  padding: 28px 30px 32px;
+}
+
+.admin-billing-table {
+  overflow-x: auto;
+}
+
+.admin-billing-table table {
+  min-width: 1180px;
+}
+
+.admin-billing-table th,
+.admin-billing-table td {
+  padding: 18px 14px;
+  vertical-align: top;
+}
+
+.admin-billing-table th {
+  font-size: 0.78rem;
+  letter-spacing: 0.1em;
+}
+
+.admin-actions-cell {
+  min-width: 210px;
+}
+
+.admin-action-form {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.admin-action-form:last-child {
+  margin-bottom: 0;
+}
+
+.admin-action-form .button,
+.admin-action-form select {
+  width: 100%;
 }
 
 .inline-stack {

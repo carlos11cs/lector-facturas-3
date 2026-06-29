@@ -22,7 +22,7 @@
     </section>
     {% endif %}
 
-    <section class="panel">
+    <section class="panel admin-panel-card">
       <div class="panel-header compact">
         <div>
           <h2>Invitar gestoría</h2>
@@ -50,7 +50,7 @@
       </form>
     </section>
 
-    <section class="panel">
+    <section class="panel admin-panel-card">
       <div class="panel-header compact">
         <div>
           <h2>Nueva gestoría</h2>
@@ -82,8 +82,8 @@
       </form>
     </section>
 
-    <section class="panel">
-      <div class="billing-table">
+    <section class="panel admin-panel-card">
+      <div class="billing-table admin-billing-table">
         <table>
           <thead>
             <tr>
@@ -109,8 +109,8 @@
               <td>{{ agency.user_count }}</td>
               <td>{{ agency.last_login or '-' }}</td>
               <td>{{ agency.stripe_status }}</td>
-              <td>
-                <form method="post" action="{{ url_for('admin_update_plan', agency_id=agency.id) }}" style="margin-bottom: 6px;">
+              <td class="admin-actions-cell">
+                <form method="post" action="{{ url_for('admin_update_plan', agency_id=agency.id) }}" class="admin-action-form">
                   <select name="plan">
                     {% for plan in ['starter','pro','advanced'] %}
                     <option value="{{ plan }}" {% if plan == agency.plan %}selected{% endif %}>{{ plan }}</option>
@@ -118,7 +118,7 @@
                   </select>
                   <button type="submit" class="button ghost small">Actualizar plan</button>
                 </form>
-                <form method="post" action="{{ url_for('admin_update_status', agency_id=agency.id) }}" style="margin-bottom: 6px;">
+                <form method="post" action="{{ url_for('admin_update_status', agency_id=agency.id) }}" class="admin-action-form">
                   {% if agency.status == 'suspended' %}
                   <input type="hidden" name="status" value="active" />
                   <button type="submit" class="button primary small">Reactivar</button>
@@ -127,10 +127,10 @@
                   <button type="submit" class="button ghost small">Suspender</button>
                   {% endif %}
                 </form>
-                <form method="post" action="{{ url_for('admin_reset_trial', agency_id=agency.id) }}">
+                <form method="post" action="{{ url_for('admin_reset_trial', agency_id=agency.id) }}" class="admin-action-form">
                   <button type="submit" class="button ghost small">Reset trial</button>
                 </form>
-                <form method="post" action="{{ url_for('admin_reset_agency_stripe', agency_id=agency.id) }}" style="margin-top: 6px;">
+                <form method="post" action="{{ url_for('admin_reset_agency_stripe', agency_id=agency.id) }}" class="admin-action-form">
                   <button type="submit" class="button ghost small">Reset Stripe</button>
                 </form>
               </td>
