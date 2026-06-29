@@ -16,6 +16,44 @@
       <a class="button ghost" href="{{ url_for('app_home') }}">Volver a la app</a>
     </header>
 
+    {% if flash %}
+    <section class="panel">
+      <div class="billing-message billing-message-{{ flash.type }}">{{ flash.text }}</div>
+    </section>
+    {% endif %}
+
+    <section class="panel">
+      <div class="panel-header compact">
+        <div>
+          <h2>Nueva gestoría</h2>
+          <p>Alta manual para pruebas o invitación privada sin reabrir el registro público.</p>
+        </div>
+      </div>
+      <form method="post" action="{{ url_for('admin_create_agency') }}" class="billing-form admin-create-form">
+        <div class="field">
+          <label for="agencyName">Nombre</label>
+          <input id="agencyName" name="name" type="text" placeholder="Ej. Gestoría Demo" required />
+        </div>
+        <div class="field">
+          <label for="agencyEmail">Email</label>
+          <input id="agencyEmail" name="email" type="email" placeholder="demo@gestoria.com" required />
+        </div>
+        <div class="field">
+          <label for="agencyPassword">Contraseña temporal</label>
+          <input id="agencyPassword" name="password" type="password" placeholder="Mínimo 8 caracteres" required />
+        </div>
+        <div class="field">
+          <label for="agencyPlan">Plan inicial</label>
+          <select id="agencyPlan" name="plan">
+            <option value="starter">starter</option>
+            <option value="pro">pro</option>
+            <option value="advanced">advanced</option>
+          </select>
+        </div>
+        <button type="submit" class="button primary">Crear gestoría</button>
+      </form>
+    </section>
+
     <section class="panel">
       <div class="billing-table">
         <table>

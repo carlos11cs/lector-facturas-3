@@ -1038,6 +1038,10 @@ h1 {
   font-size: 0.95rem;
 }
 
+.panel-header.compact {
+  margin-bottom: 14px;
+}
+
 .button {
   border: none;
   border-radius: 999px;
@@ -1185,6 +1189,10 @@ h1 {
 .billing-form .button {
   align-self: end;
   justify-self: start;
+}
+
+.admin-create-form {
+  align-items: end;
 }
 
 .inline-stack {

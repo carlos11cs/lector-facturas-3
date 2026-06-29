@@ -2665,6 +2665,8 @@ def stripe_webhook():
 @app.route("/admin")
 @require_owner
 def admin_dashboard():
+    admin_message = (request.args.get("message") or "").strip().lower()
+    admin_error = (request.args.get("error") or "").strip().lower()
     with engine.connect() as conn:
         agencies = conn.execute(select(agencies_table)).mappings().all()
         company_counts = {
@@ -2709,7 +2711,90 @@ def admin_dashboard():
             }
         )
     view_rows.sort(key=lambda item: item["name"].lower())
-    return render_template("admin.html", agencies=view_rows)
+    flash = None
+    if admin_message == "agency_created":
+        flash = {
+            "type": "success",
+            "text": "Gestoría creada correctamente. Ya puedes entrar con esa cuenta.",
+        }
+    elif admin_error == "missing_fields":
+        flash = {
+            "type": "warning",
+            "text": "Nombre, email y contraseña son obligatorios.",
+        }
+    elif admin_error == "short_password":
+        flash = {
+            "type": "warning",
+            "text": "La contraseña debe tener al menos 8 caracteres.",
+        }
+    elif admin_error == "email_exists":
+        flash = {
+            "type": "warning",
+            "text": "Ese email ya está registrado.",
+        }
+    return render_template("admin.html", agencies=view_rows, flash=flash)
+
+
+@app.route("/admin/agency/create", methods=["POST"])
+@require_owner
+def admin_create_agency():
+    name = (request.form.get("name") or "").strip()
+    email = _normalize_email(request.form.get("email"))
+    password = request.form.get("password") or ""
+    plan = (request.form.get("plan") or "starter").strip().lower()
+
+    if not name or not email or not password:
+        return redirect(url_for("admin_dashboard", error="missing_fields"))
+    if len(password) < 8:
+        return redirect(url_for("admin_dashboard", error="short_password"))
+    if plan not in {"starter", "pro", "advanced"}:
+        plan = "starter"
+
+    created_at = datetime.utcnow().isoformat()
+    trial_ends = (datetime.utcnow() + timedelta(days=14)).isoformat()
+    with engine.begin() as conn:
+        exists = conn.execute(
+            select(users_table.c.id).where(users_table.c.email == email)
+        ).first()
+        if exists:
+            return redirect(url_for("admin_dashboard", error="email_exists"))
+
+        result = conn.execute(
+            users_table.insert().values(
+                email=email,
+                password_hash=generate_password_hash(password),
+                role="agency",
+                plan="trial",
+                agency_id=None,
+                created_at=created_at,
+                is_active=True,
+            )
+        )
+        agency_user_id = result.inserted_primary_key[0]
+        conn.execute(
+            users_table.update()
+            .where(users_table.c.id == agency_user_id)
+            .values(agency_id=agency_user_id)
+        )
+        conn.execute(
+            agencies_table.insert().values(
+                id=agency_user_id,
+                name=name,
+                email=email,
+                phone=None,
+                plan=plan,
+                status="trial",
+                stripe_customer_id=None,
+                stripe_subscription_id=None,
+                stripe_price_id=None,
+                stripe_subscription_status=None,
+                stripe_current_period_end=None,
+                trial_ends_at=trial_ends,
+                created_at=created_at,
+                last_login_at=None,
+            )
+        )
+    return redirect(url_for("admin_dashboard", message="agency_created"))
 
 
 @app.route("/admin/agency/<int:agency_id>/plan", methods=["POST"])
