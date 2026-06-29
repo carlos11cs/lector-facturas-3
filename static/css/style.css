@@ -1171,6 +1171,40 @@ h1 {
   margin-top: 16px;
 }
 
+.balance-status-box {
+  margin-top: 18px;
+  padding: 16px 18px;
+  border: 1px solid rgba(34, 124, 101, 0.16);
+  border-radius: 16px;
+  background: linear-gradient(135deg, #f9fbf7 0%, #f2f7f3 100%);
+}
+
+.balance-status-summary {
+  margin: 0;
+  color: var(--muted);
+}
+
+.compact-actions {
+  margin-top: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.balance-save-status {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.balance-missing-info {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(190, 53, 53, 0.08);
+  color: #8f2020;
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
 .balance-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));

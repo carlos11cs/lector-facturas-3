@@ -1115,6 +1115,16 @@
               <input type="text" id="balanceTaxId" placeholder="Ej. B12345678" />
             </div>
           </div>
+          <div id="balanceStatusBox" class="balance-status-box">
+            <p id="balanceStatusSummary" class="balance-status-summary">
+              Ledged calcula automáticamente las partidas que conoce y permite completar los saldos de apertura o ajustes manuales por empresa.
+            </p>
+            <div class="panel-actions compact-actions">
+              <button id="balanceSaveBtn" class="button ghost" type="button">Guardar saldos manuales</button>
+              <span id="balanceSaveStatus" class="balance-save-status"></span>
+            </div>
+            <div id="balanceMissingInfo" class="balance-missing-info" hidden></div>
+          </div>
           <div class="balance-grid">
             <div class="balance-column">
               <h3>Activo</h3>

@@ -105,6 +105,7 @@ companies_table = Table(
     Column("files_model_115", Boolean, nullable=False, server_default=text("false")),
     Column("files_model_130", Boolean, nullable=False, server_default=text("false")),
     Column("files_model_202", Boolean, nullable=False, server_default=text("false")),
+    Column("balance_manual_data", Text),
     Column("created_at", String, nullable=False),
 )
 
@@ -158,6 +159,7 @@ invoices_table = Table(
     Column("invoice_date", String, nullable=False),
     Column("supplier", String, nullable=False),
     Column("base_amount", Float, nullable=False),
+    Column("vat_deductible", Boolean),
     Column("vat_rate", Integer),
     Column("vat_amount", Float),
     Column("total_amount", Float, nullable=False),
@@ -336,6 +338,7 @@ def init_db():
     add_column_if_missing("invoices", "payment_dates", "TEXT")
     add_column_if_missing("invoices", "payment_completed_dates", "TEXT")
     add_column_if_missing("invoices", "vat_breakdown", "TEXT")
+    add_column_if_missing("invoices", "vat_deductible", "BOOLEAN")
     add_column_if_missing("invoices", "extraction_source", "VARCHAR")
     add_column_if_missing("invoices", "confidence_score", "FLOAT")
     add_column_if_missing("invoices", "expense_family", "VARCHAR")
@@ -365,6 +368,7 @@ def init_db():
                 select(
                     invoices_table.c.id,
                     invoices_table.c.expense_category,
+                    invoices_table.c.vat_deductible,
                     invoices_table.c.vat_amount,
                     invoices_table.c.expense_family,
                     invoices_table.c.expense_subtype,
@@ -382,6 +386,7 @@ def init_db():
                     continue
                 profile = derive_invoice_profile(
                     row.get("expense_category"),
+                    row.get("vat_deductible"),
                     row.get("vat_amount"),
                 )
                 conn.execute(
@@ -389,6 +394,11 @@ def init_db():
                     .where(invoices_table.c.id == row["id"])
                     .values(**profile)
                 )
+            conn.execute(
+                invoices_table.update()
+                .where(invoices_table.c.vat_deductible.is_(None))
+                .values(vat_deductible=True)
+            )
 
     add_column_if_missing("facturacion", "user_id", "INTEGER")
     add_column_if_missing("facturacion", "company_id", "INTEGER")
@@ -432,6 +442,7 @@ def init_db():
     add_column_if_missing("companies", "files_model_115", "BOOLEAN DEFAULT FALSE")
     add_column_if_missing("companies", "files_model_130", "BOOLEAN DEFAULT FALSE")
     add_column_if_missing("companies", "files_model_202", "BOOLEAN DEFAULT FALSE")
+    add_column_if_missing("companies", "balance_manual_data", "TEXT")
     if "no_invoice_expenses" in table_names:
         with engine.begin() as conn:
             conn.execute(
@@ -1034,14 +1045,14 @@ def serialize_tax_model_targets(targets):
     return json.dumps(parse_tax_model_targets(targets))
 
 
-def derive_invoice_profile(expense_category, vat_amount=None):
+def derive_invoice_profile(expense_category, vat_deductible=True, vat_amount=None):
     category = (expense_category or "with_invoice").strip()
     if category == "non_deductible":
         targets = []
         subtype = "non_deductible_invoice"
         pnl_bucket = "non_deductible_expense"
     else:
-        targets = ["303"]
+        targets = ["303"] if bool(vat_deductible) else []
         subtype = "supplier_invoice"
         pnl_bucket = "operating_expense"
     return {
@@ -1050,6 +1061,14 @@ def derive_invoice_profile(expense_category, vat_amount=None):
         "pnl_bucket": pnl_bucket,
         "tax_model_targets": serialize_tax_model_targets(targets),
     }
+
+
+def get_invoice_deductible_amount(row):
+    if not row or row.get("expense_category") == "non_deductible":
+        return 0.0
+    if row.get("vat_deductible"):
+        return float(row.get("base_amount") or 0)
+    return float(row.get("total_amount") or 0)
 
 
 def derive_no_invoice_profile(expense_type, vat_deductible=False, withholding_amount=0.0):
@@ -1574,6 +1593,8 @@ def _build_tax_model_metrics(user_id, company_id, periods, conn):
         invoice_rows = conn.execute(
             select(
                 invoices_table.c.base_amount,
+                invoices_table.c.total_amount,
+                invoices_table.c.vat_deductible,
                 invoices_table.c.vat_amount,
                 invoices_table.c.expense_category,
                 invoices_table.c.tax_model_targets,
@@ -1585,10 +1606,9 @@ def _build_tax_model_metrics(user_id, company_id, periods, conn):
             .where(invoices_table.c.invoice_date.like(f"{prefix}%"))
         ).mappings().all()
         for row in invoice_rows:
-            if row["expense_category"] == "non_deductible":
-                continue
-            expense_base += float(row["base_amount"] or 0)
-            expense_vat += float(row["vat_amount"] or 0)
+            expense_base += get_invoice_deductible_amount(row)
+            if row.get("expense_category") != "non_deductible" and row.get("vat_deductible") is not False:
+                expense_vat += float(row["vat_amount"] or 0)
 
         no_invoice_rows = conn.execute(
             select(
@@ -1857,6 +1877,8 @@ def _build_report_totals(user_id, company_id, months, year):
             invoice_rows = conn.execute(
                 select(
                     invoices_table.c.base_amount,
+                    invoices_table.c.total_amount,
+                    invoices_table.c.vat_deductible,
                     invoices_table.c.vat_amount,
                     invoices_table.c.expense_category,
                     invoices_table.c.tax_model_targets,
@@ -1866,10 +1888,9 @@ def _build_report_totals(user_id, company_id, months, year):
                 .where(invoices_table.c.invoice_date.like(f"{prefix}%"))
             ).mappings().all()
             for row in invoice_rows:
-                if row["expense_category"] == "non_deductible":
-                    continue
-                expense_base += float(row["base_amount"] or 0)
-                expense_vat += float(row["vat_amount"] or 0)
+                expense_base += get_invoice_deductible_amount(row)
+                if row.get("expense_category") != "non_deductible" and row.get("vat_deductible") is not False:
+                    expense_vat += float(row["vat_amount"] or 0)
 
             no_invoice_rows = conn.execute(
                 select(
@@ -2477,6 +2498,7 @@ def list_companies():
         companies_table.c.files_model_115,
         companies_table.c.files_model_130,
         companies_table.c.files_model_202,
+        companies_table.c.balance_manual_data,
     )
     if user_role == "staff":
         base_query = base_query.where(companies_table.c.assigned_user_id == user_id)
@@ -2503,6 +2525,7 @@ def list_companies():
             "files_model_115": bool(row.get("files_model_115")) if row.get("files_model_115") is not None else False,
             "files_model_130": bool(row.get("files_model_130")) if row.get("files_model_130") is not None else False,
             "files_model_202": bool(row.get("files_model_202")) if row.get("files_model_202") is not None else False,
+            "balance_manual_data": row.get("balance_manual_data"),
         }
         for row in rows
     ]
@@ -2705,6 +2728,44 @@ def update_company(company_id):
         return jsonify({"ok": False, "errors": ["Empresa no encontrada."]}), 404
 
     return jsonify({"ok": True})
+
+
+@app.route("/api/companies/<int:company_id>/balance-manual-data", methods=["PUT"])
+def update_company_balance_manual_data(company_id):
+    user_id = get_current_user_id()
+    user_role = (g.current_user or {}).get("role")
+    if user_role == "staff":
+        return jsonify({"ok": False, "errors": ["No autorizado."]}), 403
+
+    payload = request.get_json(silent=True) or {}
+    raw_data = payload.get("balance_manual_data") or payload.get("balanceManualData") or {}
+    if not isinstance(raw_data, dict):
+        return jsonify({"ok": False, "errors": ["Formato de balance inválido."]}), 400
+
+    clean_data = {}
+    for key, value in raw_data.items():
+        if value in (None, "", False):
+            continue
+        try:
+            clean_value = round(float(value), 2)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "errors": [f"Valor inválido para {key}."]}), 400
+        clean_data[str(key)] = clean_value
+
+    with engine.begin() as conn:
+        query = (
+            companies_table.update()
+            .where(companies_table.c.id == company_id)
+            .values(balance_manual_data=json.dumps(clean_data) if clean_data else None)
+        )
+        if user_role != "owner":
+            query = query.where(companies_table.c.agency_id == user_id)
+        result = conn.execute(query)
+
+    if result.rowcount == 0:
+        return jsonify({"ok": False, "errors": ["Empresa no encontrada."]}), 404
+
+    return jsonify({"ok": True, "balance_manual_data": clean_data})
 
 
 @app.route("/api/companies/<int:company_id>", methods=["DELETE"])
@@ -2973,7 +3034,16 @@ def upload_invoices():
                     base_amount, vat_amount, total_amount = normalize_vat_amounts(
                         base_amount, vat_rate_int, vat_amount, total_amount
                     )
-                expense_profile = derive_invoice_profile(expense_category, vat_amount)
+                vat_deductible = entry.get("vatDeductible")
+                if vat_deductible is None:
+                    vat_deductible = expense_category != "non_deductible"
+                else:
+                    vat_deductible = vat_deductible in (True, "true", "True", 1, "1")
+                expense_profile = derive_invoice_profile(
+                    expense_category,
+                    vat_deductible,
+                    vat_amount,
+                )
 
                 created_at = datetime.utcnow().isoformat()
 
@@ -2986,6 +3056,7 @@ def upload_invoices():
                         invoice_date=invoice_date,
                         supplier=supplier,
                         base_amount=base_amount,
+                        vat_deductible=vat_deductible,
                         vat_rate=vat_rate_int,
                         vat_amount=vat_amount,
                         total_amount=total_amount,
@@ -3090,7 +3161,7 @@ def upload_invoices():
 
             # Guardado manual: no recalcular ni aplicar heurísticas semánticas.
             created_at = datetime.utcnow().isoformat()
-            expense_profile = derive_invoice_profile("with_invoice", vat_amount)
+            expense_profile = derive_invoice_profile("with_invoice", True, vat_amount)
 
             conn.execute(
                 invoices_table.insert().values(
@@ -3101,6 +3172,7 @@ def upload_invoices():
                     invoice_date=invoice_date,
                     supplier=supplier,
                     base_amount=base_amount,
+                    vat_deductible=True,
                     vat_rate=vat_rate_int,
                     vat_amount=vat_amount,
                     total_amount=total_amount,
@@ -3338,6 +3410,7 @@ def list_invoices():
                 invoices_table.c.invoice_date,
                 invoices_table.c.supplier,
                 invoices_table.c.base_amount,
+                invoices_table.c.vat_deductible,
                 invoices_table.c.vat_rate,
                 invoices_table.c.vat_amount,
                 invoices_table.c.total_amount,
@@ -3371,6 +3444,7 @@ def list_invoices():
             "payment_completed_dates": parse_payment_dates(row.get("payment_completed_dates")),
             "supplier": row["supplier"],
             "base_amount": float(row["base_amount"]),
+            "vat_deductible": bool(row.get("vat_deductible")) if row.get("vat_deductible") is not None else True,
             "vat_rate": int(row["vat_rate"]) if row["vat_rate"] is not None and row["vat_rate"] >= 0 else None,
             "vat_amount": float(row["vat_amount"]) if row["vat_amount"] is not None else None,
             "total_amount": float(row["total_amount"]),
@@ -4262,6 +4336,7 @@ def update_invoice(invoice_id):
     )
     vat_breakdown_json = json.dumps(vat_breakdown) if vat_breakdown else None
     expense_category = payload.get("expense_category") or "with_invoice"
+    vat_deductible = payload.get("vat_deductible")
 
     errors = []
     if not invoice_date:
@@ -4291,6 +4366,12 @@ def update_invoice(invoice_id):
             errors.append("Tipo de IVA inválido.")
     if expense_category not in {"with_invoice", "without_invoice", "non_deductible"}:
         errors.append("Tipo de gasto inválido.")
+    if vat_deductible is None:
+        vat_deductible = expense_category != "non_deductible"
+    else:
+        vat_deductible = vat_deductible in (True, "true", "True", 1, "1")
+    if expense_category == "non_deductible":
+        vat_deductible = False
 
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
@@ -4299,12 +4380,13 @@ def update_invoice(invoice_id):
         base_amount, vat_amount, total_amount = normalize_vat_amounts(
             base_amount, vat_rate, vat_amount, total_amount
         )
-    expense_profile = derive_invoice_profile(expense_category, vat_amount)
+    expense_profile = derive_invoice_profile(expense_category, vat_deductible, vat_amount)
 
     updates = {
         "invoice_date": invoice_date,
         "supplier": supplier,
         "base_amount": base_amount,
+        "vat_deductible": vat_deductible,
         "vat_rate": vat_rate,
         "vat_amount": vat_amount,
         "total_amount": total_amount,
@@ -4344,11 +4426,13 @@ def update_invoice(invoice_id):
                 "payment_dates": payment_dates if payment_dates_payload is not None else None,
                 "supplier": supplier,
                 "base_amount": base_amount,
+                "vat_deductible": vat_deductible,
                 "vat_rate": vat_rate,
                 "vat_amount": vat_amount,
                 "total_amount": total_amount,
                 "vat_breakdown": vat_breakdown,
                 "expense_category": expense_category,
+                "vat_deductible": vat_deductible,
                 "expense_family": expense_profile.get("expense_family"),
                 "expense_subtype": expense_profile.get("expense_subtype"),
                 "pnl_bucket": expense_profile.get("pnl_bucket"),
@@ -5856,8 +5940,11 @@ def summary():
                 invoices_table.c.invoice_date,
                 invoices_table.c.supplier,
                 invoices_table.c.total_amount,
+                invoices_table.c.expense_category,
+                invoices_table.c.vat_deductible,
                 invoices_table.c.vat_rate,
                 invoices_table.c.base_amount,
+                invoices_table.c.vat_amount,
                 invoices_table.c.vat_breakdown,
             )
             .where(invoices_table.c.user_id == data_owner_id)
@@ -5884,16 +5971,17 @@ def summary():
 
         supplier = row["supplier"]
         supplier_totals[supplier] = supplier_totals.get(supplier, 0.0) + amount
-        breakdown = parse_vat_breakdown(row.get("vat_breakdown"))
-        if breakdown:
-            for line in breakdown:
-                rate = int(line.get("rate") or 0)
-                vat_value = float(line.get("vat_amount") or 0)
-                if rate in vat_totals:
-                    vat_totals[rate] += vat_value
-        else:
-            vat_rate = int(row["vat_rate"])
-            vat_totals[vat_rate] += base_amount * (vat_rate / 100)
+        if row.get("expense_category") != "non_deductible" and row.get("vat_deductible") is not False:
+            breakdown = parse_vat_breakdown(row.get("vat_breakdown"))
+            if breakdown:
+                for line in breakdown:
+                    rate = int(line.get("rate") or 0)
+                    vat_value = float(line.get("vat_amount") or 0)
+                    if rate in vat_totals:
+                        vat_totals[rate] += vat_value
+            else:
+                vat_rate = int(row["vat_rate"])
+                vat_totals[vat_rate] += float(row.get("vat_amount") or base_amount * (vat_rate / 100))
 
     with engine.connect() as conn:
         no_invoice_rows = conn.execute(

@@ -31,6 +31,7 @@ let selectedPaymentDay = null;
 let calendarMonth = null;
 let calendarYear = null;
 let calendarOverride = false;
+let currentBalanceManualData = {};
 let companies = [];
 let selectedCompanyId = null;
 let pendingIncomeFiles = [];
@@ -331,6 +332,28 @@ function setBalanceInputValue(id, value) {
   el.value = formatAmountInput(value);
 }
 
+function getBalanceManualValue(id) {
+  return Number(currentBalanceManualData?.[id]) || 0;
+}
+
+function getBalanceAutoValues(netResult = null) {
+  const autoValues = {
+    bsAssetReceivables: getBalanceReceivablesEstimate(),
+    bsAssetCash: getBalanceCashEstimate(),
+    bsEquityResult: netResult !== null ? netResult : getBalanceInputValue("bsEquityResult"),
+    bsLiabPayables: getBalancePayablesEstimate(),
+  };
+  return autoValues;
+}
+
+function setBalanceFieldDisplayValues(netResult = null) {
+  const autoValues = getBalanceAutoValues(netResult);
+  balanceInputIds.forEach((id) => {
+    const totalValue = getBalanceManualValue(id) + (Number(autoValues[id]) || 0);
+    setBalanceInputValue(id, totalValue);
+  });
+}
+
 function updateBalanceTotals() {
   if (!bsTotalAssets || !bsTotalLiabilities) {
     return;
@@ -382,9 +405,8 @@ function updateBalanceTotals() {
 }
 
 function syncBalanceStatementFields(netResult) {
-  setBalanceInputValue("bsEquityResult", netResult);
-  setBalanceInputValue("bsLiabPayables", getBalancePayablesEstimate());
-  setBalanceInputValue("bsAssetCash", getBalanceCashEstimate());
+  setBalanceFieldDisplayValues(netResult);
+  renderBalanceMissingInfo(netResult);
   updateBalanceTotals();
 }
 
@@ -508,6 +530,21 @@ function getBalancePayablesEstimate() {
   return roundAmount(invoicePayables + noInvoicePayables);
 }
 
+function getBalanceReceivablesEstimate() {
+  return roundAmount(
+    (currentIncomeInvoices || []).reduce((sum, invoice) => {
+      return (
+        sum +
+        sumOutstandingScheduledAmount(
+          Number(invoice.total_amount) || 0,
+          normalizePaymentDateList(invoice.payment_dates),
+          invoice.payment_completed_dates
+        )
+      );
+    }, 0)
+  );
+}
+
 function getBalanceCashEstimate() {
   const baseTotals = currentBillingSummary?.baseTotals || {};
   const vatTotals = currentBillingSummary?.vatTotals || {};
@@ -541,6 +578,128 @@ function getBalanceCashEstimate() {
   );
 }
 
+function getCurrentBalanceManualPayload(netResult = null) {
+  const autoValues = getBalanceAutoValues(netResult);
+  return balanceInputIds.reduce((acc, id) => {
+    const enteredValue = getBalanceInputValue(id);
+    const manualValue = roundAmount(enteredValue - (Number(autoValues[id]) || 0));
+    if (Math.abs(manualValue) >= 0.005) {
+      acc[id] = manualValue;
+    }
+    return acc;
+  }, {});
+}
+
+function loadBalanceManualDataFromCompany() {
+  const company = getSelectedCompany();
+  if (!company || !company.balance_manual_data) {
+    currentBalanceManualData = {};
+    if (balanceSaveStatus) {
+      balanceSaveStatus.textContent = "";
+    }
+    return;
+  }
+  const rawValue = company.balance_manual_data;
+  if (typeof rawValue === "object" && rawValue !== null) {
+    currentBalanceManualData = rawValue;
+    if (balanceSaveStatus) {
+      balanceSaveStatus.textContent = "";
+    }
+    return;
+  }
+  try {
+    const parsed = JSON.parse(rawValue);
+    currentBalanceManualData = parsed && typeof parsed === "object" ? parsed : {};
+  } catch (error) {
+    currentBalanceManualData = {};
+  }
+  if (balanceSaveStatus) {
+    balanceSaveStatus.textContent = "";
+  }
+}
+
+function renderBalanceMissingInfo(netResult = null) {
+  if (!balanceMissingInfo) {
+    return;
+  }
+  const autoValues = getBalanceAutoValues(netResult);
+  const manualPayload = getCurrentBalanceManualPayload(netResult);
+  const missing = [];
+
+  balanceAlwaysManualFieldIds.forEach((id) => {
+    const totalValue = (Number(autoValues[id]) || 0) + (Number(manualPayload[id]) || 0);
+    if (Math.abs(totalValue) < 0.005) {
+      missing.push(balanceFieldLabels[id]);
+    }
+  });
+
+  if ((currentLoanInstallments || []).length) {
+    const debtTotal =
+      getBalanceInputValue("bsLiabShortTermDebt") + getBalanceInputValue("bsLiabLongTermDebt");
+    if (Math.abs(debtTotal) < 0.005) {
+      missing.push("deudas a corto o largo plazo vinculadas a financiación");
+    }
+  }
+
+  if (!missing.length) {
+    balanceMissingInfo.hidden = true;
+    balanceMissingInfo.textContent = "";
+    return;
+  }
+
+  balanceMissingInfo.hidden = false;
+  balanceMissingInfo.textContent =
+    `Información pendiente para que el balance sea completo: ${missing.join(", ")}. ` +
+    "Ledged seguirá calculando automáticamente las partidas que conoce y conservará estos saldos manuales por empresa.";
+}
+
+function saveBalanceManualData() {
+  const companyId = getSelectedCompanyId();
+  if (!companyId) {
+    alert("Selecciona una empresa antes de guardar el balance.");
+    return;
+  }
+  const netResult = parseNumberInput(document.getElementById("pnlNet")?.textContent || "") || 0;
+  const payload = getCurrentBalanceManualPayload(netResult);
+  if (balanceSaveBtn) {
+    balanceSaveBtn.disabled = true;
+  }
+  if (balanceSaveStatus) {
+    balanceSaveStatus.textContent = "Guardando...";
+  }
+  fetch(`/api/companies/${companyId}/balance-manual-data`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      balance_manual_data: payload,
+    }),
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        alert((data.errors || ["No se pudo guardar el balance."]).join("\n"));
+        return;
+      }
+      currentBalanceManualData = data.balance_manual_data || {};
+      const company = getSelectedCompany();
+      if (company) {
+        company.balance_manual_data = currentBalanceManualData;
+      }
+      renderBalanceMissingInfo(netResult);
+      if (balanceSaveStatus) {
+        balanceSaveStatus.textContent = "Saldos manuales guardados.";
+      }
+    })
+    .catch(() => {
+      alert("No se pudo guardar el balance.");
+    })
+    .finally(() => {
+      if (balanceSaveBtn) {
+        balanceSaveBtn.disabled = false;
+      }
+    });
+}
+
 function setPnlInputValue(id, value, auto = false) {
   const el = document.getElementById(id);
   if (!el) {
@@ -570,8 +729,23 @@ function bindBalanceInputs() {
     if (!el) {
       return;
     }
-    el.addEventListener("input", updateBalanceTotals);
+    el.addEventListener("input", () => {
+      const autoValues = getBalanceAutoValues();
+      const manualValue = roundAmount(
+        getBalanceInputValue(id) - (Number(autoValues[id]) || 0)
+      );
+      if (Math.abs(manualValue) < 0.005) {
+        delete currentBalanceManualData[id];
+      } else {
+        currentBalanceManualData[id] = manualValue;
+      }
+      renderBalanceMissingInfo();
+      updateBalanceTotals();
+    });
   });
+  if (balanceSaveBtn) {
+    balanceSaveBtn.addEventListener("click", saveBalanceManualData);
+  }
   updateBalanceTotals();
 }
 
@@ -906,6 +1080,9 @@ const balancePdfBtn = document.getElementById("balancePdfBtn");
 const balanceEmailBtn = document.getElementById("balanceEmailBtn");
 const balanceName = document.getElementById("balanceName");
 const balanceTaxId = document.getElementById("balanceTaxId");
+const balanceSaveBtn = document.getElementById("balanceSaveBtn");
+const balanceSaveStatus = document.getElementById("balanceSaveStatus");
+const balanceMissingInfo = document.getElementById("balanceMissingInfo");
 const bsAssetIntangible = document.getElementById("bsAssetIntangible");
 const bsAssetTangible = document.getElementById("bsAssetTangible");
 const bsAssetInvestmentProperty = document.getElementById("bsAssetInvestmentProperty");
@@ -1036,6 +1213,31 @@ const balanceInputIds = [
   "bsLiabShortTermDebt",
   "bsLiabPayables",
   "bsLiabOtherCurrent",
+];
+const balanceFieldLabels = {
+  bsAssetIntangible: "Inmovilizado intangible",
+  bsAssetTangible: "Inmovilizado material",
+  bsAssetInvestmentProperty: "Inversiones inmobiliarias",
+  bsAssetLongTermInv: "Inversiones financieras a largo plazo",
+  bsAssetDeferredTax: "Activos por impuesto diferido",
+  bsAssetInventory: "Existencias",
+  bsAssetReceivables: "Deudores comerciales y otras cuentas a cobrar",
+  bsAssetShortTermInv: "Inversiones financieras a corto plazo",
+  bsAssetCash: "Efectivo y otros activos líquidos equivalentes",
+  bsAssetCurrentTax: "Activos por impuesto corriente",
+  bsEquityCapital: "Capital",
+  bsEquityReserves: "Reservas",
+  bsEquityResult: "Resultado del ejercicio",
+  bsEquityGrants: "Subvenciones, donaciones y legados",
+  bsLiabLongTermDebt: "Deudas a largo plazo",
+  bsLiabLongTermOther: "Otras obligaciones a largo plazo",
+  bsLiabShortTermDebt: "Deudas a corto plazo",
+  bsLiabPayables: "Proveedores y otras cuentas a pagar",
+  bsLiabOtherCurrent: "Otras obligaciones corrientes",
+};
+const balanceAlwaysManualFieldIds = [
+  "bsEquityCapital",
+  "bsEquityReserves",
 ];
 
 function isAllowedFile(fileName) {
@@ -1275,16 +1477,23 @@ function getPrimaryVatRateFromBreakdown(lines, fallback = "21") {
 function getVatDisplayFromInvoice(invoice) {
   const breakdown = parseVatBreakdown(invoice.vat_breakdown || invoice.vatBreakdown);
   const rates = getBreakdownRates(breakdown);
+  const suffix = invoice?.vat_deductible === false ? " · no ded." : "";
   if (rates.length > 1) {
     return {
-      label: "Mixto",
-      title: `IVA: ${rates.map((rate) => formatPercent(rate).replace(" ", "")).join(" · ")}`,
+      label: `Mixto${suffix}`,
+      title: `IVA: ${rates.map((rate) => formatPercent(rate).replace(" ", "")).join(" · ")}${invoice?.vat_deductible === false ? " · IVA no deducible" : ""}`,
     };
   }
   if (rates.length === 1) {
-    return { label: formatPercent(rates[0]), title: "" };
+    return {
+      label: `${formatPercent(rates[0])}${suffix}`,
+      title: invoice?.vat_deductible === false ? "IVA no deducible" : "",
+    };
   }
-  return { label: formatPercent(invoice.vat_rate), title: "" };
+  return {
+    label: `${formatPercent(invoice.vat_rate)}${suffix}`,
+    title: invoice?.vat_deductible === false ? "IVA no deducible" : "",
+  };
 }
 
 function formatExpenseCategory(category) {
@@ -1341,6 +1550,23 @@ function getNoInvoiceDeductibleAmount(expense) {
     return 0;
   }
   return Number(expense.amount) || 0;
+}
+
+function getInvoiceDeductibleAmount(invoice) {
+  if (!invoice || invoice.expense_category === "non_deductible") {
+    return 0;
+  }
+  if (invoice.vat_deductible === false) {
+    return Number(invoice.total_amount) || 0;
+  }
+  return Number(invoice.base_amount) || 0;
+}
+
+function getInvoiceVatDeductibleAmount(invoice) {
+  if (!invoice || invoice.expense_category === "non_deductible" || invoice.vat_deductible === false) {
+    return 0;
+  }
+  return Number(invoice.vat_amount) || 0;
 }
 
 function getNoInvoiceVatDeductibleAmount(expense) {
@@ -1675,6 +1901,7 @@ function loadCompanies() {
     .then((data) => {
       companies = data.companies || [];
       setCompanyOptions(companies);
+      loadBalanceManualDataFromCompany();
       renderCompaniesTable(companies);
       applyCompanyTaxModules();
       updatePnlSummary();
@@ -4888,10 +5115,7 @@ function updateDashboardTotals() {
   const vatSupported = invoiceVatSupportedTotal + noInvoiceVatSupported;
 
   const invoiceVatDeductible = (currentInvoices || []).reduce((sum, invoice) => {
-    if (invoice.expense_category === "non_deductible") {
-      return sum;
-    }
-    return sum + (Number(invoice.vat_amount) || 0);
+    return sum + getInvoiceVatDeductibleAmount(invoice);
   }, 0);
   const noInvoiceVatDeductible = (currentNoInvoiceExpenses || []).reduce(
     (sum, expense) => sum + getNoInvoiceVatDeductibleAmount(expense),
@@ -5222,14 +5446,11 @@ function updateNetChart() {
       incomeMap[month] = 0;
     });
     currentInvoices.forEach((invoice) => {
-      if (invoice.expense_category === "non_deductible") {
-        return;
-      }
       const month = Number(String(invoice.invoice_date || "").slice(5, 7));
       if (!expensesMap[month]) {
         expensesMap[month] = 0;
       }
-      expensesMap[month] += Number(invoice.base_amount) || 0;
+      expensesMap[month] += getInvoiceDeductibleAmount(invoice);
     });
     currentNoInvoiceExpenses.forEach((expense) => {
       if (!expense.deductible) {
@@ -6114,10 +6335,7 @@ function refreshAnnualTaxData() {
     annualBillingBaseTotal += annualIncomeInvoicesBase;
 
     const annualInvoices = invoices.reduce((total, invoice) => {
-      if (invoice.expense_category === "non_deductible") {
-        return total;
-      }
-      return total + (Number(invoice.base_amount) || 0);
+      return total + getInvoiceDeductibleAmount(invoice);
     }, 0);
 
     const annualNoInvoice = expenses.reduce(
@@ -6240,6 +6458,9 @@ function renderInvoices(invoices) {
     categoryTd.textContent = formatExpenseCategory(
       invoice.expense_category || "with_invoice"
     );
+    if (invoice.vat_deductible === false && invoice.expense_category !== "non_deductible") {
+      categoryTd.title = "Gasto deducible con IVA no deducible";
+    }
 
     const actionsTd = document.createElement("td");
     actionsTd.classList.add("invoice-actions");
@@ -6616,6 +6837,24 @@ function enterInvoiceEditMode(row, invoice) {
   });
 
   const categorySelect = createExpenseCategorySelect(invoice.expense_category);
+  const vatDeductibleSelect = createDeductibleSelect(invoice.vat_deductible !== false);
+  const vatDeductibleWrap = document.createElement("div");
+  vatDeductibleWrap.className = "inline-stack";
+  const vatDeductibleLabel = document.createElement("span");
+  vatDeductibleLabel.className = "field-warning";
+  vatDeductibleLabel.textContent = "IVA deducible";
+  vatDeductibleWrap.appendChild(vatDeductibleLabel);
+  vatDeductibleWrap.appendChild(vatDeductibleSelect);
+  const syncInvoiceDeductibleControls = () => {
+    if (categorySelect.value === "non_deductible") {
+      vatDeductibleSelect.value = "false";
+      vatDeductibleSelect.disabled = true;
+      return;
+    }
+    vatDeductibleSelect.disabled = false;
+  };
+  categorySelect.addEventListener("change", syncInvoiceDeductibleControls);
+  syncInvoiceDeductibleControls();
 
   dateTd.textContent = "";
   dateTd.appendChild(dateInput);
@@ -6633,6 +6872,7 @@ function enterInvoiceEditMode(row, invoice) {
   totalTd.appendChild(totalInput);
   categoryTd.textContent = "";
   categoryTd.appendChild(categorySelect);
+  categoryTd.appendChild(vatDeductibleWrap);
   const initialSource =
     parseNumberInput(baseInput.value) !== null ? "base" : "total";
   applyVatCalculation(invoice, calcInputs, initialSource);
@@ -6651,6 +6891,7 @@ function enterInvoiceEditMode(row, invoice) {
       vat_amount: vatAmountInput.value,
       total_amount: totalInput.value,
       expense_category: categorySelect.value,
+      vat_deductible: vatDeductibleSelect.value === "true",
     });
   });
 
@@ -7842,10 +8083,7 @@ function updateVatResult() {
 
 function updateTaxSummary() {
   const deductibleInvoices = currentInvoices.reduce((total, invoice) => {
-    if (invoice.expense_category === "non_deductible") {
-      return total;
-    }
-    return total + (Number(invoice.base_amount) || 0);
+    return total + getInvoiceDeductibleAmount(invoice);
   }, 0);
 
   const deductibleNoInvoice = currentNoInvoiceExpenses.reduce(
@@ -7910,10 +8148,7 @@ function updatePnlSummary() {
     0
   );
   const invoiceExpenses = sourceInvoices.reduce((sum, invoice) => {
-    if (invoice.expense_category === "non_deductible") {
-      return sum;
-    }
-    return sum + (Number(invoice.base_amount) || 0);
+    return sum + getInvoiceDeductibleAmount(invoice);
   }, 0);
   const payrollExpenses = sourceNoInvoice.reduce((sum, expense) => {
     if (expense.expense_type === "nomina" || expense.expense_type === "seguridad_social") {
@@ -8975,6 +9210,7 @@ function bindEvents() {
   if (companySelect) {
     companySelect.addEventListener("change", () => {
       selectedCompanyId = companySelect.value;
+      loadBalanceManualDataFromCompany();
       persistFilters();
       applyCompanyTaxModules();
       updatePnlSummary();
