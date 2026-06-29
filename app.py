@@ -486,6 +486,33 @@ def sync_agency_billing_state(
         )
 
 
+def clear_agency_stripe_state(conn, agency_id, *, reset_status=False):
+    values = {
+        "stripe_customer_id": None,
+        "stripe_subscription_id": None,
+        "stripe_price_id": None,
+        "stripe_subscription_status": None,
+        "stripe_current_period_end": None,
+    }
+    if reset_status:
+        values["status"] = "trial"
+        values["trial_ends_at"] = (datetime.utcnow() + timedelta(days=14)).isoformat()
+    conn.execute(
+        agencies_table.update().where(agencies_table.c.id == agency_id).values(**values)
+    )
+
+
+def stripe_customer_exists(customer_id):
+    if not stripe or not customer_id:
+        return False
+    try:
+        customer = stripe.Customer.retrieve(customer_id)
+        return not getattr(customer, "deleted", False)
+    except Exception:
+        app.logger.warning("Stripe customer %s no disponible en el entorno actual", customer_id)
+        return False
+
+
 def get_billing_context_for_user(user):
     agency = get_agency_row_for_user(user)
     if not agency or user.get("role") != "agency":
@@ -2792,10 +2819,15 @@ def start_stripe_checkout():
     agency = get_agency_row_for_user(user)
     if not agency:
         return redirect(url_for("app_home", billing_error="checkout_failed"))
-    if agency.get("stripe_subscription_id"):
-        return redirect(url_for("open_stripe_portal"))
     customer_id = agency.get("stripe_customer_id")
     try:
+        if agency.get("stripe_subscription_id") and customer_id and stripe_customer_exists(customer_id):
+            return redirect(url_for("open_stripe_portal"))
+        if customer_id and not stripe_customer_exists(customer_id):
+            with engine.begin() as conn:
+                clear_agency_stripe_state(conn, agency["id"])
+            agency = get_agency_row_for_user(user)
+            customer_id = None
         if not customer_id:
             customer = stripe.Customer.create(
                 email=agency.get("email") or user.get("email"),
@@ -2837,6 +2869,10 @@ def open_stripe_portal():
     if not agency or not agency.get("stripe_customer_id"):
         return redirect(url_for("app_home", billing_error="not_available"))
     try:
+        if not stripe_customer_exists(agency["stripe_customer_id"]):
+            with engine.begin() as conn:
+                clear_agency_stripe_state(conn, agency["id"])
+            return redirect(url_for("app_home", billing_error="not_available"))
         portal_session = stripe.billing_portal.Session.create(
             customer=agency["stripe_customer_id"],
             return_url=f"{get_app_base_url()}{url_for('app_home')}",
@@ -3016,6 +3052,11 @@ def admin_dashboard():
             "type": "warning",
             "text": "La invitación se creó pero el email no pudo enviarse. Revisa la configuración de Resend.",
         }
+    elif admin_message == "stripe_reset":
+        flash = {
+            "type": "success",
+            "text": "La vinculación de Stripe se ha limpiado para esa gestoría.",
+        }
     return render_template("admin.html", agencies=view_rows, flash=flash)
 
 
@@ -3120,6 +3161,19 @@ def admin_invite_agency():
             )
         return redirect(url_for("admin_dashboard", error="invite_send_failed"))
     return redirect(url_for("admin_dashboard", message="agency_invited"))
+
+
+@app.route("/admin/agency/<int:agency_id>/stripe/reset", methods=["POST"])
+@require_owner
+def admin_reset_agency_stripe(agency_id):
+    with engine.begin() as conn:
+        exists = conn.execute(
+            select(agencies_table.c.id).where(agencies_table.c.id == agency_id)
+        ).first()
+        if not exists:
+            return jsonify({"ok": False, "errors": ["Gestoría no encontrada."]}), 404
+        clear_agency_stripe_state(conn, agency_id)
+    return redirect(url_for("admin_dashboard", message="stripe_reset"))
 
 
 @app.route("/admin/agency/<int:agency_id>/plan", methods=["POST"])

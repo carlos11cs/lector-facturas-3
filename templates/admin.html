@@ -130,6 +130,9 @@
                 <form method="post" action="{{ url_for('admin_reset_trial', agency_id=agency.id) }}">
                   <button type="submit" class="button ghost small">Reset trial</button>
                 </form>
+                <form method="post" action="{{ url_for('admin_reset_agency_stripe', agency_id=agency.id) }}" style="margin-top: 6px;">
+                  <button type="submit" class="button ghost small">Reset Stripe</button>
+                </form>
               </td>
             </tr>
             {% endfor %}
