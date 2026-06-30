@@ -2948,11 +2948,12 @@ def start_stripe_checkout():
             },
             "success_url": f"{get_app_base_url()}{url_for('app_home')}?billing=success",
             "cancel_url": f"{get_app_base_url()}{url_for('app_home')}?billing=cancelled",
-            "allow_promotion_codes": True,
         }
         discounts = get_default_stripe_discounts()
         if discounts:
             checkout_kwargs["discounts"] = discounts
+        else:
+            checkout_kwargs["allow_promotion_codes"] = True
         checkout_session = stripe.checkout.Session.create(**checkout_kwargs)
     except Exception:
         app.logger.exception("Stripe checkout creation failed")
