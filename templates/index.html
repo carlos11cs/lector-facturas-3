@@ -92,6 +92,11 @@
           <div class="billing-access-copy">
             <strong>Suscripción {{ billing_context.plan_label }}</strong>
             <span>Estado interno: {{ billing_context.status_label }}</span>
+            <span>Empresas: {{ billing_context.companies_used }} / {{ billing_context.companies_limit }}</span>
+            <span>Equipo: {{ billing_context.staff_used }} / {{ billing_context.staff_limit }}</span>
+            {% if billing_context.pending_staff_invitations %}
+            <span>Invitaciones pendientes: {{ billing_context.pending_staff_invitations }}</span>
+            {% endif %}
             {% if billing_context.stripe_status_label %}
             <span>Stripe: {{ billing_context.stripe_status_label }}</span>
             {% endif %}
@@ -116,6 +121,9 @@
               </select>
               <button type="submit" class="button primary" {% if not billing_context.stripe_ready %}disabled{% endif %}>Activar suscripción</button>
             </form>
+            {% if billing_context.launch_promo_enabled %}
+            <span class="billing-promo-note">Promo lanzamiento: 50% durante los 3 primeros meses.</span>
+            {% endif %}
             {% endif %}
           </div>
         </div>

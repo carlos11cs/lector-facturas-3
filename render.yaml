@@ -43,3 +43,5 @@ services:
         sync: false
       - key: STRIPE_PRICE_ADVANCED
         sync: false
+      - key: STRIPE_PROMO_COUPON_3M_50
+        sync: false

@@ -58,6 +58,7 @@ STRIPE_WEBHOOK_SECRET = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
 STRIPE_PRICE_STARTER = (os.getenv("STRIPE_PRICE_STARTER") or "").strip()
 STRIPE_PRICE_PRO = (os.getenv("STRIPE_PRICE_PRO") or "").strip()
 STRIPE_PRICE_ADVANCED = (os.getenv("STRIPE_PRICE_ADVANCED") or "").strip()
+STRIPE_PROMO_COUPON_3M_50 = (os.getenv("STRIPE_PROMO_COUPON_3M_50") or "").strip()
 RENT_WITHHOLDING_TYPES = {"alquiler_local", "alquiler_cabina"}
 EXCLUDED_111_TYPES = {"prestamo", "seguridad_social", "amortizacion", "kilometraje"}
 ALLOWED_NO_INVOICE_EXPENSE_TYPES = {
@@ -91,6 +92,12 @@ STRIPE_PRICE_IDS = {
 }
 STRIPE_PRICE_TO_PLAN = {
     price_id: plan for plan, price_id in STRIPE_PRICE_IDS.items() if price_id
+}
+
+PLAN_LIMITS = {
+    "starter": {"companies": 5, "staff": 2},
+    "pro": {"companies": 25, "staff": 8},
+    "advanced": {"companies": 75, "staff": 20},
 }
 
 _raw_db_url = os.getenv("DATABASE_URL")
@@ -392,6 +399,76 @@ def get_plan_from_price_id(price_id):
     return STRIPE_PRICE_TO_PLAN.get((price_id or "").strip(), "")
 
 
+def get_plan_limits(plan):
+    return PLAN_LIMITS.get((plan or "").strip().lower(), PLAN_LIMITS["starter"])
+
+
+def get_default_stripe_discounts():
+    if STRIPE_PROMO_COUPON_3M_50:
+        return [{"coupon": STRIPE_PROMO_COUPON_3M_50}]
+    return []
+
+
+def count_pending_staff_invitations(conn, agency_id):
+    if not agency_id:
+        return 0
+    now = datetime.utcnow().isoformat()
+    return conn.execute(
+        select(func.count())
+        .select_from(user_invitations_table)
+        .where(user_invitations_table.c.agency_id == agency_id)
+        .where(user_invitations_table.c.role == "staff")
+        .where(user_invitations_table.c.accepted_at.is_(None))
+        .where(user_invitations_table.c.expires_at >= now)
+    ).scalar_one()
+
+
+def get_agency_usage(conn, agency_id):
+    company_count = conn.execute(
+        select(func.count())
+        .select_from(companies_table)
+        .where(companies_table.c.agency_id == agency_id)
+    ).scalar_one()
+    staff_count = conn.execute(
+        select(func.count())
+        .select_from(users_table)
+        .where(users_table.c.agency_id == agency_id)
+        .where(users_table.c.role == "staff")
+        .where(users_table.c.is_active.is_(True))
+    ).scalar_one()
+    pending_staff_invitations = count_pending_staff_invitations(conn, agency_id)
+    return {
+        "companies": int(company_count or 0),
+        "staff": int(staff_count or 0),
+        "pending_staff_invitations": int(pending_staff_invitations or 0),
+    }
+
+
+def get_agency_limits_and_usage(conn, agency_id, plan=None):
+    resolved_plan = (plan or "").strip().lower()
+    if not resolved_plan:
+        resolved_plan = (
+            conn.execute(select(agencies_table.c.plan).where(agencies_table.c.id == agency_id))
+            .scalar_one_or_none()
+            or "starter"
+        )
+    limits = get_plan_limits(resolved_plan)
+    usage = get_agency_usage(conn, agency_id)
+    return {
+        "plan": resolved_plan,
+        "limits": limits,
+        "usage": usage,
+    }
+
+
+def get_limit_error(resource, limit):
+    resource_label = "empresas" if resource == "companies" else "usuarios staff"
+    return (
+        f"Has alcanzado el límite de {resource_label} de tu plan actual "
+        f"({limit}). Sube de plan para ampliar capacidad."
+    )
+
+
 def get_agency_id_for_user(user):
     if not user:
         return None
@@ -519,6 +596,10 @@ def get_billing_context_for_user(user):
         return None
     subscription_status = agency.get("stripe_subscription_status")
     status = agency.get("status") or "trial"
+    with engine.connect() as conn:
+        limits_and_usage = get_agency_limits_and_usage(
+            conn, agency["id"], plan=agency.get("plan") or "starter"
+        )
     return {
         "plan": agency.get("plan") or "starter",
         "plan_label": get_plan_label(agency.get("plan")),
@@ -539,6 +620,14 @@ def get_billing_context_for_user(user):
         "has_subscription": bool(agency.get("stripe_subscription_id")),
         "can_manage": user.get("role") == "agency",
         "stripe_ready": stripe_is_configured(),
+        "companies_used": limits_and_usage["usage"]["companies"],
+        "companies_limit": limits_and_usage["limits"]["companies"],
+        "staff_used": limits_and_usage["usage"]["staff"],
+        "staff_limit": limits_and_usage["limits"]["staff"],
+        "pending_staff_invitations": limits_and_usage["usage"][
+            "pending_staff_invitations"
+        ],
+        "launch_promo_enabled": bool(STRIPE_PROMO_COUPON_3M_50),
     }
 
 
@@ -2762,6 +2851,13 @@ def accept_invitation(token):
             agency_plan = conn.execute(
                 select(users_table.c.plan).where(users_table.c.id == agency_id)
             ).scalar_one_or_none()
+            agency_limits = get_agency_limits_and_usage(conn, agency_id)
+            if agency_limits["usage"]["staff"] >= agency_limits["limits"]["staff"]:
+                return render_template(
+                    "invite_accept.html",
+                    invitation=fresh_invitation,
+                    error=get_limit_error("staff", agency_limits["limits"]["staff"]),
+                )
             conn.execute(
                 users_table.insert().values(
                     email=fresh_invitation["email"],
@@ -2841,17 +2937,23 @@ def start_stripe_checkout():
                     agency["id"],
                     stripe_customer_id=customer_id,
                 )
-        checkout_session = stripe.checkout.Session.create(
-            mode="subscription",
-            customer=customer_id,
-            client_reference_id=str(agency["id"]),
-            line_items=[{"price": get_stripe_price_id(plan), "quantity": 1}],
-            metadata={"agency_id": str(agency["id"]), "plan": plan},
-            subscription_data={"metadata": {"agency_id": str(agency["id"]), "plan": plan}},
-            success_url=f"{get_app_base_url()}{url_for('app_home')}?billing=success",
-            cancel_url=f"{get_app_base_url()}{url_for('app_home')}?billing=cancelled",
-            allow_promotion_codes=True,
-        )
+        checkout_kwargs = {
+            "mode": "subscription",
+            "customer": customer_id,
+            "client_reference_id": str(agency["id"]),
+            "line_items": [{"price": get_stripe_price_id(plan), "quantity": 1}],
+            "metadata": {"agency_id": str(agency["id"]), "plan": plan},
+            "subscription_data": {
+                "metadata": {"agency_id": str(agency["id"]), "plan": plan}
+            },
+            "success_url": f"{get_app_base_url()}{url_for('app_home')}?billing=success",
+            "cancel_url": f"{get_app_base_url()}{url_for('app_home')}?billing=cancelled",
+            "allow_promotion_codes": True,
+        }
+        discounts = get_default_stripe_discounts()
+        if discounts:
+            checkout_kwargs["discounts"] = discounts
+        checkout_session = stripe.checkout.Session.create(**checkout_kwargs)
     except Exception:
         app.logger.exception("Stripe checkout creation failed")
         return redirect(url_for("app_home", billing_error="checkout_failed"))
@@ -3358,6 +3460,21 @@ def create_company():
     if exists:
         return jsonify({"ok": False, "errors": ["Ya existe una empresa con ese CIF/NIF."]}), 400
 
+    with engine.connect() as conn:
+        agency_limits = get_agency_limits_and_usage(conn, user_id)
+    if agency_limits["usage"]["companies"] >= agency_limits["limits"]["companies"]:
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "errors": [
+                        get_limit_error("companies", agency_limits["limits"]["companies"])
+                    ],
+                }
+            ),
+            403,
+        )
+
     assigned_user_id = resolve_assigned_staff(user_id, assigned_user_id)
     files_model_303 = files_model_303 not in (False, "false", "False", 0, "0", None) if files_model_303 is not None else vat_regime != "exempt"
     files_model_111 = files_model_111 in (True, "true", "True", 1, "1")
@@ -3605,6 +3722,17 @@ def create_staff():
         ).first()
         if exists:
             return jsonify({"ok": False, "errors": ["El email ya está registrado."]}), 400
+        agency_limits = get_agency_limits_and_usage(conn, user_id)
+        if agency_limits["usage"]["staff"] >= agency_limits["limits"]["staff"]:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "errors": [get_limit_error("staff", agency_limits["limits"]["staff"])],
+                    }
+                ),
+                403,
+            )
         agency_plan = conn.execute(
             select(users_table.c.plan).where(users_table.c.id == user_id)
         ).scalar_one_or_none()
@@ -3633,6 +3761,21 @@ def invite_staff():
     email = _normalize_email(payload.get("email"))
     if not email:
         return jsonify({"ok": False, "errors": ["Email obligatorio."]}), 400
+    with engine.connect() as conn:
+        agency_limits = get_agency_limits_and_usage(conn, user_id)
+    occupied_staff_slots = (
+        agency_limits["usage"]["staff"] + agency_limits["usage"]["pending_staff_invitations"]
+    )
+    if occupied_staff_slots >= agency_limits["limits"]["staff"]:
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "errors": [get_limit_error("staff", agency_limits["limits"]["staff"])],
+                }
+            ),
+            403,
+        )
 
     sender_name = (g.current_user or {}).get("email")
     agency = get_agency_row_for_user(g.current_user or {})

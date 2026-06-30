@@ -166,9 +166,17 @@
     .plan.featured{border-color:rgba(15,118,110,.35);box-shadow:0 18px 44px rgba(15,118,110,.12)}
     .plan .tag{display:inline-flex;align-items:center;gap:8px;font-size:.85rem;color:var(--muted);margin-bottom:10px}
     .tag b{color:var(--text)}
+    .promo-badge{
+      display:inline-flex;align-items:center;gap:8px;margin-bottom:10px;
+      padding:7px 10px;border-radius:999px;font-size:.78rem;font-weight:800;
+      color:#1f7a44;background:rgba(22,163,74,.10);border:1px solid rgba(22,163,74,.18)
+    }
     .price{display:flex;align-items:flex-end;gap:6px;margin:6px 0 12px}
     .price .num{font-size:38px;letter-spacing:-.02em;font-weight:850}
     .price .per{color:var(--muted);padding-bottom:6px}
+    .price-meta{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;margin:-2px 0 14px}
+    .price-old{color:#8d9b96;text-decoration:line-through;font-weight:700}
+    .price-save{color:#1f7a44;font-weight:800}
     .ul{list-style:none;padding:0;margin:12px 0 0}
     .ul li{display:flex;gap:10px;align-items:flex-start;margin:10px 0;color:var(--muted)}
     .check{width:18px;height:18px;border-radius:6px;background:rgba(22,163,74,.12);border:1px solid rgba(22,163,74,.25);display:grid;place-items:center;flex:0 0 auto;margin-top:2px}
@@ -521,7 +529,12 @@
       <div class="plans" id="plans">
         <div class="plan">
           <div class="tag"><b>Starter</b> · Para despachos pequeños</div>
+          <div class="promo-badge">50% durante los 3 primeros meses</div>
           <div class="price"><div class="num" data-month="49" data-year="41">49€</div><div class="per">/ mes</div></div>
+          <div class="price-meta">
+            <span class="price-old" data-promo-old-month="49€" data-promo-old-year="49€">49€</span>
+            <span class="price-save" data-promo-price-month="24,50€" data-promo-price-year="41€" data-promo-save-month="Ahorra 73,50 € en 3 meses" data-promo-save-year="Facturación anual con 15% de descuento">24,50€ durante 3 meses · Ahorra 73,50 €</span>
+          </div>
           <a class="btn primary" href="mailto:soporte@ledged.app?subject=Interes%20en%20plan%20Starter%20de%20Ledged" style="width:100%">Solicitar Starter</a>
           <ul class="ul">
             <li><span class="check"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12 3.4 13.4 9 19 21 7 19.6 5.6 9 16.2Z"/></svg></span>Hasta <b>5 empresas</b></li>
@@ -533,7 +546,12 @@
 
         <div class="plan featured">
           <div class="tag"><b>Pro</b> · Para crecer con equipo</div>
+          <div class="promo-badge">50% durante los 3 primeros meses</div>
           <div class="price"><div class="num" data-month="119" data-year="101">119€</div><div class="per">/ mes</div></div>
+          <div class="price-meta">
+            <span class="price-old" data-promo-old-month="119€" data-promo-old-year="119€">119€</span>
+            <span class="price-save" data-promo-price-month="59,50€" data-promo-price-year="101€" data-promo-save-month="Ahorra 178,50 € en 3 meses" data-promo-save-year="Facturación anual con 15% de descuento">59,50€ durante 3 meses · Ahorra 178,50 €</span>
+          </div>
           <a class="btn primary" href="mailto:soporte@ledged.app?subject=Interes%20en%20plan%20Pro%20de%20Ledged" style="width:100%">Solicitar Pro</a>
           <ul class="ul">
             <li><span class="check"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12 3.4 13.4 9 19 21 7 19.6 5.6 9 16.2Z"/></svg></span>Hasta <b>25 empresas</b></li>
@@ -546,7 +564,12 @@
 
         <div class="plan">
           <div class="tag"><b>Business</b> · Operativa avanzada</div>
+          <div class="promo-badge">50% durante los 3 primeros meses</div>
           <div class="price"><div class="num" data-month="249" data-year="212">249€</div><div class="per">/ mes</div></div>
+          <div class="price-meta">
+            <span class="price-old" data-promo-old-month="249€" data-promo-old-year="249€">249€</span>
+            <span class="price-save" data-promo-price-month="124,50€" data-promo-price-year="212€" data-promo-save-month="Ahorra 373,50 € en 3 meses" data-promo-save-year="Facturación anual con 15% de descuento">124,50€ durante 3 meses · Ahorra 373,50 €</span>
+          </div>
           <a class="btn primary" href="mailto:soporte@ledged.app?subject=Interes%20en%20plan%20Business%20de%20Ledged" style="width:100%">Solicitar Business</a>
           <ul class="ul">
             <li><span class="check"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12 3.4 13.4 9 19 21 7 19.6 5.6 9 16.2Z"/></svg></span>Hasta <b>75 empresas</b></li>
@@ -559,6 +582,9 @@
 
       <p class="small" style="margin:14px 0 0;color:var(--muted)">
         ¿Necesitas más empresas o usuarios? Puedes ampliar por add‑ons o pedir Enterprise.
+      </p>
+      <p class="small" style="margin:8px 0 0;color:var(--muted)">
+        Promoción de lanzamiento aplicada sobre el alta inicial en planes mensuales. El plan anual mantiene su propio descuento.
       </p>
     </div>
   </section>
@@ -653,6 +679,8 @@
   const sw = document.getElementById('billingSwitch');
   const nums = Array.from(document.querySelectorAll('.price .num'));
   const pers = Array.from(document.querySelectorAll('.price .per'));
+  const oldPrices = Array.from(document.querySelectorAll('.price-old'));
+  const promoPrices = Array.from(document.querySelectorAll('.price-save'));
   function setBilling(isYear){
     sw.classList.toggle('on', isYear);
     sw.setAttribute('aria-checked', String(isYear));
@@ -661,6 +689,14 @@
       n.textContent = v + "€";
     });
     pers.forEach((p) => p.textContent = isYear ? "/ mes (anual)" : "/ mes");
+    oldPrices.forEach((node) => {
+      node.textContent = isYear ? node.dataset.promoOldYear : node.dataset.promoOldMonth;
+    });
+    promoPrices.forEach((node) => {
+      const price = isYear ? node.dataset.promoPriceYear : node.dataset.promoPriceMonth;
+      const save = isYear ? node.dataset.promoSaveYear : node.dataset.promoSaveMonth;
+      node.textContent = `${price} ${isYear ? "·" : "durante 3 meses ·"} ${save}`;
+    });
   }
   if(sw){
     sw.addEventListener('click', () => setBilling(!sw.classList.contains('on')));
