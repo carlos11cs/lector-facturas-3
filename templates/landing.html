@@ -174,9 +174,15 @@
     .price{display:flex;align-items:flex-end;gap:6px;margin:6px 0 12px}
     .price .num{font-size:38px;letter-spacing:-.02em;font-weight:850}
     .price .per{color:var(--muted);padding-bottom:6px}
-    .price-meta{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;margin:-2px 0 14px}
+    .price-meta{display:grid;gap:8px;margin:-2px 0 14px}
+    .price-callout{
+      display:inline-flex;align-items:center;justify-content:flex-start;
+      padding:10px 12px;border-radius:12px;background:rgba(22,163,74,.10);
+      border:1px solid rgba(22,163,74,.18);color:#155d37;font-weight:850
+    }
+    .price-secondary{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center}
     .price-old{color:#8d9b96;text-decoration:line-through;font-weight:700}
-    .price-save{color:#1f7a44;font-weight:800}
+    .price-save{color:var(--muted);font-weight:700}
     .ul{list-style:none;padding:0;margin:12px 0 0}
     .ul li{display:flex;gap:10px;align-items:flex-start;margin:10px 0;color:var(--muted)}
     .check{width:18px;height:18px;border-radius:6px;background:rgba(22,163,74,.12);border:1px solid rgba(22,163,74,.25);display:grid;place-items:center;flex:0 0 auto;margin-top:2px}
@@ -530,10 +536,13 @@
         <div class="plan">
           <div class="tag"><b>Starter</b> · Para despachos pequeños</div>
           <div class="promo-badge">50% durante los 3 primeros meses</div>
-          <div class="price"><div class="num" data-month="49" data-year="41">49€</div><div class="per">/ mes</div></div>
+          <div class="price"><div class="num" data-month="49" data-year="32">49€</div><div class="per">/ mes</div></div>
           <div class="price-meta">
-            <span class="price-old" data-promo-old-month="49€" data-promo-old-year="49€">49€</span>
-            <span class="price-save" data-promo-price-month="24,50€" data-promo-price-year="41€" data-promo-save-month="Ahorra 73,50 € en 3 meses" data-promo-save-year="Facturación anual con 15% de descuento">24,50€ durante 3 meses · Ahorra 73,50 €</span>
+            <span class="price-callout" data-promo-price-month="24,50 € / mes durante 3 meses" data-promo-price-year="380 € / año">24,50 € / mes durante 3 meses</span>
+            <div class="price-secondary">
+              <span class="price-old" data-promo-old-month="Precio habitual: 49 € / mes" data-promo-old-year="Equivale a 49 € / mes">Precio habitual: 49 € / mes</span>
+              <span class="price-save" data-promo-save-month="Ahorra 73,50 € en los 3 primeros meses" data-promo-save-year="Ahorra 208 € al año frente al mensual">Ahorra 73,50 € en los 3 primeros meses</span>
+            </div>
           </div>
           <a class="btn primary" href="mailto:soporte@ledged.app?subject=Interes%20en%20plan%20Starter%20de%20Ledged" style="width:100%">Solicitar Starter</a>
           <ul class="ul">
@@ -547,10 +556,13 @@
         <div class="plan featured">
           <div class="tag"><b>Pro</b> · Para crecer con equipo</div>
           <div class="promo-badge">50% durante los 3 primeros meses</div>
-          <div class="price"><div class="num" data-month="119" data-year="101">119€</div><div class="per">/ mes</div></div>
+          <div class="price"><div class="num" data-month="119" data-year="92">119€</div><div class="per">/ mes</div></div>
           <div class="price-meta">
-            <span class="price-old" data-promo-old-month="119€" data-promo-old-year="119€">119€</span>
-            <span class="price-save" data-promo-price-month="59,50€" data-promo-price-year="101€" data-promo-save-month="Ahorra 178,50 € en 3 meses" data-promo-save-year="Facturación anual con 15% de descuento">59,50€ durante 3 meses · Ahorra 178,50 €</span>
+            <span class="price-callout" data-promo-price-month="59,50 € / mes durante 3 meses" data-promo-price-year="1.100 € / año">59,50 € / mes durante 3 meses</span>
+            <div class="price-secondary">
+              <span class="price-old" data-promo-old-month="Precio habitual: 119 € / mes" data-promo-old-year="Equivale a 119 € / mes">Precio habitual: 119 € / mes</span>
+              <span class="price-save" data-promo-save-month="Ahorra 178,50 € en los 3 primeros meses" data-promo-save-year="Ahorra 328 € al año frente al mensual">Ahorra 178,50 € en los 3 primeros meses</span>
+            </div>
           </div>
           <a class="btn primary" href="mailto:soporte@ledged.app?subject=Interes%20en%20plan%20Pro%20de%20Ledged" style="width:100%">Solicitar Pro</a>
           <ul class="ul">
@@ -565,10 +577,13 @@
         <div class="plan">
           <div class="tag"><b>Business</b> · Operativa avanzada</div>
           <div class="promo-badge">50% durante los 3 primeros meses</div>
-          <div class="price"><div class="num" data-month="249" data-year="212">249€</div><div class="per">/ mes</div></div>
+          <div class="price"><div class="num" data-month="200" data-year="150">200€</div><div class="per">/ mes</div></div>
           <div class="price-meta">
-            <span class="price-old" data-promo-old-month="249€" data-promo-old-year="249€">249€</span>
-            <span class="price-save" data-promo-price-month="124,50€" data-promo-price-year="212€" data-promo-save-month="Ahorra 373,50 € en 3 meses" data-promo-save-year="Facturación anual con 15% de descuento">124,50€ durante 3 meses · Ahorra 373,50 €</span>
+            <span class="price-callout" data-promo-price-month="100 € / mes durante 3 meses" data-promo-price-year="1.800 € / año">100 € / mes durante 3 meses</span>
+            <div class="price-secondary">
+              <span class="price-old" data-promo-old-month="Precio habitual: 200 € / mes" data-promo-old-year="Equivale a 200 € / mes">Precio habitual: 200 € / mes</span>
+              <span class="price-save" data-promo-save-month="Ahorra 300 € en los 3 primeros meses" data-promo-save-year="Ahorra 600 € al año frente al mensual">Ahorra 300 € en los 3 primeros meses</span>
+            </div>
           </div>
           <a class="btn primary" href="mailto:soporte@ledged.app?subject=Interes%20en%20plan%20Business%20de%20Ledged" style="width:100%">Solicitar Business</a>
           <ul class="ul">
@@ -679,6 +694,7 @@
   const sw = document.getElementById('billingSwitch');
   const nums = Array.from(document.querySelectorAll('.price .num'));
   const pers = Array.from(document.querySelectorAll('.price .per'));
+  const priceCallouts = Array.from(document.querySelectorAll('.price-callout'));
   const oldPrices = Array.from(document.querySelectorAll('.price-old'));
   const promoPrices = Array.from(document.querySelectorAll('.price-save'));
   function setBilling(isYear){
@@ -689,13 +705,15 @@
       n.textContent = v + "€";
     });
     pers.forEach((p) => p.textContent = isYear ? "/ mes (anual)" : "/ mes");
+    priceCallouts.forEach((node) => {
+      node.textContent = isYear ? node.dataset.promoPriceYear : node.dataset.promoPriceMonth;
+    });
     oldPrices.forEach((node) => {
       node.textContent = isYear ? node.dataset.promoOldYear : node.dataset.promoOldMonth;
     });
     promoPrices.forEach((node) => {
-      const price = isYear ? node.dataset.promoPriceYear : node.dataset.promoPriceMonth;
       const save = isYear ? node.dataset.promoSaveYear : node.dataset.promoSaveMonth;
-      node.textContent = `${price} ${isYear ? "·" : "durante 3 meses ·"} ${save}`;
+      node.textContent = save;
     });
   }
   if(sw){

@@ -58,6 +58,9 @@ STRIPE_WEBHOOK_SECRET = (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
 STRIPE_PRICE_STARTER = (os.getenv("STRIPE_PRICE_STARTER") or "").strip()
 STRIPE_PRICE_PRO = (os.getenv("STRIPE_PRICE_PRO") or "").strip()
 STRIPE_PRICE_ADVANCED = (os.getenv("STRIPE_PRICE_ADVANCED") or "").strip()
+STRIPE_PRICE_STARTER_ANNUAL = (os.getenv("STRIPE_PRICE_STARTER_ANNUAL") or "").strip()
+STRIPE_PRICE_PRO_ANNUAL = (os.getenv("STRIPE_PRICE_PRO_ANNUAL") or "").strip()
+STRIPE_PRICE_ADVANCED_ANNUAL = (os.getenv("STRIPE_PRICE_ADVANCED_ANNUAL") or "").strip()
 STRIPE_PROMO_COUPON_3M_50 = (os.getenv("STRIPE_PROMO_COUPON_3M_50") or "").strip()
 RENT_WITHHOLDING_TYPES = {"alquiler_local", "alquiler_cabina"}
 EXCLUDED_111_TYPES = {"prestamo", "seguridad_social", "amortizacion", "kilometraje"}
@@ -86,12 +89,22 @@ MONTH_LABELS_ES = {
     12: "Diciembre",
 }
 STRIPE_PRICE_IDS = {
-    "starter": STRIPE_PRICE_STARTER,
-    "pro": STRIPE_PRICE_PRO,
-    "advanced": STRIPE_PRICE_ADVANCED,
+    "monthly": {
+        "starter": STRIPE_PRICE_STARTER,
+        "pro": STRIPE_PRICE_PRO,
+        "advanced": STRIPE_PRICE_ADVANCED,
+    },
+    "annual": {
+        "starter": STRIPE_PRICE_STARTER_ANNUAL,
+        "pro": STRIPE_PRICE_PRO_ANNUAL,
+        "advanced": STRIPE_PRICE_ADVANCED_ANNUAL,
+    },
 }
 STRIPE_PRICE_TO_PLAN = {
-    price_id: plan for plan, price_id in STRIPE_PRICE_IDS.items() if price_id
+    price_id: {"plan": plan, "billing_period": billing_period}
+    for billing_period, period_prices in STRIPE_PRICE_IDS.items()
+    for plan, price_id in period_prices.items()
+    if price_id
 }
 
 PLAN_LIMITS = {
@@ -391,12 +404,29 @@ def get_reports_from_email():
     return REPORTS_FROM_EMAIL or APP_FROM_EMAIL
 
 
-def get_stripe_price_id(plan):
-    return STRIPE_PRICE_IDS.get((plan or "").strip().lower(), "")
+def annual_billing_is_configured():
+    return bool(
+        STRIPE_PRICE_STARTER_ANNUAL
+        and STRIPE_PRICE_PRO_ANNUAL
+        and STRIPE_PRICE_ADVANCED_ANNUAL
+    )
+
+
+def get_billing_period_label(billing_period):
+    return {
+        "monthly": "Mensual",
+        "annual": "Anual",
+    }.get((billing_period or "").strip().lower(), "Mensual")
+
+
+def get_stripe_price_id(plan, billing_period="monthly"):
+    normalized_period = (billing_period or "monthly").strip().lower()
+    normalized_plan = (plan or "").strip().lower()
+    return STRIPE_PRICE_IDS.get(normalized_period, {}).get(normalized_plan, "")
 
 
 def get_plan_from_price_id(price_id):
-    return STRIPE_PRICE_TO_PLAN.get((price_id or "").strip(), "")
+    return STRIPE_PRICE_TO_PLAN.get((price_id or "").strip(), {})
 
 
 def get_plan_limits(plan):
@@ -628,6 +658,7 @@ def get_billing_context_for_user(user):
             "pending_staff_invitations"
         ],
         "launch_promo_enabled": bool(STRIPE_PROMO_COUPON_3M_50),
+        "annual_billing_available": annual_billing_is_configured(),
     }
 
 
@@ -652,6 +683,11 @@ def get_billing_message():
         return {
             "type": "warning",
             "text": "No se pudo iniciar el checkout de Stripe. Revisa la configuración de precios y claves.",
+        }
+    if billing_error == "annual_not_configured":
+        return {
+            "type": "warning",
+            "text": "El cobro anual todavía no está configurado en Stripe. Faltan los price_id anuales.",
         }
     if billing_error == "portal_failed":
         return {
@@ -2910,8 +2946,21 @@ def start_stripe_checkout():
     if not stripe_is_configured():
         return redirect(url_for("app_home", billing_error="not_configured"))
     plan = (request.form.get("plan") or "").strip().lower()
+    billing_period = (request.form.get("billing_period") or "monthly").strip().lower()
     if plan not in {"starter", "pro", "advanced"}:
         return redirect(url_for("app_home", billing_error="checkout_failed"))
+    if billing_period not in {"monthly", "annual"}:
+        return redirect(url_for("app_home", billing_error="checkout_failed"))
+    price_id = get_stripe_price_id(plan, billing_period)
+    if not price_id:
+        return redirect(
+            url_for(
+                "app_home",
+                billing_error="annual_not_configured"
+                if billing_period == "annual"
+                else "checkout_failed",
+            )
+        )
     agency = get_agency_row_for_user(user)
     if not agency:
         return redirect(url_for("app_home", billing_error="checkout_failed"))
@@ -2941,15 +2990,23 @@ def start_stripe_checkout():
             "mode": "subscription",
             "customer": customer_id,
             "client_reference_id": str(agency["id"]),
-            "line_items": [{"price": get_stripe_price_id(plan), "quantity": 1}],
-            "metadata": {"agency_id": str(agency["id"]), "plan": plan},
+            "line_items": [{"price": price_id, "quantity": 1}],
+            "metadata": {
+                "agency_id": str(agency["id"]),
+                "plan": plan,
+                "billing_period": billing_period,
+            },
             "subscription_data": {
-                "metadata": {"agency_id": str(agency["id"]), "plan": plan}
+                "metadata": {
+                    "agency_id": str(agency["id"]),
+                    "plan": plan,
+                    "billing_period": billing_period,
+                }
             },
             "success_url": f"{get_app_base_url()}{url_for('app_home')}?billing=success",
             "cancel_url": f"{get_app_base_url()}{url_for('app_home')}?billing=cancelled",
         }
-        discounts = get_default_stripe_discounts()
+        discounts = get_default_stripe_discounts() if billing_period == "monthly" else []
         if discounts:
             checkout_kwargs["discounts"] = discounts
         else:
@@ -3033,7 +3090,8 @@ def stripe_webhook():
                 items = ((data_object.get("items") or {}).get("data") or [])
                 if items:
                     price_id = ((items[0].get("price") or {}).get("id") or "").strip()
-                plan = metadata.get("plan") or get_plan_from_price_id(price_id) or "starter"
+                price_mapping = get_plan_from_price_id(price_id)
+                plan = metadata.get("plan") or price_mapping.get("plan") or "starter"
                 current_period_end = data_object.get("current_period_end")
                 resolved_status = map_stripe_subscription_status(data_object.get("status"))
                 if not agency_id:

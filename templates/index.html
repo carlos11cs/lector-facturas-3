@@ -119,10 +119,17 @@
                 <option value="pro" {% if billing_context.plan == 'pro' %}selected{% endif %}>Pro</option>
                 <option value="advanced" {% if billing_context.plan == 'advanced' %}selected{% endif %}>Business</option>
               </select>
+              <select name="billing_period" {% if not billing_context.stripe_ready %}disabled{% endif %}>
+                <option value="monthly">Mensual</option>
+                <option value="annual" {% if not billing_context.annual_billing_available %}disabled{% endif %}>Anual</option>
+              </select>
               <button type="submit" class="button primary" {% if not billing_context.stripe_ready %}disabled{% endif %}>Activar suscripción</button>
             </form>
             {% if billing_context.launch_promo_enabled %}
-            <span class="billing-promo-note">Promo lanzamiento: 50% durante los 3 primeros meses.</span>
+            <span class="billing-promo-note">Mensual: 50% durante los 3 primeros meses.</span>
+            {% endif %}
+            {% if billing_context.annual_billing_available %}
+            <span class="billing-promo-note">Anual: 15% de ahorro frente al precio mensual.</span>
             {% endif %}
             {% endif %}
           </div>
