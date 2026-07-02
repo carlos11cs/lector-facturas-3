@@ -25,6 +25,7 @@
       </div>
       <nav class="sidebar-nav">
         <button class="nav-link active" data-section="dashboard" type="button">Dashboard</button>
+        <button class="nav-link" data-section="account" type="button">Mi cuenta</button>
         <button class="nav-link" data-section="companies" type="button">Mis empresas</button>
         <button class="nav-link" data-section="expenses" type="button">Gastos</button>
         <button class="nav-link" data-section="income" type="button">Ingresos</button>
@@ -87,54 +88,6 @@
             <a class="button ghost" href="{{ url_for('logout') }}">Cerrar sesión</a>
           </div>
         </div>
-        {% if billing_context %}
-        <div class="billing-access-box">
-          <div class="billing-access-copy">
-            <strong>Suscripción {{ billing_context.plan_label }}</strong>
-            <span>Estado interno: {{ billing_context.status_label }}</span>
-            <span>Empresas: {{ billing_context.companies_used }} / {{ billing_context.companies_limit }}</span>
-            <span>Equipo: {{ billing_context.staff_used }} / {{ billing_context.staff_limit }}</span>
-            {% if billing_context.pending_staff_invitations %}
-            <span>Invitaciones pendientes: {{ billing_context.pending_staff_invitations }}</span>
-            {% endif %}
-            {% if billing_context.stripe_status_label %}
-            <span>Stripe: {{ billing_context.stripe_status_label }}</span>
-            {% endif %}
-            {% if billing_context.trial_ends_label %}
-            <span>Trial hasta {{ billing_context.trial_ends_label }}</span>
-            {% endif %}
-            {% if billing_context.current_period_end_label %}
-            <span>Renovación / fin de periodo: {{ billing_context.current_period_end_label }}</span>
-            {% endif %}
-          </div>
-          <div class="billing-access-actions">
-            {% if billing_context.has_subscription %}
-            <form method="post" action="{{ url_for('open_stripe_portal') }}">
-              <button type="submit" class="button primary">Gestionar suscripción</button>
-            </form>
-            {% else %}
-            <form method="post" action="{{ url_for('start_stripe_checkout') }}" class="billing-plan-form">
-              <select name="plan" {% if not billing_context.stripe_ready %}disabled{% endif %}>
-                <option value="starter" {% if billing_context.plan == 'starter' %}selected{% endif %}>Starter</option>
-                <option value="pro" {% if billing_context.plan == 'pro' %}selected{% endif %}>Pro</option>
-                <option value="advanced" {% if billing_context.plan == 'advanced' %}selected{% endif %}>Business</option>
-              </select>
-              <select name="billing_period" {% if not billing_context.stripe_ready %}disabled{% endif %}>
-                <option value="monthly">Mensual</option>
-                <option value="annual" {% if not billing_context.annual_billing_available %}disabled{% endif %}>Anual</option>
-              </select>
-              <button type="submit" class="button primary" {% if not billing_context.stripe_ready %}disabled{% endif %}>Activar suscripción</button>
-            </form>
-            {% if billing_context.launch_promo_enabled %}
-            <span class="billing-promo-note">Mensual: 50% durante los 3 primeros meses.</span>
-            {% endif %}
-            {% if billing_context.annual_billing_available %}
-            <span class="billing-promo-note">Anual: 15% de ahorro frente al precio mensual.</span>
-            {% endif %}
-            {% endif %}
-          </div>
-        </div>
-        {% endif %}
         {% if billing_message %}
         <div class="billing-message billing-message-{{ billing_message.type }}">
           {{ billing_message.text }}
@@ -256,6 +209,103 @@
             </div>
           </div>
         </section>
+      </section>
+
+      <section class="page-section" data-section="account">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Mi cuenta</h2>
+              <p>Gestiona los datos de acceso, los datos de la gestoría y la suscripción desde un único apartado.</p>
+            </div>
+          </div>
+          <div class="billing-form">
+            {% if user.role == "agency" %}
+            <div class="field">
+              <label for="accountAgencyName">Nombre de la gestoría</label>
+              <input type="text" id="accountAgencyName" value="{{ account_context.agency_name if account_context else '' }}" placeholder="Ej. Gestoría Ledged" />
+            </div>
+            {% endif %}
+            <div class="field">
+              <label for="accountEmail">Email</label>
+              <input type="email" id="accountEmail" value="{{ account_context.email if account_context else '' }}" placeholder="Ej. contacto@gestoria.com" />
+            </div>
+            {% if user.role == "agency" %}
+            <div class="field">
+              <label for="accountPhone">Teléfono</label>
+              <input type="text" id="accountPhone" value="{{ account_context.phone if account_context else '' }}" placeholder="Ej. 600123123" />
+            </div>
+            {% endif %}
+            <div class="field">
+              <label for="accountCurrentPassword">Contraseña actual</label>
+              <input type="password" id="accountCurrentPassword" placeholder="Obligatoria si cambias email o contraseña" />
+            </div>
+            <div class="field">
+              <label for="accountNewPassword">Nueva contraseña</label>
+              <input type="password" id="accountNewPassword" placeholder="Mínimo 8 caracteres" />
+            </div>
+            <button id="accountSaveBtn" class="button primary">Guardar cambios</button>
+          </div>
+          <p class="panel-helper">Si cambias el email o la contraseña, te pediremos la contraseña actual para validar la operación.</p>
+        </section>
+
+        {% if billing_context %}
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Suscripción y facturación</h2>
+              <p>Controla tu plan, el periodo de cobro y el acceso al portal de facturación.</p>
+            </div>
+          </div>
+          <div class="billing-access-box">
+            <div class="billing-access-copy">
+              <strong>Suscripción {{ billing_context.plan_label }}</strong>
+              <span>Estado interno: {{ billing_context.status_label }}</span>
+              <span>Empresas: {{ billing_context.companies_used }} / {{ billing_context.companies_limit }}</span>
+              <span>Equipo: {{ billing_context.staff_used }} / {{ billing_context.staff_limit }}</span>
+              {% if billing_context.pending_staff_invitations %}
+              <span>Invitaciones pendientes: {{ billing_context.pending_staff_invitations }}</span>
+              {% endif %}
+              {% if billing_context.stripe_status_label %}
+              <span>Stripe: {{ billing_context.stripe_status_label }}</span>
+              {% endif %}
+              {% if billing_context.trial_ends_label %}
+              <span>Trial hasta {{ billing_context.trial_ends_label }}</span>
+              {% endif %}
+              {% if billing_context.current_period_end_label %}
+              <span>Renovación / fin de periodo: {{ billing_context.current_period_end_label }}</span>
+              {% endif %}
+            </div>
+            <div class="billing-access-actions">
+              {% if billing_context.has_subscription %}
+              <form method="post" action="{{ url_for('open_stripe_portal') }}">
+                <button type="submit" class="button primary">Gestionar suscripción</button>
+              </form>
+              {% else %}
+              <form method="post" action="{{ url_for('start_stripe_checkout') }}" class="billing-plan-form">
+                <select name="plan" {% if not billing_context.stripe_ready %}disabled{% endif %}>
+                  <option value="starter" {% if billing_context.plan == 'starter' %}selected{% endif %}>Starter</option>
+                  <option value="pro" {% if billing_context.plan == 'pro' %}selected{% endif %}>Pro</option>
+                  <option value="advanced" {% if billing_context.plan == 'advanced' %}selected{% endif %}>Business</option>
+                </select>
+                <select name="billing_period" {% if not billing_context.stripe_ready %}disabled{% endif %}>
+                  <option value="monthly">Mensual</option>
+                  <option value="annual" {% if not billing_context.annual_billing_available %}disabled{% endif %}>Anual</option>
+                </select>
+                <button type="submit" class="button primary" {% if not billing_context.stripe_ready %}disabled{% endif %}>Activar suscripción</button>
+              </form>
+              {% if billing_context.launch_promo_enabled %}
+              <span class="billing-promo-note">Mensual: 50% durante los 3 primeros meses.</span>
+              {% endif %}
+              {% if billing_context.annual_billing_available %}
+              <span class="billing-promo-note">Anual: ahorro frente al precio mensual.</span>
+              {% endif %}
+              {% endif %}
+            </div>
+          </div>
+          <p class="panel-helper">Las facturas de la suscripción se emiten en Stripe. La gestoría puede verlas y descargarlas directamente desde el portal de facturación.</p>
+        </section>
+        {% endif %}
       </section>
 
       <section class="page-section" data-section="companies">

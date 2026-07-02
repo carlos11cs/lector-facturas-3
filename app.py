@@ -662,6 +662,23 @@ def get_billing_context_for_user(user):
     }
 
 
+def get_account_context_for_user(user):
+    if not user:
+        return None
+    agency = get_agency_row_for_user(user)
+    context = {
+        "role": user.get("role"),
+        "email": user.get("email") or "",
+        "agency_name": "",
+        "phone": "",
+        "can_manage_subscription": user.get("role") == "agency",
+    }
+    if agency:
+        context["agency_name"] = agency.get("name") or ""
+        context["phone"] = agency.get("phone") or ""
+    return context
+
+
 def get_billing_message():
     billing_state = (request.args.get("billing") or "").strip().lower()
     billing_error = (request.args.get("billing_error") or "").strip().lower()
@@ -2933,6 +2950,7 @@ def app_home():
     return render_template(
         "index.html",
         user=g.current_user,
+        account_context=get_account_context_for_user(g.current_user),
         billing_context=get_billing_context_for_user(g.current_user),
         billing_message=get_billing_message(),
     )
@@ -3041,6 +3059,131 @@ def open_stripe_portal():
         app.logger.exception("Stripe billing portal creation failed")
         return redirect(url_for("app_home", billing_error="portal_failed"))
     return redirect(portal_session.get("url"), code=303)
+
+
+@app.route("/api/account", methods=["PUT"])
+def update_account():
+    current_user = g.current_user or {}
+    user_id = current_user.get("id")
+    if not user_id:
+        return jsonify({"ok": False, "errors": ["No autorizado."]}), 403
+
+    payload = request.get_json(silent=True) or {}
+    email = _normalize_email(payload.get("email"))
+    agency_name = (payload.get("agency_name") or payload.get("agencyName") or "").strip()
+    phone = (payload.get("phone") or "").strip()
+    current_password = payload.get("current_password") or payload.get("currentPassword") or ""
+    new_password = payload.get("new_password") or payload.get("newPassword") or ""
+
+    role = current_user.get("role")
+    errors = []
+    if not email:
+        errors.append("Email obligatorio.")
+    if role == "agency" and not agency_name:
+        errors.append("Nombre de la gestoría obligatorio.")
+    if new_password and len(new_password) < 8:
+        errors.append("La nueva contraseña debe tener al menos 8 caracteres.")
+    if errors:
+        return jsonify({"ok": False, "errors": errors}), 400
+
+    with engine.begin() as conn:
+        user_row = conn.execute(
+            select(
+                users_table.c.id,
+                users_table.c.email,
+                users_table.c.password_hash,
+            ).where(users_table.c.id == user_id)
+        ).mappings().first()
+        if not user_row:
+            return jsonify({"ok": False, "errors": ["Usuario no encontrado."]}), 404
+
+        email_changed = email != (user_row.get("email") or "").strip().lower()
+        password_changed = bool(new_password)
+        if email_changed or password_changed:
+            if not current_password:
+                return (
+                    jsonify(
+                        {
+                            "ok": False,
+                            "errors": ["Debes indicar tu contraseña actual para guardar estos cambios."],
+                        }
+                    ),
+                    400,
+                )
+            if not check_password_hash(user_row["password_hash"], current_password):
+                return jsonify({"ok": False, "errors": ["La contraseña actual no es correcta."]}), 400
+
+        if email_changed:
+            existing = conn.execute(
+                select(users_table.c.id)
+                .where(users_table.c.email == email)
+                .where(users_table.c.id != user_id)
+            ).first()
+            if existing:
+                return jsonify({"ok": False, "errors": ["Ese email ya está en uso."]}), 400
+
+        user_updates = {}
+        if email_changed:
+            user_updates["email"] = email
+        if password_changed:
+            user_updates["password_hash"] = generate_password_hash(new_password)
+        if user_updates:
+            conn.execute(
+                users_table.update().where(users_table.c.id == user_id).values(**user_updates)
+            )
+
+        stripe_sync = None
+        if role == "agency":
+            agency_row = conn.execute(
+                select(
+                    agencies_table.c.id,
+                    agencies_table.c.email,
+                    agencies_table.c.name,
+                    agencies_table.c.phone,
+                    agencies_table.c.stripe_customer_id,
+                ).where(agencies_table.c.id == get_agency_id_for_user(current_user))
+            ).mappings().first()
+            if not agency_row:
+                return jsonify({"ok": False, "errors": ["Gestoría no encontrada."]}), 404
+            agency_updates = {
+                "name": agency_name,
+                "phone": phone or None,
+            }
+            if email_changed:
+                agency_updates["email"] = email
+            conn.execute(
+                agencies_table.update()
+                .where(agencies_table.c.id == agency_row["id"])
+                .values(**agency_updates)
+            )
+            stripe_sync = {
+                "customer_id": agency_row.get("stripe_customer_id"),
+                "email": email if email_changed else agency_row.get("email"),
+                "name": agency_name,
+                "phone": phone or None,
+            }
+
+    if stripe_sync and stripe and stripe_sync.get("customer_id"):
+        try:
+            stripe.Customer.modify(
+                stripe_sync["customer_id"],
+                email=stripe_sync.get("email"),
+                name=stripe_sync.get("name"),
+                phone=stripe_sync.get("phone"),
+            )
+        except Exception:
+            app.logger.warning(
+                "No se pudo sincronizar el cliente de Stripe para la gestoría %s",
+                get_agency_id_for_user(current_user),
+            )
+
+    refreshed_user = get_current_user()
+    return jsonify(
+        {
+            "ok": True,
+            "account": get_account_context_for_user(refreshed_user),
+        }
+    )
 
 
 @app.route("/api/stripe/webhook", methods=["POST"])

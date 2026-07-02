@@ -1127,6 +1127,12 @@ const companyFilesModel202 = document.getElementById("companyFilesModel202");
 const companySaveBtn = document.getElementById("companySaveBtn");
 const companiesTableBody = document.querySelector("#companiesTable tbody");
 const companiesEmpty = document.getElementById("companiesEmpty");
+const accountAgencyName = document.getElementById("accountAgencyName");
+const accountEmail = document.getElementById("accountEmail");
+const accountPhone = document.getElementById("accountPhone");
+const accountCurrentPassword = document.getElementById("accountCurrentPassword");
+const accountNewPassword = document.getElementById("accountNewPassword");
+const accountSaveBtn = document.getElementById("accountSaveBtn");
 const staffEmail = document.getElementById("staffEmail");
 const staffSaveBtn = document.getElementById("staffSaveBtn");
 const staffTableBody = document.querySelector("#staffTable tbody");
@@ -2302,6 +2308,62 @@ function saveStaff() {
     })
     .finally(() => {
       staffSaveBtn.disabled = false;
+    });
+}
+
+function saveAccount() {
+  if (!accountEmail || !accountSaveBtn) {
+    return;
+  }
+  const emailValue = accountEmail.value.trim();
+  if (!emailValue) {
+    alert("El email es obligatorio.");
+    return;
+  }
+  accountSaveBtn.disabled = true;
+  fetch("/api/account", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      agency_name: accountAgencyName ? accountAgencyName.value : "",
+      email: emailValue,
+      phone: accountPhone ? accountPhone.value : "",
+      current_password: accountCurrentPassword ? accountCurrentPassword.value : "",
+      new_password: accountNewPassword ? accountNewPassword.value : "",
+    }),
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        alert((data.errors || ["No se pudo guardar la cuenta."]).join("\n"));
+        return;
+      }
+      const account = data.account || {};
+      if (accountEmail && account.email) {
+        accountEmail.value = account.email;
+      }
+      if (headerUserEmail && account.email) {
+        headerUserEmail.textContent = account.email;
+      }
+      if (accountAgencyName && typeof account.agency_name === "string") {
+        accountAgencyName.value = account.agency_name;
+      }
+      if (accountPhone && typeof account.phone === "string") {
+        accountPhone.value = account.phone;
+      }
+      if (accountCurrentPassword) {
+        accountCurrentPassword.value = "";
+      }
+      if (accountNewPassword) {
+        accountNewPassword.value = "";
+      }
+      alert("Datos de cuenta actualizados correctamente.");
+    })
+    .catch(() => {
+      alert("No se pudo guardar la cuenta.");
+    })
+    .finally(() => {
+      accountSaveBtn.disabled = false;
     });
 }
 
@@ -9166,6 +9228,9 @@ function bindEvents() {
   if (companyType) {
     companyType.addEventListener("change", syncCompanyFiscalProfileInputs);
     syncCompanyFiscalProfileInputs();
+  }
+  if (accountSaveBtn) {
+    accountSaveBtn.addEventListener("click", saveAccount);
   }
   if (staffSaveBtn) {
     staffSaveBtn.addEventListener("click", saveStaff);
