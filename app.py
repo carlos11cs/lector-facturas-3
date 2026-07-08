@@ -41,6 +41,8 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 from services.ai_invoice_service import (
     _extract_first_date,
+    _find_payment_date_by_keywords,
+    _find_payment_dates_by_keywords,
     analyze_invoice,
     _extract_pdf_text_from_bytes,
     _extract_pdf_text_ocr_from_bytes,
