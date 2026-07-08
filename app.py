@@ -40,6 +40,7 @@ from sqlalchemy import (
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 from services.ai_invoice_service import (
+    _extract_first_date,
     analyze_invoice,
     _extract_pdf_text_from_bytes,
     _extract_pdf_text_ocr_from_bytes,
