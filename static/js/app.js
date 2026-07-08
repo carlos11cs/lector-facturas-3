@@ -2499,7 +2499,25 @@ function uploadDocumentCenterBatch() {
     method: "POST",
     body: formData,
   })
-    .then((res) => res.json())
+    .then(async (res) => {
+      const rawBody = await res.text();
+      let data = null;
+      try {
+        data = rawBody ? JSON.parse(rawBody) : null;
+      } catch (error) {
+        data = null;
+      }
+      if (!res.ok) {
+        const message =
+          data?.errors?.join("\n") ||
+          "El servidor devolvió un error al procesar el lote documental.";
+        throw new Error(message);
+      }
+      if (!data) {
+        throw new Error("Respuesta inválida del servidor al procesar el lote documental.");
+      }
+      return data;
+    })
     .then((data) => {
       if (!data.ok) {
         throw new Error((data.errors || ["No se pudo procesar el lote."]).join("\n"));

@@ -67,6 +67,9 @@ def get_public_url(key: str) -> str:
 def upload_bytes(data: bytes, key: str, content_type: Optional[str] = None) -> str:
     if not _has_bucket():
         local_path = os.path.join(_local_storage_dir(), key)
+        local_dir = os.path.dirname(local_path)
+        if local_dir:
+            os.makedirs(local_dir, exist_ok=True)
         with open(local_path, "wb") as handle:
             handle.write(data)
         logger.info("Archivo guardado en almacenamiento local: %s", local_path)
