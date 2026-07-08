@@ -28,6 +28,8 @@
         <button class="nav-link" data-section="account" type="button">Mi cuenta</button>
         <button class="nav-link" data-section="companies" type="button">Mis empresas</button>
         <button class="nav-link" data-section="expenses" type="button">Gastos</button>
+        <button class="nav-link" data-section="document-center" type="button">Centro documental</button>
+        <button class="nav-link" data-section="integrations" type="button">Integraciones</button>
         <button class="nav-link" data-section="income" type="button">Ingresos</button>
         <button class="nav-link" data-section="reports" type="button">Informes</button>
         <button class="nav-link" data-section="statements" type="button">P&amp;G y Balance</button>
@@ -306,6 +308,328 @@
           <p class="panel-helper">Las facturas de la suscripción se emiten en Stripe. La gestoría puede verlas y descargarlas directamente desde el portal de facturación.</p>
         </section>
         {% endif %}
+      </section>
+
+      <section class="page-section" data-section="integrations">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Integraciones contables</h2>
+              <p>Prepara un paquete contable puente para gestorías que ya trabajan con A3, ContaSOL, Odoo, Cegid u otras soluciones.</p>
+            </div>
+          </div>
+          <div class="integration-toolbar">
+            <div class="field">
+              <label for="integrationStartDate">Desde</label>
+              <input type="date" id="integrationStartDate" />
+            </div>
+            <div class="field">
+              <label for="integrationEndDate">Hasta</label>
+              <input type="date" id="integrationEndDate" />
+            </div>
+            <div class="field">
+              <label for="integrationFormat">Formato</label>
+              <select id="integrationFormat">
+                <option value="csv">CSV</option>
+                <option value="xlsx">XLSX</option>
+              </select>
+            </div>
+          </div>
+          <p class="panel-helper">Fase 1: exportación normalizada y trazable. La conexión API directa con software de terceros se apoya en esta misma capa de datos.</p>
+          <p id="integrationStatus" class="panel-helper"></p>
+        </section>
+
+        <section class="grid integration-stats-grid">
+          <article class="panel integration-stat-card">
+            <span>Compras y gastos</span>
+            <strong id="integrationPurchasesCount">0</strong>
+            <p>Facturas proveedor, nóminas, alquileres, seguridad social y otros ajustes del periodo.</p>
+          </article>
+          <article class="panel integration-stat-card">
+            <span>Ventas e ingresos</span>
+            <strong id="integrationSalesCount">0</strong>
+            <p>Facturas emitidas y facturación manual ya consolidada para la empresa seleccionada.</p>
+          </article>
+          <article class="panel integration-stat-card">
+            <span>Asientos sugeridos</span>
+            <strong id="integrationJournalCount">0</strong>
+            <p>Líneas contables normalizadas con criterio PGC para revisión o importación asistida.</p>
+          </article>
+          <article class="panel integration-stat-card">
+            <span>Documentos trazables</span>
+            <strong id="integrationDocumentsCount">0</strong>
+            <p>Archivos registrados y vinculados al paquete para justificar cada asiento exportado.</p>
+          </article>
+        </section>
+
+        <section class="grid integration-target-grid">
+          <article class="panel integration-target-card">
+            <div class="integration-target-head">
+              <h3>Paquete Ledged</h3>
+              <span class="integration-pill ready">Listo</span>
+            </div>
+            <p>Descarga una carpeta ZIP con compras, ventas, asientos y manifiesto documental.</p>
+          </article>
+          <article class="panel integration-target-card">
+            <div class="integration-target-head">
+              <h3>ContaSOL / importación asistida</h3>
+              <span class="integration-pill ready">Listo</span>
+            </div>
+            <p>Usa los CSV/XLSX como capa puente para importar y ajustar asientos desde la gestoría.</p>
+          </article>
+          <article class="panel integration-target-card">
+            <div class="integration-target-head">
+              <h3>Odoo / A3 / Cegid</h3>
+              <span class="integration-pill bridge">Puente</span>
+            </div>
+            <p>Primero se exporta el dato limpio. La siguiente capa será el conector específico o API directa.</p>
+          </article>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Descargas del periodo</h2>
+              <p>Genera exportes por empresa y rango temporal para enviarlos directamente a la gestoría o al software contable.</p>
+            </div>
+          </div>
+          <div class="integration-actions">
+            <button id="integrationExportPurchasesBtn" class="button primary" type="button">Exportar compras</button>
+            <button id="integrationExportSalesBtn" class="button primary" type="button">Exportar ventas</button>
+            <button id="integrationExportJournalBtn" class="button primary" type="button">Exportar asientos</button>
+            <button id="integrationExportPackageBtn" class="button ghost" type="button">Descargar paquete ZIP</button>
+          </div>
+        </section>
+      </section>
+
+      <section class="page-section" data-section="document-center">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Centro de procesamiento documental</h2>
+              <p>Sube lotes de documentos, revisa la clasificación automática y registra solo lo que quede validado.</p>
+            </div>
+          </div>
+          <div class="document-center-toolbar">
+            <div class="field">
+              <label for="documentCenterPeriod">Periodo / campaña</label>
+              <input type="text" id="documentCenterPeriod" placeholder="Ej. Julio 2026" />
+            </div>
+            <div class="field">
+              <label for="documentCenterFiles">Archivos</label>
+              <input type="file" id="documentCenterFiles" multiple accept=".pdf,.jpg,.jpeg,.png,.zip,.csv,.xlsx,.xls" />
+            </div>
+            <button id="documentCenterUploadBtn" class="button primary">Procesar lote</button>
+          </div>
+          <p class="panel-helper">Formatos principales: PDF, JPG, PNG y ZIP. También admite CSV/XLSX para documentos estructurados y cuadros de amortización.</p>
+          <p id="documentCenterStatus" class="panel-helper"></p>
+        </section>
+
+        <section class="grid document-center-grid">
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Lotes recientes</h2>
+                <p>Selecciona un lote para filtrar la bandeja.</p>
+              </div>
+            </div>
+            <div class="field">
+              <label for="documentCenterBatchFilter">Lote</label>
+              <select id="documentCenterBatchFilter">
+                <option value="">Todos los lotes</option>
+              </select>
+            </div>
+            <div id="documentCenterBatchCards" class="document-center-batches"></div>
+            <button id="documentCenterRegisterReadyBtn" class="button ghost">Registrar listos del lote</button>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Bandeja inteligente</h2>
+                <p>Revisa duplicados, documentos pendientes y registros ya volcados.</p>
+              </div>
+            </div>
+            <div class="field">
+              <label for="documentCenterStatusFilter">Estado</label>
+              <select id="documentCenterStatusFilter">
+                <option value="">Todos</option>
+                <option value="ready_to_register">Listos</option>
+                <option value="needs_review">Revisión</option>
+                <option value="duplicate">Duplicados</option>
+                <option value="registered">Registrados</option>
+                <option value="rejected">Rechazados</option>
+              </select>
+            </div>
+            <div class="table-wrapper">
+              <table id="documentCenterTable">
+                <thead>
+                  <tr>
+                    <th>Archivo</th>
+                    <th>Tipo</th>
+                    <th>Contraparte</th>
+                    <th>Importe</th>
+                    <th>Confianza</th>
+                    <th>Estado</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <p id="documentCenterEmpty" class="empty">No hay documentos procesados para esta empresa.</p>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Revisión detallada</h2>
+              <p>Corrige los campos clave antes de aprobar o registrar el documento.</p>
+            </div>
+          </div>
+          <div id="documentCenterDetailEmpty" class="empty">Selecciona un documento de la bandeja para revisar su contenido.</div>
+          <div id="documentCenterDetail" class="document-center-detail" hidden>
+            <div class="document-center-detail-head">
+              <div>
+                <h3 id="documentCenterDetailTitle">Documento</h3>
+                <p id="documentCenterDetailMeta"></p>
+              </div>
+              <a id="documentCenterOpenFile" class="button ghost" target="_blank" rel="noreferrer">Abrir archivo</a>
+            </div>
+            <div class="document-center-form">
+              <div class="field">
+                <label for="documentCenterDocType">Tipo detectado</label>
+                <select id="documentCenterDocType">
+                  <option value="purchase_invoice">Factura de gasto</option>
+                  <option value="sales_invoice">Factura emitida</option>
+                  <option value="receipt">Ticket / recibo</option>
+                  <option value="payroll">Nómina</option>
+                  <option value="social_security">Seguridad Social</option>
+                  <option value="loan_document">Préstamo</option>
+                  <option value="bank_statement">Extracto bancario</option>
+                  <option value="tax_model">Modelo fiscal</option>
+                  <option value="unknown">Sin clasificar</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="documentCenterCounterparty">Contraparte</label>
+                <input type="text" id="documentCenterCounterparty" />
+              </div>
+              <div class="field">
+                <label for="documentCenterTaxId">CIF / NIF</label>
+                <input type="text" id="documentCenterTaxId" />
+              </div>
+              <div class="field">
+                <label for="documentCenterInvoiceNumber">Nº documento</label>
+                <input type="text" id="documentCenterInvoiceNumber" />
+              </div>
+              <div class="field">
+                <label for="documentCenterInvoiceDate">Fecha documento</label>
+                <input type="date" id="documentCenterInvoiceDate" />
+              </div>
+              <div class="field">
+                <label for="documentCenterPaymentDate">Fecha vencimiento</label>
+                <input type="date" id="documentCenterPaymentDate" />
+              </div>
+              <div class="field">
+                <label for="documentCenterBaseAmount">Base</label>
+                <input type="text" id="documentCenterBaseAmount" />
+              </div>
+              <div class="field">
+                <label for="documentCenterVatAmount">IVA</label>
+                <input type="text" id="documentCenterVatAmount" />
+              </div>
+              <div class="field">
+                <label for="documentCenterTotalAmount">Total</label>
+                <input type="text" id="documentCenterTotalAmount" />
+              </div>
+              <div class="field field-span-2">
+                <label for="documentCenterConcept">Concepto / notas</label>
+                <input type="text" id="documentCenterConcept" />
+              </div>
+            </div>
+            <div id="documentCenterPayrollFields" class="document-center-special-fields" hidden>
+              <h4>Detalle de nómina</h4>
+              <div class="document-center-form">
+                <div class="field">
+                  <label for="documentCenterPayrollEmployee">Empleado</label>
+                  <input type="text" id="documentCenterPayrollEmployee" />
+                </div>
+                <div class="field">
+                  <label for="documentCenterPayrollPeriod">Periodo de nómina</label>
+                  <input type="text" id="documentCenterPayrollPeriod" placeholder="Ej. Mayo 2026" />
+                </div>
+                <div class="field">
+                  <label for="documentCenterPayrollGross">Bruto</label>
+                  <input type="text" id="documentCenterPayrollGross" />
+                </div>
+                <div class="field">
+                  <label for="documentCenterPayrollNet">Líquido</label>
+                  <input type="text" id="documentCenterPayrollNet" />
+                </div>
+                <div class="field">
+                  <label for="documentCenterPayrollDeductions">Deducciones</label>
+                  <input type="text" id="documentCenterPayrollDeductions" />
+                </div>
+                <div class="field">
+                  <label for="documentCenterPayrollEmployerCost">Coste empresa</label>
+                  <input type="text" id="documentCenterPayrollEmployerCost" />
+                </div>
+              </div>
+            </div>
+            <div id="documentCenterTaxModelFields" class="document-center-special-fields" hidden>
+              <h4>Detalle de modelo fiscal</h4>
+              <div class="document-center-form">
+                <div class="field">
+                  <label for="documentCenterTaxModelName">Modelo</label>
+                  <input type="text" id="documentCenterTaxModelName" placeholder="Ej. 303" />
+                </div>
+                <div class="field">
+                  <label for="documentCenterTaxModelStatus">Resultado</label>
+                  <select id="documentCenterTaxModelStatus">
+                    <option value="">Sin definir</option>
+                    <option value="a_ingresar">A ingresar</option>
+                    <option value="a_compensar">A compensar</option>
+                    <option value="sin_actividad">Sin actividad</option>
+                    <option value="a_devolver">A devolver</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="documentCenterTaxModelPeriod">Periodo fiscal</label>
+                  <input type="text" id="documentCenterTaxModelPeriod" placeholder="Ej. T2 2026" />
+                </div>
+                <div class="field">
+                  <label for="documentCenterTaxModelAmount">Cuota / importe</label>
+                  <input type="text" id="documentCenterTaxModelAmount" />
+                </div>
+                <div class="field">
+                  <label for="documentCenterTaxModelOffsetAmount">Importe a compensar</label>
+                  <input type="text" id="documentCenterTaxModelOffsetAmount" />
+                </div>
+                <div class="field">
+                  <label for="documentCenterTaxModelRefundAmount">Importe a devolver</label>
+                  <input type="text" id="documentCenterTaxModelRefundAmount" />
+                </div>
+              </div>
+            </div>
+            <div class="document-center-actions">
+              <button id="documentCenterSaveBtn" class="button ghost">Guardar corrección</button>
+              <button id="documentCenterApproveBtn" class="button primary">Aprobar</button>
+              <button id="documentCenterRegisterBtn" class="button primary">Registrar</button>
+              <button id="documentCenterRejectBtn" class="button danger">Rechazar</button>
+            </div>
+            <div class="document-center-detail-columns">
+              <div>
+                <h4>Datos extraídos</h4>
+                <pre id="documentCenterExtractedJson" class="document-center-json"></pre>
+              </div>
+              <div>
+                <h4>Trazabilidad</h4>
+                <div id="documentCenterAuditLog" class="document-center-audit"></div>
+              </div>
+            </div>
+          </div>
+        </section>
       </section>
 
       <section class="page-section" data-section="companies">

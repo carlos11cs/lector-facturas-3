@@ -1911,6 +1911,229 @@ body.period-quarterly #billingEntriesTable td.period-month {
   display: table-cell;
 }
 
+.integration-toolbar {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.integration-stats-grid,
+.integration-target-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.integration-stat-card,
+.integration-target-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.integration-stat-card span {
+  color: var(--muted);
+}
+
+.integration-stat-card strong {
+  font-size: 2rem;
+  line-height: 1;
+}
+
+.integration-stat-card p,
+.integration-target-card p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.integration-target-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.integration-target-head h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.integration-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.integration-pill.ready {
+  background: #e8f7ef;
+  color: #1a7f4f;
+}
+
+.integration-pill.bridge {
+  background: #eef2ff;
+  color: #4f46e5;
+}
+
+.integration-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.document-center-toolbar,
+.document-center-form {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  align-items: end;
+}
+
+.document-center-grid {
+  grid-template-columns: minmax(280px, 0.95fr) minmax(0, 1.35fr);
+}
+
+.document-center-batches {
+  display: grid;
+  gap: 14px;
+}
+
+.document-center-batch-card {
+  border: 1px solid rgba(39, 98, 82, 0.12);
+  border-radius: 18px;
+  padding: 16px 18px;
+  background: rgba(255, 255, 255, 0.9);
+  cursor: pointer;
+}
+
+.document-center-batch-card.active {
+  border-color: rgba(39, 98, 82, 0.38);
+  box-shadow: 0 16px 32px rgba(39, 98, 82, 0.12);
+}
+
+.document-center-batch-card h3,
+.document-center-detail-head h3,
+.document-center-detail-columns h4 {
+  margin: 0 0 6px;
+}
+
+.document-center-batch-card p,
+.document-center-detail-head p {
+  margin: 3px 0;
+  color: var(--muted);
+}
+
+.document-center-status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  background: rgba(39, 98, 82, 0.12);
+  color: var(--accent);
+}
+
+.document-center-status-pill.needs_review,
+.document-center-status-pill.rejected {
+  background: rgba(177, 93, 46, 0.12);
+  color: #9a552d;
+}
+
+.document-center-status-pill.duplicate {
+  background: rgba(138, 87, 43, 0.12);
+  color: #8a572b;
+}
+
+.document-center-status-pill.registered,
+.document-center-status-pill.ready_to_register {
+  background: rgba(33, 128, 98, 0.12);
+  color: #1f7458;
+}
+
+.document-center-row {
+  cursor: pointer;
+}
+
+.document-center-row.is-active {
+  background: rgba(39, 98, 82, 0.06);
+}
+
+.document-center-detail-head,
+.document-center-actions,
+.document-center-detail-columns {
+  display: flex;
+  gap: 16px;
+}
+
+.document-center-detail-head,
+.document-center-actions {
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.document-center-actions {
+  margin-top: 18px;
+}
+
+.document-center-detail-columns {
+  margin-top: 20px;
+  align-items: flex-start;
+}
+
+.document-center-detail-columns > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.document-center-special-fields {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(39, 98, 82, 0.08);
+}
+
+.document-center-special-fields h4 {
+  margin: 0 0 12px;
+}
+
+.document-center-json {
+  margin: 0;
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(244, 246, 242, 0.96);
+  border: 1px solid rgba(39, 98, 82, 0.08);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.document-center-audit {
+  display: grid;
+  gap: 12px;
+}
+
+.document-center-audit-item {
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: rgba(244, 246, 242, 0.96);
+  border: 1px solid rgba(39, 98, 82, 0.08);
+}
+
+.document-center-audit-item strong,
+.document-center-audit-item span {
+  display: block;
+}
+
+.field-span-2 {
+  grid-column: span 2;
+}
+
 @media (max-width: 1024px) {
   .main {
     padding: 28px 20px 40px;
@@ -1927,6 +2150,10 @@ body.period-quarterly #billingEntriesTable td.period-month {
   }
 
   .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .document-center-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1983,6 +2210,10 @@ body.period-quarterly #billingEntriesTable td.period-month {
     opacity: 1;
     pointer-events: auto;
   }
+
+  .document-center-detail-columns {
+    flex-direction: column;
+  }
 }
 
 @media (max-width: 600px) {
@@ -2000,6 +2231,10 @@ body.period-quarterly #billingEntriesTable td.period-month {
 
   .payment-edit {
     flex-wrap: wrap;
+  }
+
+  .field-span-2 {
+    grid-column: span 1;
   }
 }
 

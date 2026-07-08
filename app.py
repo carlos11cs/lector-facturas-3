@@ -1,4 +1,6 @@
 import calendar
+import csv
+import hashlib
 import io
 import json
 import logging
@@ -6,6 +8,8 @@ import multiprocessing as mp
 import os
 import re
 import secrets
+import tempfile
+import zipfile
 from datetime import date, datetime, timedelta
 from functools import wraps
 
@@ -16,7 +20,7 @@ try:
     import stripe
 except ImportError:  # pragma: no cover - dependency is required in deployment
     stripe = None
-from flask import Flask, jsonify, redirect, render_template, request, session, url_for, g
+from flask import Flask, jsonify, redirect, render_template, request, session, url_for, g, send_file
 from sqlalchemy import (
     Boolean,
     Column,
@@ -41,10 +45,21 @@ from services.ai_invoice_service import (
     _extract_image_text_ocr_from_bytes,
     extract_loan_schedule,
 )
+from services.storage_service import get_public_url, upload_bytes
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data.db")
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png"}
+DOCUMENT_CENTER_ALLOWED_EXTENSIONS = {
+    ".pdf",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".zip",
+    ".csv",
+    ".xlsx",
+    ".xls",
+}
 ANALYSIS_TIMEOUT_SECONDS = int(os.getenv("ANALYSIS_TIMEOUT_SECONDS", "120"))
 DEFAULT_USER_ID = int(os.getenv("DEFAULT_USER_ID", "1"))
 OWNER_EMAIL = (os.getenv("OWNER_EMAIL") or "").strip().lower()
@@ -334,6 +349,62 @@ loan_installments_table = Table(
     Column("interest_amount", Float, nullable=False),
     Column("principal_amount", Float, nullable=False),
     Column("created_at", String, nullable=False),
+)
+
+document_batches_table = Table(
+    "document_batches",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("company_id", Integer, nullable=False),
+    Column("uploaded_by_user_id", Integer, nullable=False),
+    Column("period", String, nullable=False),
+    Column("total_documents", Integer, nullable=False, server_default=text("0")),
+    Column("processed_documents", Integer, nullable=False, server_default=text("0")),
+    Column("ready_documents", Integer, nullable=False, server_default=text("0")),
+    Column("review_documents", Integer, nullable=False, server_default=text("0")),
+    Column("duplicate_documents", Integer, nullable=False, server_default=text("0")),
+    Column("failed_documents", Integer, nullable=False, server_default=text("0")),
+    Column("status", String, nullable=False, server_default="uploaded"),
+    Column("created_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+)
+
+processed_documents_table = Table(
+    "processed_documents",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("company_id", Integer, nullable=False),
+    Column("uploaded_by_user_id", Integer, nullable=False),
+    Column("source_batch_id", Integer, nullable=False),
+    Column("original_filename", String, nullable=False),
+    Column("storage_path", String, nullable=False),
+    Column("file_url", String),
+    Column("file_type", String),
+    Column("uploaded_at", String, nullable=False),
+    Column("processing_status", String, nullable=False, server_default="uploaded"),
+    Column("detected_document_type", String, nullable=False, server_default="unknown"),
+    Column("confidence_score", Float),
+    Column("extracted_data_json", Text),
+    Column("original_extracted_data_json", Text),
+    Column("corrected_data_json", Text),
+    Column("validation_status", String, nullable=False, server_default="needs_review"),
+    Column("issue_type", String),
+    Column("issue_description", Text),
+    Column("linked_accounting_record_id", String),
+    Column("linked_accounting_record_type", String),
+    Column("approved_at", String),
+    Column("approved_by_user_id", Integer),
+    Column("rejected_at", String),
+    Column("rejected_by_user_id", Integer),
+    Column("registered_at", String),
+    Column("registered_by_user_id", Integer),
+    Column("period", String, nullable=False),
+    Column("extracted_text", Text),
+    Column("duplicate_of_document_id", Integer),
+    Column("content_hash", String),
+    Column("audit_log_json", Text),
+    Column("created_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
 )
 
 app = Flask(__name__)
@@ -1502,6 +1573,1040 @@ def serialize_payment_dates(values):
     return json.dumps(normalized) if normalized else None
 
 
+DOCUMENT_PROCESSING_TYPES = {
+    "purchase_invoice",
+    "sales_invoice",
+    "receipt",
+    "bank_statement",
+    "loan_document",
+    "payroll",
+    "social_security",
+    "tax_model",
+    "non_accounting",
+    "unknown",
+}
+
+
+def allowed_processing_file(filename):
+    return os.path.splitext(filename.lower())[1] in DOCUMENT_CENTER_ALLOWED_EXTENSIONS
+
+
+def local_uploaded_file_path(key: str) -> str:
+    base_dir = os.getenv("UPLOAD_FOLDER") or os.path.join(tempfile.gettempdir(), "uploads")
+    os.makedirs(base_dir, exist_ok=True)
+    return os.path.join(base_dir, key)
+
+
+def normalize_period_label(raw_period: str) -> str:
+    value = (raw_period or "").strip()
+    return value or f"{date.today().year}"
+
+
+def json_dumps(value):
+    return json.dumps(value, ensure_ascii=False)
+
+
+def json_loads_dict(value):
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return value
+    try:
+        loaded = json.loads(value)
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def json_loads_list(value):
+    if not value:
+        return []
+    if isinstance(value, list):
+        return value
+    try:
+        loaded = json.loads(value)
+    except Exception:
+        return []
+    return loaded if isinstance(loaded, list) else []
+
+
+def append_document_audit(existing_value, action, user_id=None, payload=None):
+    history = json_loads_list(existing_value)
+    history.append(
+        {
+            "action": action,
+            "user_id": user_id,
+            "timestamp": datetime.utcnow().isoformat(),
+            "payload": payload or {},
+        }
+    )
+    return json_dumps(history)
+
+
+def document_file_type_from_name(filename):
+    ext = os.path.splitext((filename or "").lower())[1]
+    return ext.lstrip(".") or "unknown"
+
+
+def document_content_type_from_name(filename):
+    extension = os.path.splitext((filename or "").lower())[1]
+    return {
+        ".pdf": "application/pdf",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".csv": "text/csv",
+        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".xls": "application/vnd.ms-excel",
+    }.get(extension, "application/octet-stream")
+
+
+def document_storage_key(company_id, batch_id, filename):
+    safe_name = secure_filename(filename or "documento")
+    return f"document-center/company-{company_id}/batch-{batch_id}/{secrets.token_hex(8)}-{safe_name}"
+
+
+def persist_document_bytes(company_id, batch_id, filename, data, content_type=None):
+    key = document_storage_key(company_id, batch_id, filename)
+    upload_bytes(data, key, content_type=content_type)
+    return key, get_public_url(key)
+
+
+def extract_text_from_document_bytes(file_bytes, filename):
+    extension = os.path.splitext((filename or "").lower())[1]
+    if extension == ".pdf":
+        text_value = _extract_pdf_text_from_bytes(file_bytes) or ""
+        if not text_value or len(text_value.strip()) < 60:
+            text_value = _extract_pdf_text_ocr_from_bytes(file_bytes) or ""
+        return text_value
+    if extension in {".jpg", ".jpeg", ".png"}:
+        return _extract_image_text_ocr_from_bytes(file_bytes) or ""
+    if extension == ".csv":
+        try:
+            return file_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            return file_bytes.decode("latin-1", errors="ignore")
+    if extension in {".xlsx", ".xls"}:
+        workbook = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+        lines = []
+        for sheet in workbook.worksheets[:3]:
+            for row in sheet.iter_rows(values_only=True):
+                values = [str(cell).strip() for cell in row if cell not in (None, "")]
+                if values:
+                    lines.append(" | ".join(values))
+        return "\n".join(lines)
+    return ""
+
+
+def iter_uploaded_documents(files):
+    for uploaded in files:
+        if not uploaded or not uploaded.filename:
+            continue
+        original_name = os.path.basename(uploaded.filename)
+        if not allowed_processing_file(original_name):
+            continue
+        file_bytes = uploaded.read()
+        extension = os.path.splitext(original_name.lower())[1]
+        if extension == ".zip":
+            try:
+                with zipfile.ZipFile(io.BytesIO(file_bytes)) as archive:
+                    for member in archive.infolist():
+                        if member.is_dir():
+                            continue
+                        member_name = os.path.basename(member.filename)
+                        if not member_name or not allowed_processing_file(member_name):
+                            continue
+                        inner_bytes = archive.read(member)
+                        inner_ext = os.path.splitext(member_name.lower())[1]
+                        if inner_ext == ".zip":
+                            continue
+                        yield {
+                            "filename": member_name,
+                            "bytes": inner_bytes,
+                            "content_type": None,
+                        }
+            except zipfile.BadZipFile:
+                continue
+        else:
+            yield {
+                "filename": original_name,
+                "bytes": file_bytes,
+                "content_type": uploaded.mimetype,
+            }
+
+
+def detect_document_type(text_value, filename="", company_names=None):
+    text_lower = (text_value or "").lower()
+    filename_lower = (filename or "").lower()
+    company_names = [item.lower() for item in (company_names or []) if item]
+
+    if any(token in text_lower for token in ("modelo 303", "modelo 111", "modelo 115", "modelo 200", "modelo 202")):
+        return "tax_model"
+    if any(token in text_lower for token in ("seguridad social", "rlc", "rnt")):
+        return "social_security"
+    if any(token in text_lower for token in ("nómina", "nomina", "devengos", "deducciones")):
+        return "payroll"
+    if any(token in text_lower for token in ("préstamo", "prestamo", "cuadro de amortización", "cuadro de amortizacion", "tin", "tae")):
+        return "loan_document"
+    if any(token in text_lower for token in ("extracto", "saldo", "movimientos", "iban")) and len(re.findall(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", text_lower)) >= 2:
+        return "bank_statement"
+    if "factura simplificada" in text_lower or "ticket" in text_lower:
+        return "receipt"
+    if "factura" in text_lower or "nº factura" in text_lower or "base imponible" in text_lower:
+        if any(name and name in text_lower for name in company_names) and any(
+            token in text_lower for token in ("cliente", "destinatario", "factura emitida")
+        ):
+            return "sales_invoice"
+        if any(token in filename_lower for token in ("venta", "ingreso", "sales", "emitida")):
+            return "sales_invoice"
+        return "purchase_invoice"
+    if any(token in filename_lower for token in ("extracto", "banco", "bank")):
+        return "bank_statement"
+    if any(token in filename_lower for token in ("nomina", "nómina")):
+        return "payroll"
+    return "unknown"
+
+
+def extract_tax_id_from_text(text_value):
+    if not text_value:
+        return None
+    match = re.search(r"\b([A-Z]\d{7}[A-Z0-9]|\d{8}[A-Z])\b", text_value.upper())
+    return match.group(1) if match else None
+
+
+def extract_invoice_number_from_text(text_value):
+    if not text_value:
+        return None
+    patterns = [
+        r"(?:factura|fra\.?|n[ºo]\s*factura)[:\s#-]*([A-Z0-9\/\.-]{3,})",
+        r"(?:invoice\s*(?:no|number)?)[:\s#-]*([A-Z0-9\/\.-]{3,})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text_value, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def extract_labeled_amount(text_value, labels):
+    if not text_value:
+        return None
+    patterns = [
+        rf"(?:{'|'.join(labels)})\s*[:\-]?\s*([\d\.\s,]+)",
+        rf"([\d\.\s,]+)\s*(?:€|eur)?\s*(?:{'|'.join(labels)})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text_value, flags=re.IGNORECASE)
+        if match:
+            amount = parse_amount(match.group(1))
+            if amount is not None:
+                return amount
+    return None
+
+
+def extract_payroll_period(text_value):
+    if not text_value:
+        return None
+    month_regex = r"(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)"
+    patterns = [
+        rf"(?:periodo|período|nomina|nómina)\s*(?:de)?\s*{month_regex}\s*(?:de)?\s*(20\d{{2}})",
+        rf"{month_regex}\s*(20\d{{2}})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text_value, flags=re.IGNORECASE)
+        if match:
+            month_value = match.group(1)
+            year_value = match.group(2)
+            return f"{month_value.title()} {year_value}"
+    return None
+
+
+def extract_model_period(text_value):
+    if not text_value:
+        return None
+    compact_quarter_match = re.search(
+        r"([1-4])\s*T\s*(20\d{2})",
+        text_value,
+        flags=re.IGNORECASE,
+    )
+    if compact_quarter_match:
+        return f"T{compact_quarter_match.group(1)} {compact_quarter_match.group(2)}"
+    quarter_match = re.search(
+        r"([1-4])\s*[ºo]?\s*(?:trimestre|trim)\s*(20\d{2})",
+        text_value,
+        flags=re.IGNORECASE,
+    )
+    if quarter_match:
+        return f"T{quarter_match.group(1)} {quarter_match.group(2)}"
+    year_match = re.search(r"(?:ejercicio|año)\s*(20\d{2})", text_value, flags=re.IGNORECASE)
+    if year_match:
+        return year_match.group(1)
+    return None
+
+
+def extract_tax_model_data(text_value):
+    lower_text = (text_value or "").lower()
+    model_name = next(
+        (
+            model
+            for model in ("303", "111", "115", "200", "202", "390", "190", "180", "130")
+            if f"modelo {model}" in lower_text
+        ),
+        None,
+    )
+    payable_amount = extract_labeled_amount(
+        text_value,
+        [
+            "a ingresar",
+            "resultado liquidaci[oó]n",
+            "resultado de la liquidaci[oó]n",
+            "importe a ingresar",
+            "total a ingresar",
+            "cuota",
+        ],
+    )
+    refund_amount = extract_labeled_amount(
+        text_value,
+        [
+            "a devolver",
+            "importe a devolver",
+            "solicitud de devoluci[oó]n",
+        ],
+    )
+    offset_amount = extract_labeled_amount(
+        text_value,
+        [
+            "a compensar",
+            "importe a compensar",
+            "cuota a compensar",
+        ],
+    )
+    filing_status = None
+    normalized_amount = payable_amount
+    if "sin actividad" in lower_text or "sin operaciones" in lower_text or "sin cuota" in lower_text:
+        filing_status = "sin_actividad"
+        normalized_amount = 0.0
+    elif offset_amount is not None or "a compensar" in lower_text:
+        filing_status = "a_compensar"
+        normalized_amount = offset_amount if offset_amount is not None else 0.0
+    elif refund_amount is not None or "a devolver" in lower_text:
+        filing_status = "a_devolver"
+        normalized_amount = refund_amount if refund_amount is not None else 0.0
+    elif payable_amount is not None or "a ingresar" in lower_text:
+        filing_status = "a_ingresar"
+
+    return {
+        "model_name": model_name,
+        "tax_period": extract_model_period(text_value),
+        "filing_status": filing_status,
+        "amount": normalized_amount,
+        "total_amount": normalized_amount,
+        "payable_amount": payable_amount,
+        "offset_amount": offset_amount,
+        "refund_amount": refund_amount,
+    }
+
+
+def normalize_tax_period_key(value):
+    if not value:
+        return ""
+    raw = str(value).strip().lower()
+    if not raw:
+        return ""
+    raw = raw.replace("setiembre", "septiembre")
+    quarter_match = re.search(r"t\s*([1-4])\s*(20\d{2})", raw, flags=re.IGNORECASE)
+    if not quarter_match:
+        quarter_match = re.search(
+            r"([1-4])\s*(?:t|trimestre|trim)\s*(20\d{2})",
+            raw,
+            flags=re.IGNORECASE,
+        )
+    if quarter_match:
+        return f"T{quarter_match.group(1)} {quarter_match.group(2)}"
+    months_match = re.search(r"(3|9|11)\s*meses?\s*(20\d{2})", raw, flags=re.IGNORECASE)
+    if months_match:
+        return f"{months_match.group(1)} MESES {months_match.group(2)}"
+    year_match = re.search(r"(20\d{2})", raw)
+    month_names = {
+        "enero": 1,
+        "febrero": 2,
+        "marzo": 3,
+        "abril": 4,
+        "mayo": 5,
+        "junio": 6,
+        "julio": 7,
+        "agosto": 8,
+        "septiembre": 9,
+        "octubre": 10,
+        "noviembre": 11,
+        "diciembre": 12,
+    }
+    for name in month_names:
+        if name in raw and year_match:
+            return f"{name.title()} {year_match.group(1)}"
+    return raw.upper()
+
+
+def _fetch_registered_tax_filings(conn, company_id):
+    rows = conn.execute(
+        select(processed_documents_table)
+        .where(processed_documents_table.c.company_id == company_id)
+        .where(processed_documents_table.c.detected_document_type == "tax_model")
+        .where(processed_documents_table.c.registered_at.is_not(None))
+        .order_by(processed_documents_table.c.registered_at.desc(), processed_documents_table.c.id.desc())
+    ).mappings().all()
+    lookup = {}
+    for row in rows:
+        data = effective_document_data(row)
+        model_name = str(data.get("model_name") or "").strip()
+        period_key = normalize_tax_period_key(data.get("tax_period"))
+        if not model_name or not period_key:
+            continue
+        lookup[(model_name, period_key)] = {
+            "document_id": row["id"],
+            "filing_status": data.get("filing_status") or "a_ingresar",
+            "amount": parse_amount(data.get("amount")) or parse_amount(data.get("total_amount")) or 0.0,
+            "payable_amount": parse_amount(data.get("payable_amount")),
+            "offset_amount": parse_amount(data.get("offset_amount")),
+            "refund_amount": parse_amount(data.get("refund_amount")),
+            "tax_period": data.get("tax_period"),
+            "registered_at": row.get("registered_at"),
+            "concept": data.get("concept"),
+        }
+    return lookup
+
+
+def enrich_payroll_data(extracted, text_value, fallback_name=None):
+    employee_name = extracted.get("employee_name") or extracted.get("provider_name")
+    if not employee_name and fallback_name:
+        clean_name = os.path.splitext(os.path.basename(fallback_name))[0]
+        clean_name = re.sub(r"^\d{1,2}[._-]?\d{4}\s*", "", clean_name).strip()
+        employee_name = clean_name or None
+    gross_amount = (
+        parse_amount(extracted.get("base_amount"))
+        or extract_labeled_amount(text_value, ["total devengado", "devengos", "bruto", "salario bruto"])
+    )
+    net_amount = (
+        parse_amount(extracted.get("payroll_net_amount"))
+        or parse_amount(extracted.get("total_amount"))
+        or extract_labeled_amount(text_value, ["liquido a percibir", "líquido a percibir", "neto", "total liquido"])
+    )
+    deductions_amount = (
+        parse_amount(extracted.get("payroll_total_deductions_amount"))
+        or extract_labeled_amount(text_value, ["total deducciones", "deducciones"])
+    )
+    employer_cost_amount = (
+        parse_amount(extracted.get("payroll_employer_cost_amount"))
+        or extract_labeled_amount(text_value, ["coste empresa", "total empresa", "coste total empresa"])
+    )
+    if gross_amount is None and net_amount is not None and deductions_amount is not None:
+        gross_amount = round(net_amount + deductions_amount, 2)
+    if deductions_amount is None and gross_amount is not None and net_amount is not None:
+        deductions_amount = round(max(gross_amount - net_amount, 0), 2)
+    extracted["employee_name"] = employee_name
+    extracted["provider_name"] = employee_name
+    extracted["payroll_period"] = extracted.get("payroll_period") or extract_payroll_period(text_value)
+    extracted["base_amount"] = gross_amount
+    extracted["payroll_net_amount"] = net_amount
+    extracted["payroll_total_deductions_amount"] = deductions_amount
+    extracted["payroll_employer_cost_amount"] = employer_cost_amount
+    extracted["total_amount"] = net_amount if net_amount is not None else extracted.get("total_amount")
+    extracted["concept"] = extracted.get("concept") or (
+        f"Nómina - {employee_name}" if employee_name else "Nómina"
+    )
+    extracted["vat_deductible"] = False
+    extracted["vat_amount"] = None
+    extracted["vat_rate"] = None
+    return extracted
+
+
+def extract_confidence_and_fields(
+    detected_type,
+    extracted_data,
+    text_value="",
+):
+    score = 0
+    issue_type = None
+    issue_description = None
+    normalized = extracted_data or {}
+
+    if detected_type in {"purchase_invoice", "sales_invoice", "receipt"}:
+        if detected_type:
+            score += 20
+        if normalized.get("provider_name") or normalized.get("client_name"):
+            score += 15
+        if normalized.get("tax_id"):
+            score += 15
+        if normalized.get("invoice_date"):
+            score += 15
+        if normalized.get("invoice_number"):
+            score += 15
+        if normalized.get("base_amount") is not None:
+            score += 10
+        if normalized.get("vat_amount") is not None and normalized.get("total_amount") is not None:
+            score += 10
+    elif detected_type == "payroll":
+        if detected_type:
+            score += 30
+        if normalized.get("employee_name") or normalized.get("provider_name"):
+            score += 20
+        if normalized.get("payroll_period"):
+            score += 15
+        if normalized.get("base_amount") is not None:
+            score += 15
+        if normalized.get("payroll_net_amount") is not None:
+            score += 10
+        if normalized.get("payroll_total_deductions_amount") is not None:
+            score += 10
+    elif detected_type == "tax_model":
+        if detected_type:
+            score += 35
+        if normalized.get("model_name"):
+            score += 20
+        if normalized.get("filing_status"):
+            score += 10
+        if normalized.get("tax_period"):
+            score += 15
+        if normalized.get("amount") is not None or normalized.get("total_amount") is not None:
+            score += 15
+        if normalized.get("invoice_date") or normalized.get("payment_date"):
+            score += 10
+    else:
+        if detected_type != "unknown":
+            score += 35
+        if text_value and len(text_value.strip()) > 60:
+            score += 20
+        if normalized.get("invoice_date") or normalized.get("payment_date"):
+            score += 15
+        if normalized.get("total_amount") is not None or normalized.get("amount") is not None:
+            score += 15
+        if normalized.get("provider_name") or normalized.get("client_name") or normalized.get("bank_name"):
+            score += 15
+
+    score = max(0, min(score, 100))
+    if score >= 80:
+        validation_status = "ready_to_register"
+    else:
+        validation_status = "needs_review"
+        if score < 50:
+            issue_type = "low_confidence"
+            issue_description = "Confianza baja en la clasificación o en la extracción."
+    return score, validation_status, issue_type, issue_description
+
+
+def build_document_extracted_data(
+    *,
+    detected_type,
+    text_value,
+    filename,
+    file_bytes,
+    content_type,
+    company_names,
+    known_suppliers,
+):
+    extracted = {
+        "filename": filename,
+        "invoice_number": extract_invoice_number_from_text(text_value),
+        "tax_id": extract_tax_id_from_text(text_value),
+        "invoice_date": _extract_first_date(text_value),
+        "payment_date": _find_payment_date_by_keywords(text_value),
+        "payment_dates": _find_payment_dates_by_keywords(text_value, _extract_first_date(text_value)),
+        "analysis_text": (text_value or "")[:12000],
+    }
+    ai_doc_type = {
+        "purchase_invoice": "expense",
+        "sales_invoice": "income",
+        "payroll": "expense_payroll",
+        "receipt": "expense_other",
+        "social_security": "expense_other",
+    }.get(detected_type)
+    if ai_doc_type and file_bytes:
+        ai_data = _analyze_invoice_with_timeout(
+            file_bytes=file_bytes,
+            filename=filename,
+            stored_name=filename,
+            mime_type=content_type or document_content_type_from_name(filename),
+            document_type=ai_doc_type,
+            company_names=company_names,
+            known_suppliers=known_suppliers,
+        )
+        if isinstance(ai_data, dict):
+            extracted.update({key: value for key, value in ai_data.items() if value not in (None, "", [])})
+    if detected_type == "payroll":
+        extracted = enrich_payroll_data(extracted, text_value, filename)
+    elif detected_type == "loan_document":
+        installments = parse_loan_installments_from_text(text_value or "")
+        if not installments and text_value:
+            installments = extract_loan_schedule(text_value) or []
+        extracted["installments"] = installments
+        extracted["bank_name"] = " ".join(re.findall(r"(?:banco|bank|caixa|bbva|santander|sabadell)", text_value, flags=re.IGNORECASE)[:2]) or None
+        if installments:
+            first_item = installments[0]
+            extracted["payment_date"] = first_item.get("payment_date")
+            extracted["amount"] = first_item.get("total_amount")
+    elif detected_type == "bank_statement":
+        extracted["movement_lines"] = [line.strip() for line in (text_value or "").splitlines() if line.strip()][:100]
+    elif detected_type == "tax_model":
+        extracted.update(
+            {
+                key: value
+                for key, value in extract_tax_model_data(text_value).items()
+                if value not in (None, "", [])
+            }
+        )
+    return extracted
+
+
+def effective_document_data(row):
+    corrected = json_loads_dict(row.get("corrected_data_json"))
+    if corrected:
+        return corrected
+    return json_loads_dict(row.get("original_extracted_data_json"))
+
+
+def serialize_document_batch(row):
+    return {
+        "id": row["id"],
+        "companyId": row["company_id"],
+        "uploadedByUserId": row["uploaded_by_user_id"],
+        "period": row["period"],
+        "totalDocuments": int(row.get("total_documents") or 0),
+        "processedDocuments": int(row.get("processed_documents") or 0),
+        "readyDocuments": int(row.get("ready_documents") or 0),
+        "reviewDocuments": int(row.get("review_documents") or 0),
+        "duplicateDocuments": int(row.get("duplicate_documents") or 0),
+        "failedDocuments": int(row.get("failed_documents") or 0),
+        "status": row.get("status"),
+        "createdAt": row.get("created_at"),
+        "updatedAt": row.get("updated_at"),
+    }
+
+
+def get_company_names(conn, company_id):
+    row = conn.execute(
+        select(companies_table.c.display_name, companies_table.c.legal_name).where(
+            companies_table.c.id == company_id
+        )
+    ).mappings().first()
+    if not row:
+        return []
+    return [row.get("display_name"), row.get("legal_name")]
+
+
+def build_processed_document_payload(
+    *,
+    file_bytes,
+    filename,
+    content_type,
+    company_id,
+    data_owner_id,
+    current_user_id,
+    batch_id,
+    period,
+    company_names,
+    known_suppliers,
+):
+    uploaded_at = datetime.utcnow().isoformat()
+    content_hash = hashlib.sha256(file_bytes).hexdigest()
+    stored_path, file_url = persist_document_bytes(
+        company_id,
+        batch_id,
+        filename,
+        file_bytes,
+        content_type=content_type or document_content_type_from_name(filename),
+    )
+    text_value = extract_text_from_document_bytes(file_bytes, filename)
+    detected_type = detect_document_type(text_value, filename, company_names)
+    extracted_data = build_document_extracted_data(
+        detected_type=detected_type,
+        text_value=text_value,
+        filename=filename,
+        file_bytes=file_bytes,
+        content_type=content_type,
+        company_names=company_names,
+        known_suppliers=known_suppliers,
+    )
+    confidence_score, validation_status, issue_type, issue_description = extract_confidence_and_fields(
+        detected_type,
+        extracted_data,
+        text_value=text_value,
+    )
+    return {
+        "company_id": company_id,
+        "uploaded_by_user_id": current_user_id,
+        "source_batch_id": batch_id,
+        "original_filename": filename,
+        "storage_path": stored_path,
+        "file_url": file_url,
+        "file_type": document_file_type_from_name(filename),
+        "uploaded_at": uploaded_at,
+        "processing_status": "processed",
+        "detected_document_type": detected_type,
+        "confidence_score": confidence_score,
+        "extracted_data_json": json_dumps(extracted_data),
+        "original_extracted_data_json": json_dumps(extracted_data),
+        "corrected_data_json": None,
+        "validation_status": validation_status,
+        "issue_type": issue_type,
+        "issue_description": issue_description,
+        "linked_accounting_record_id": None,
+        "linked_accounting_record_type": None,
+        "approved_at": None,
+        "approved_by_user_id": None,
+        "rejected_at": None,
+        "rejected_by_user_id": None,
+        "registered_at": None,
+        "registered_by_user_id": None,
+        "period": period,
+        "extracted_text": text_value[:12000] if text_value else None,
+        "duplicate_of_document_id": None,
+        "content_hash": content_hash,
+        "audit_log_json": append_document_audit(
+            None,
+            "uploaded",
+            current_user_id,
+            {"filename": filename, "detected_type": detected_type},
+        ),
+        "created_at": uploaded_at,
+        "updated_at": uploaded_at,
+    }
+
+
+def document_belongs_to_company(row, company_id):
+    return row and int(row["company_id"]) == int(company_id)
+
+
+def get_processed_document_for_company(conn, document_id, company_id):
+    row = conn.execute(
+        select(processed_documents_table).where(processed_documents_table.c.id == document_id)
+    ).mappings().first()
+    if not document_belongs_to_company(row, company_id):
+        return None
+    return row
+
+
+def update_processed_document_record(conn, document_id, **values):
+    values["updated_at"] = datetime.utcnow().isoformat()
+    conn.execute(
+        processed_documents_table.update()
+        .where(processed_documents_table.c.id == document_id)
+        .values(**values)
+    )
+
+
+def register_processed_document(conn, row, data_owner_id, current_user_id):
+    doc_type = row.get("detected_document_type")
+    data = effective_document_data(row)
+    now = datetime.utcnow().isoformat()
+    filename = row.get("original_filename") or "Documento"
+    invoice_date = normalize_date(data.get("invoice_date")) or date.today().isoformat()
+    payment_dates = parse_payment_dates(data.get("payment_dates"))
+    payment_date = compute_payment_date(
+        invoice_date,
+        data.get("payment_date") or (payment_dates[0] if payment_dates else None),
+    )
+
+    if doc_type == "purchase_invoice":
+        vat_breakdown = parse_vat_breakdown(data.get("vat_breakdown"))
+        vat_breakdown_json = json.dumps(vat_breakdown) if vat_breakdown else None
+        vat_rate = infer_vat_rate_from_breakdown(vat_breakdown) if vat_breakdown else data.get("vat_rate")
+        if vat_rate is None:
+            vat_rate = 0
+        try:
+            vat_rate = int(vat_rate)
+        except (TypeError, ValueError):
+            vat_rate = 0
+        base_amount, vat_amount, total_amount = normalize_vat_amounts(
+            parse_amount(data.get("base_amount")),
+            vat_rate,
+            parse_amount(data.get("vat_amount")),
+            parse_amount(data.get("total_amount")),
+        )
+        supplier = (data.get("provider_name") or data.get("supplier") or "").strip() or "Proveedor pendiente"
+        expense_category = "non_deductible" if data.get("vat_deductible") is False else "with_invoice"
+        expense_profile = derive_invoice_profile(
+            expense_category,
+            data.get("vat_deductible") is not False,
+            vat_amount,
+        )
+        result = conn.execute(
+            invoices_table.insert().values(
+                user_id=data_owner_id,
+                company_id=row["company_id"],
+                original_filename=filename,
+                stored_filename=row.get("storage_path"),
+                invoice_date=invoice_date,
+                supplier=supplier,
+                base_amount=base_amount or 0.0,
+                vat_deductible=data.get("vat_deductible") is not False,
+                vat_rate=vat_rate,
+                vat_amount=vat_amount,
+                total_amount=total_amount or 0.0,
+                vat_breakdown=vat_breakdown_json,
+                payment_date=payment_date,
+                payment_dates=serialize_payment_dates(payment_dates),
+                ocr_text=row.get("extracted_text"),
+                extraction_source="document_center",
+                confidence_score=row.get("confidence_score"),
+                expense_category=expense_category,
+                created_at=now,
+                **expense_profile,
+            )
+        )
+        supplier and store_known_supplier(conn, data_owner_id, row["company_id"], supplier)
+        return str(result.inserted_primary_key[0]), "invoice"
+
+    if doc_type == "sales_invoice":
+        vat_breakdown = parse_vat_breakdown(data.get("vat_breakdown"))
+        vat_breakdown_json = json.dumps(vat_breakdown) if vat_breakdown else None
+        vat_rate = infer_vat_rate_from_breakdown(vat_breakdown) if vat_breakdown else data.get("vat_rate")
+        if vat_rate is None:
+            vat_rate = 0
+        try:
+            vat_rate = int(vat_rate)
+        except (TypeError, ValueError):
+            vat_rate = 0
+        base_amount, vat_amount, total_amount = normalize_vat_amounts(
+            parse_amount(data.get("base_amount")),
+            vat_rate,
+            parse_amount(data.get("vat_amount")),
+            parse_amount(data.get("total_amount")),
+        )
+        client = (data.get("client_name") or data.get("client") or "").strip() or "Cliente pendiente"
+        result = conn.execute(
+            income_invoices_table.insert().values(
+                user_id=data_owner_id,
+                company_id=row["company_id"],
+                original_filename=filename,
+                stored_filename=row.get("storage_path"),
+                invoice_date=invoice_date,
+                client=client,
+                base_amount=base_amount or 0.0,
+                vat_rate=vat_rate,
+                vat_amount=vat_amount,
+                total_amount=total_amount or 0.0,
+                vat_breakdown=vat_breakdown_json,
+                payment_date=payment_date,
+                payment_dates=serialize_payment_dates(payment_dates),
+                ocr_text=row.get("extracted_text"),
+                extraction_source="document_center",
+                confidence_score=row.get("confidence_score"),
+                created_at=now,
+            )
+        )
+        return str(result.inserted_primary_key[0]), "income_invoice"
+
+    if doc_type in {"receipt", "payroll", "social_security"}:
+        if doc_type == "payroll":
+            expense_type = "nomina"
+            concept = (data.get("concept") or data.get("employee_name") or filename).strip()
+        elif doc_type == "social_security":
+            expense_type = "seguridad_social"
+            concept = (data.get("concept") or "Seguridad Social").strip()
+        else:
+            expense_type = "otro"
+            concept = (data.get("concept") or data.get("provider_name") or filename).strip()
+        amount = parse_amount(data.get("total_amount")) or parse_amount(data.get("amount")) or 0.0
+        withholding_amount = parse_amount(data.get("withholding_amount")) or 0.0
+        vat_deductible = bool(data.get("vat_deductible")) if doc_type == "receipt" else False
+        vat_rate = None
+        vat_amount = None
+        base_amount = parse_amount(data.get("base_amount"))
+        if vat_deductible:
+            try:
+                vat_rate = int(data.get("vat_rate") or 0)
+            except (TypeError, ValueError):
+                vat_rate = 0
+            if base_amount is None:
+                base_amount = round(amount / (1 + vat_rate / 100), 2) if vat_rate >= 0 else amount
+            vat_amount = parse_amount(data.get("vat_amount"))
+            if vat_amount is None:
+                vat_amount = round(amount - base_amount, 2)
+        if base_amount is None:
+            base_amount = amount
+        expense_profile = derive_no_invoice_profile(
+            expense_type,
+            vat_deductible,
+            withholding_amount,
+        )
+        result = conn.execute(
+            no_invoice_table.insert().values(
+                user_id=data_owner_id,
+                company_id=row["company_id"],
+                expense_date=invoice_date,
+                payment_date=payment_date or invoice_date,
+                payment_dates=serialize_payment_dates(payment_dates or [payment_date or invoice_date]),
+                concept=concept,
+                amount=amount,
+                interest_amount=None,
+                vat_deductible=vat_deductible,
+                vat_rate=vat_rate,
+                vat_amount=vat_amount,
+                base_amount=base_amount,
+                withholding_amount=withholding_amount,
+                payroll_employee_name=(data.get("employee_name") or "").strip() or None,
+                payroll_period=(data.get("payroll_period") or row.get("period") or "").strip() or None,
+                payroll_net_amount=parse_amount(data.get("payroll_net_amount")),
+                payroll_total_deductions_amount=parse_amount(data.get("payroll_total_deductions_amount")),
+                payroll_employer_cost_amount=parse_amount(data.get("payroll_employer_cost_amount")),
+                expense_type=expense_type,
+                deductible=True,
+                created_at=now,
+                **expense_profile,
+            )
+        )
+        return str(result.inserted_primary_key[0]), "no_invoice_expense"
+
+    if doc_type == "loan_document":
+        installments = data.get("installments") or []
+        if not installments:
+            raise ValueError("No se han detectado cuotas válidas en el documento del préstamo.")
+        inserted_ids = []
+        concept = (data.get("concept") or "Préstamo bancario").strip()
+        for installment in installments:
+            total_amount = parse_amount(installment.get("total_amount"))
+            interest_amount = parse_amount(installment.get("interest_amount"))
+            principal_amount = parse_amount(installment.get("principal_amount"))
+            if total_amount is None or interest_amount is None:
+                continue
+            if principal_amount is None:
+                principal_amount = round(total_amount - interest_amount, 2)
+            result = conn.execute(
+                loan_installments_table.insert().values(
+                    user_id=data_owner_id,
+                    company_id=row["company_id"],
+                    bank_name=(installment.get("bank_name") or data.get("bank_name") or "").strip() or None,
+                    concept=concept,
+                    payment_date=normalize_date(installment.get("payment_date")),
+                    payment_completed_dates=None,
+                    total_amount=total_amount,
+                    interest_amount=interest_amount,
+                    principal_amount=principal_amount,
+                    created_at=now,
+                )
+            )
+            inserted_ids.append(str(result.inserted_primary_key[0]))
+        if not inserted_ids:
+            raise ValueError("No se han podido registrar cuotas del préstamo.")
+        return ",".join(inserted_ids), "loan_installment"
+
+    if doc_type == "tax_model":
+        return str(row["id"]), "tax_filing"
+
+    return None, "archive"
+
+
+def document_duplicate_match(conn, company_id, detected_type, extracted_data):
+    provider_or_client = (
+        extracted_data.get("provider_name")
+        or extracted_data.get("client_name")
+        or extracted_data.get("supplier")
+        or extracted_data.get("client")
+    )
+    invoice_number = extracted_data.get("invoice_number")
+    tax_id = extracted_data.get("tax_id")
+    invoice_date = extracted_data.get("invoice_date")
+    total_amount = extracted_data.get("total_amount")
+    rows = conn.execute(
+        select(
+            processed_documents_table.c.id,
+            processed_documents_table.c.detected_document_type,
+            processed_documents_table.c.original_extracted_data_json,
+            processed_documents_table.c.corrected_data_json,
+            processed_documents_table.c.validation_status,
+        ).where(processed_documents_table.c.company_id == company_id)
+    ).mappings().all()
+    normalized_name = normalize_entity_name(provider_or_client or "")
+    for row in rows:
+        if row["detected_document_type"] != detected_type:
+            continue
+        comparison = json_loads_dict(row.get("corrected_data_json")) or json_loads_dict(
+            row.get("original_extracted_data_json")
+        )
+        if (
+            normalize_entity_name(
+                comparison.get("provider_name")
+                or comparison.get("client_name")
+                or comparison.get("supplier")
+                or comparison.get("client")
+                or ""
+            )
+            == normalized_name
+            and (comparison.get("tax_id") or None) == (tax_id or None)
+            and (comparison.get("invoice_number") or None) == (invoice_number or None)
+            and (comparison.get("invoice_date") or None) == (invoice_date or None)
+            and round(float(comparison.get("total_amount") or 0), 2)
+            == round(float(total_amount or 0), 2)
+        ):
+            return row["id"]
+    return None
+
+
+def refresh_document_batch_counters(conn, batch_id):
+    rows = conn.execute(
+        select(
+            processed_documents_table.c.processing_status,
+            processed_documents_table.c.validation_status,
+        ).where(processed_documents_table.c.source_batch_id == batch_id)
+    ).mappings().all()
+    totals = {
+        "total_documents": len(rows),
+        "processed_documents": sum(1 for row in rows if row["processing_status"] == "processed"),
+        "ready_documents": sum(1 for row in rows if row["validation_status"] == "ready_to_register"),
+        "review_documents": sum(1 for row in rows if row["validation_status"] == "needs_review"),
+        "duplicate_documents": sum(1 for row in rows if row["validation_status"] == "duplicate"),
+        "failed_documents": sum(1 for row in rows if row["processing_status"] == "failed"),
+    }
+    totals["status"] = "processed" if totals["processed_documents"] + totals["failed_documents"] >= totals["total_documents"] else "processing"
+    totals["updated_at"] = datetime.utcnow().isoformat()
+    conn.execute(
+        document_batches_table.update()
+        .where(document_batches_table.c.id == batch_id)
+        .values(**totals)
+    )
+
+
+def serialize_processed_document(row):
+    original_data = json_loads_dict(row.get("original_extracted_data_json"))
+    corrected_data = json_loads_dict(row.get("corrected_data_json"))
+    effective_data = corrected_data or original_data
+    return {
+        "id": row["id"],
+        "companyId": row["company_id"],
+        "sourceBatchId": row["source_batch_id"],
+        "originalFileName": row["original_filename"],
+        "fileType": row.get("file_type"),
+        "uploadedAt": row.get("uploaded_at"),
+        "processingStatus": row.get("processing_status"),
+        "detectedDocumentType": row.get("detected_document_type"),
+        "confidenceScore": float(row["confidence_score"]) if row.get("confidence_score") is not None else None,
+        "validationStatus": row.get("validation_status"),
+        "issueType": row.get("issue_type"),
+        "issueDescription": row.get("issue_description"),
+        "period": row.get("period"),
+        "linkedAccountingRecordId": row.get("linked_accounting_record_id"),
+        "linkedAccountingRecordType": row.get("linked_accounting_record_type"),
+        "approvedAt": row.get("approved_at"),
+        "rejectedAt": row.get("rejected_at"),
+        "registeredAt": row.get("registered_at"),
+        "duplicateOfDocumentId": row.get("duplicate_of_document_id"),
+        "fileUrl": row.get("file_url"),
+        "extractedText": row.get("extracted_text"),
+        "originalExtractedData": original_data,
+        "correctedData": corrected_data,
+        "effectiveData": effective_data,
+        "auditLog": json_loads_list(row.get("audit_log_json")),
+        "counterparty": effective_data.get("provider_name")
+        or effective_data.get("client_name")
+        or effective_data.get("employee_name")
+        or effective_data.get("bank_name"),
+        "invoiceDate": effective_data.get("invoice_date"),
+        "baseAmount": effective_data.get("base_amount"),
+        "vatAmount": effective_data.get("vat_amount"),
+        "totalAmount": effective_data.get("total_amount") or effective_data.get("amount"),
+    }
+
+
 def replace_payment_date(values, previous_date, next_date):
     previous = normalize_date(previous_date)
     updated = normalize_date(next_date)
@@ -2013,6 +3118,740 @@ def _get_months_for_period(year, quarter=None, start_month=None, end_month=None)
     return list(range(1, 13))
 
 
+def parse_iso_date(value):
+    if not value:
+        return None
+    if isinstance(value, date):
+        return value
+    text_value = str(value).strip()
+    if not text_value:
+        return None
+    if "T" in text_value:
+        text_value = text_value.split("T", 1)[0]
+    try:
+        return date.fromisoformat(text_value)
+    except ValueError:
+        return None
+
+
+def date_in_range(value, start_date, end_date):
+    parsed_value = parse_iso_date(value)
+    if not parsed_value:
+        return False
+    return start_date <= parsed_value <= end_date
+
+
+def period_label_from_dates(start_date, end_date):
+    if not start_date or not end_date:
+        return ""
+    if start_date == end_date:
+        return start_date.strftime("%d/%m/%Y")
+    return f"{start_date.strftime('%d/%m/%Y')} - {end_date.strftime('%d/%m/%Y')}"
+
+
+def normalize_export_decimal(value):
+    amount = round(float(value or 0), 2)
+    return f"{amount:.2f}"
+
+
+def csv_decimal(value):
+    return normalize_export_decimal(value).replace(".", ",")
+
+
+def normalize_export_text(value):
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def format_export_account(account_code, label):
+    code = normalize_export_text(account_code)
+    account_label = normalize_export_text(label)
+    return f"{code} {account_label}".strip()
+
+
+def suggest_expense_account(*, expense_type=None, expense_family=None, expense_subtype=None, pnl_bucket=None):
+    normalized_type = (expense_type or "").strip().lower()
+    normalized_family = (expense_family or "").strip().lower()
+    normalized_subtype = (expense_subtype or "").strip().lower()
+    normalized_bucket = (pnl_bucket or "").strip().lower()
+
+    mapping = {
+        "alquiler_local": ("621", "Arrendamientos y cánones"),
+        "alquiler_cabina": ("621", "Arrendamientos y cánones"),
+        "nomina": ("640", "Sueldos y salarios"),
+        "seguridad_social": ("642", "Seguridad Social a cargo de la empresa"),
+        "amortizacion": ("681", "Amortización del inmovilizado material"),
+        "kilometraje": ("629", "Otros servicios"),
+        "prestamo": ("662", "Intereses de deudas"),
+    }
+    if normalized_type in mapping:
+        return mapping[normalized_type]
+    if normalized_family == "rent":
+        return ("621", "Arrendamientos y cánones")
+    if normalized_family == "personnel":
+        return ("640", "Gastos de personal")
+    if normalized_family == "financing" or normalized_bucket == "financial_expense":
+        return ("662", "Intereses de deudas")
+    if normalized_subtype == "amortization" or normalized_bucket == "amortization_expense":
+        return ("681", "Amortización del inmovilizado material")
+    return ("629", "Otros servicios")
+
+
+def build_export_row_filename(prefix, company_name, extension, start_date, end_date):
+    safe_company = secure_filename(normalize_export_text(company_name) or "empresa")
+    safe_period = f"{start_date.isoformat()}_{end_date.isoformat()}"
+    return f"{prefix}_{safe_company}_{safe_period}.{extension}"
+
+
+def build_accounting_export_range():
+    start_date = parse_iso_date(
+        request.args.get("start_date")
+        or request.args.get("startDate")
+    )
+    end_date = parse_iso_date(
+        request.args.get("end_date")
+        or request.args.get("endDate")
+    )
+    if start_date and end_date:
+        if start_date > end_date:
+            raise ValueError("La fecha inicial no puede ser posterior a la final.")
+        return start_date, end_date, period_label_from_dates(start_date, end_date)
+
+    month = request.args.get("month", type=int)
+    year = request.args.get("year", type=int)
+    period = (request.args.get("period") or "monthly").strip().lower()
+
+    if year and month and 1 <= month <= 12:
+        if period == "quarterly":
+            months = _quarter_months_for_month(month)
+            start_date = date(year, months[0], 1)
+            end_date = date(year, months[-1], calendar.monthrange(year, months[-1])[1])
+            return start_date, end_date, _report_period_label(year, months, _quarter_number_for_month(month))
+        start_date = date(year, month, 1)
+        end_date = date(year, month, calendar.monthrange(year, month)[1])
+        return start_date, end_date, _report_period_label(year, [month])
+
+    parsed_year, quarter, start_month, end_month = _parse_period_params()
+    if parsed_year:
+        months = _get_months_for_period(parsed_year, quarter, start_month, end_month)
+        if months:
+            start_date = date(parsed_year, months[0], 1)
+            end_date = date(parsed_year, months[-1], calendar.monthrange(parsed_year, months[-1])[1])
+            return start_date, end_date, _report_period_label(parsed_year, months, quarter)
+
+    today = date.today()
+    start_date = date(today.year, today.month, 1)
+    end_date = date(today.year, today.month, calendar.monthrange(today.year, today.month)[1])
+    return start_date, end_date, _report_period_label(today.year, [today.month])
+
+
+def filter_manual_billing_rows_by_date(rows, start_date, end_date):
+    filtered_rows = []
+    for row in rows:
+        invoice_date = parse_iso_date(row.get("invoice_date"))
+        if not invoice_date:
+            try:
+                invoice_date = date(int(row.get("anio")), int(row.get("mes")), 1)
+            except (TypeError, ValueError):
+                invoice_date = None
+        if invoice_date and start_date <= invoice_date <= end_date:
+            filtered_rows.append(row)
+    return filtered_rows
+
+
+def filter_processed_documents_by_date(rows, start_date, end_date):
+    filtered_rows = []
+    for row in rows:
+        payload = effective_document_data(row)
+        reference_date = (
+            parse_iso_date(payload.get("invoice_date"))
+            or parse_iso_date(payload.get("expense_date"))
+            or parse_iso_date(payload.get("payment_date"))
+            or parse_iso_date(row.get("registered_at"))
+            or parse_iso_date(row.get("created_at"))
+        )
+        if reference_date and start_date <= reference_date <= end_date:
+            filtered_rows.append(row)
+    return filtered_rows
+
+
+def load_accounting_export_source_data(conn, data_owner_id, company_id, start_date, end_date):
+    start_iso = start_date.isoformat()
+    end_iso = end_date.isoformat()
+    purchase_rows = conn.execute(
+        select(invoices_table)
+        .where(invoices_table.c.user_id == data_owner_id)
+        .where(invoices_table.c.company_id == company_id)
+        .where(invoices_table.c.invoice_date.between(start_iso, end_iso))
+        .order_by(invoices_table.c.invoice_date.asc(), invoices_table.c.id.asc())
+    ).mappings().all()
+    income_rows = conn.execute(
+        select(income_invoices_table)
+        .where(income_invoices_table.c.user_id == data_owner_id)
+        .where(income_invoices_table.c.company_id == company_id)
+        .where(income_invoices_table.c.invoice_date.between(start_iso, end_iso))
+        .order_by(income_invoices_table.c.invoice_date.asc(), income_invoices_table.c.id.asc())
+    ).mappings().all()
+    no_invoice_rows = conn.execute(
+        select(no_invoice_table)
+        .where(no_invoice_table.c.user_id == data_owner_id)
+        .where(no_invoice_table.c.company_id == company_id)
+        .where(no_invoice_table.c.expense_date.between(start_iso, end_iso))
+        .order_by(no_invoice_table.c.expense_date.asc(), no_invoice_table.c.id.asc())
+    ).mappings().all()
+    loan_rows = conn.execute(
+        select(loan_installments_table)
+        .where(loan_installments_table.c.user_id == data_owner_id)
+        .where(loan_installments_table.c.company_id == company_id)
+        .where(loan_installments_table.c.payment_date.between(start_iso, end_iso))
+        .order_by(loan_installments_table.c.payment_date.asc(), loan_installments_table.c.id.asc())
+    ).mappings().all()
+
+    manual_sales_rows = conn.execute(
+        select(facturacion_table)
+        .where(facturacion_table.c.user_id == data_owner_id)
+        .where(facturacion_table.c.company_id == company_id)
+        .where(facturacion_table.c.anio.between(start_date.year, end_date.year))
+        .order_by(facturacion_table.c.anio.asc(), facturacion_table.c.mes.asc(), facturacion_table.c.id.asc())
+    ).mappings().all()
+    document_rows = conn.execute(
+        select(processed_documents_table)
+        .where(processed_documents_table.c.company_id == company_id)
+        .where(processed_documents_table.c.validation_status == "registered")
+        .order_by(processed_documents_table.c.created_at.asc(), processed_documents_table.c.id.asc())
+    ).mappings().all()
+
+    return {
+        "purchase_invoices": purchase_rows,
+        "income_invoices": income_rows,
+        "no_invoice_expenses": no_invoice_rows,
+        "loan_installments": loan_rows,
+        "manual_sales": filter_manual_billing_rows_by_date(manual_sales_rows, start_date, end_date),
+        "documents": filter_processed_documents_by_date(document_rows, start_date, end_date),
+    }
+
+
+def build_purchase_export_rows(source_data):
+    rows = []
+    for row in source_data.get("purchase_invoices", []):
+        account_code, account_label = suggest_expense_account(
+            expense_family=row.get("expense_family"),
+            expense_subtype=row.get("expense_subtype"),
+            pnl_bucket=row.get("pnl_bucket"),
+        )
+        rows.append(
+            {
+                "fecha": row.get("invoice_date"),
+                "documento_tipo": "Factura recibida",
+                "origen_tipo": "purchase_invoice",
+                "origen_id": row.get("id"),
+                "contraparte": row.get("supplier"),
+                "concepto": row.get("original_filename"),
+                "base": float(row.get("base_amount") or 0),
+                "iva": float(row.get("vat_amount") or 0),
+                "retencion": 0.0,
+                "total": float(row.get("total_amount") or 0),
+                "iva_deducible": "Sí" if row.get("vat_deductible") else "No",
+                "cuenta_sugerida": format_export_account(account_code, account_label),
+                "familia": row.get("expense_family") or "",
+                "subtipo": row.get("expense_subtype") or "",
+                "bucket_pyg": row.get("pnl_bucket") or "",
+                "modelos_fiscales": ", ".join(parse_tax_model_targets(row.get("tax_model_targets"))),
+            }
+        )
+    for row in source_data.get("no_invoice_expenses", []):
+        account_code, account_label = suggest_expense_account(
+            expense_type=row.get("expense_type"),
+            expense_family=row.get("expense_family"),
+            expense_subtype=row.get("expense_subtype"),
+            pnl_bucket=row.get("pnl_bucket"),
+        )
+        rows.append(
+            {
+                "fecha": row.get("expense_date"),
+                "documento_tipo": (row.get("expense_type") or "otro").replace("_", " ").title(),
+                "origen_tipo": "no_invoice_expense",
+                "origen_id": row.get("id"),
+                "contraparte": row.get("payroll_employee_name") or row.get("concept"),
+                "concepto": row.get("concept"),
+                "base": float(row.get("base_amount") or row.get("amount") or 0),
+                "iva": float(row.get("vat_amount") or 0),
+                "retencion": float(row.get("withholding_amount") or 0),
+                "total": float(row.get("amount") or 0),
+                "iva_deducible": "Sí" if row.get("vat_deductible") else "No",
+                "cuenta_sugerida": format_export_account(account_code, account_label),
+                "familia": row.get("expense_family") or "",
+                "subtipo": row.get("expense_subtype") or "",
+                "bucket_pyg": row.get("pnl_bucket") or "",
+                "modelos_fiscales": ", ".join(parse_tax_model_targets(row.get("tax_model_targets"))),
+            }
+        )
+    rows.sort(key=lambda item: (item.get("fecha") or "", str(item.get("origen_id") or "")))
+    return rows
+
+
+def build_sales_export_rows(source_data):
+    rows = []
+    for row in source_data.get("income_invoices", []):
+        rows.append(
+            {
+                "fecha": row.get("invoice_date"),
+                "documento_tipo": "Factura emitida",
+                "origen_tipo": "income_invoice",
+                "origen_id": row.get("id"),
+                "cliente": row.get("client"),
+                "concepto": row.get("original_filename"),
+                "base": float(row.get("base_amount") or 0),
+                "iva": float(row.get("vat_amount") or 0),
+                "total": float(row.get("total_amount") or 0),
+                "tipo_iva": row.get("vat_rate") if row.get("vat_rate") is not None else "",
+                "vencimiento": row.get("payment_date") or "",
+                "estado_pago": "Planificado" if row.get("payment_date") else "",
+            }
+        )
+    for row in source_data.get("manual_sales", []):
+        invoice_date = row.get("invoice_date") or f"{int(row.get('anio')):04d}-{int(row.get('mes')):02d}-01"
+        base_amount = float(row.get("base_facturada") or 0)
+        vat_amount = float(row.get("iva_repercutido") or 0)
+        rows.append(
+            {
+                "fecha": invoice_date,
+                "documento_tipo": "Registro manual",
+                "origen_tipo": "manual_billing",
+                "origen_id": row.get("id"),
+                "cliente": "",
+                "concepto": row.get("concept") or "Facturación manual",
+                "base": base_amount,
+                "iva": vat_amount,
+                "total": float(row.get("total_amount") or (base_amount + vat_amount)),
+                "tipo_iva": row.get("tipo_iva") if row.get("tipo_iva") is not None else "",
+                "vencimiento": "",
+                "estado_pago": "",
+            }
+        )
+    rows.sort(key=lambda item: (item.get("fecha") or "", str(item.get("origen_id") or "")))
+    return rows
+
+
+def append_journal_lines(container, entry_key, entry_date, concept, source_type, source_id, counterparty, lines):
+    for index, line in enumerate(lines, start=1):
+        debit = round(float(line.get("debe") or 0), 2)
+        credit = round(float(line.get("haber") or 0), 2)
+        if abs(debit) < 0.005 and abs(credit) < 0.005:
+            continue
+        container.append(
+            {
+                "asiento_id": entry_key,
+                "linea": index,
+                "fecha": entry_date,
+                "diario": line.get("diario") or "GENERAL",
+                "concepto": concept,
+                "cuenta": line.get("cuenta") or "",
+                "descripcion_cuenta": line.get("descripcion_cuenta") or "",
+                "debe": debit,
+                "haber": credit,
+                "tercero": counterparty or "",
+                "documento_origen": f"{source_type}:{source_id}",
+                "origen_tipo": source_type,
+                "origen_id": source_id,
+            }
+        )
+
+
+def build_journal_export_rows(source_data):
+    rows = []
+    for row in source_data.get("purchase_invoices", []):
+        entry_key = f"PUR-{row.get('id')}"
+        base_amount = round(float(row.get("base_amount") or 0), 2)
+        vat_amount = round(float(row.get("vat_amount") or 0), 2)
+        total_amount = round(float(row.get("total_amount") or 0), 2)
+        expense_account, expense_label = suggest_expense_account(
+            expense_family=row.get("expense_family"),
+            expense_subtype=row.get("expense_subtype"),
+            pnl_bucket=row.get("pnl_bucket"),
+        )
+        lines = []
+        if row.get("vat_deductible") and vat_amount > 0:
+            lines.append({"cuenta": expense_account, "descripcion_cuenta": expense_label, "debe": base_amount})
+            lines.append({"cuenta": "472", "descripcion_cuenta": "Hacienda Pública, IVA soportado", "debe": vat_amount})
+        else:
+            lines.append({"cuenta": expense_account, "descripcion_cuenta": expense_label, "debe": total_amount})
+        lines.append({"cuenta": "410", "descripcion_cuenta": "Acreedores por prestaciones de servicios", "haber": total_amount})
+        append_journal_lines(
+            rows,
+            entry_key,
+            row.get("invoice_date"),
+            f"Factura proveedor {row.get('supplier') or row.get('original_filename')}",
+            "purchase_invoice",
+            row.get("id"),
+            row.get("supplier"),
+            lines,
+        )
+
+    for row in source_data.get("income_invoices", []):
+        entry_key = f"SAL-{row.get('id')}"
+        base_amount = round(float(row.get("base_amount") or 0), 2)
+        vat_amount = round(float(row.get("vat_amount") or 0), 2)
+        total_amount = round(float(row.get("total_amount") or 0), 2)
+        append_journal_lines(
+            rows,
+            entry_key,
+            row.get("invoice_date"),
+            f"Factura emitida {row.get('client') or row.get('original_filename')}",
+            "income_invoice",
+            row.get("id"),
+            row.get("client"),
+            [
+                {"cuenta": "430", "descripcion_cuenta": "Clientes", "debe": total_amount},
+                {"cuenta": "700", "descripcion_cuenta": "Ventas de mercaderías / servicios", "haber": base_amount},
+                {"cuenta": "477", "descripcion_cuenta": "Hacienda Pública, IVA repercutido", "haber": vat_amount},
+            ],
+        )
+
+    for row in source_data.get("manual_sales", []):
+        entry_key = f"MAN-{row.get('id')}"
+        invoice_date = row.get("invoice_date") or f"{int(row.get('anio')):04d}-{int(row.get('mes')):02d}-01"
+        base_amount = round(float(row.get("base_facturada") or 0), 2)
+        vat_amount = round(float(row.get("iva_repercutido") or 0), 2)
+        total_amount = round(float(row.get("total_amount") or (base_amount + vat_amount)), 2)
+        append_journal_lines(
+            rows,
+            entry_key,
+            invoice_date,
+            row.get("concept") or "Facturación manual",
+            "manual_billing",
+            row.get("id"),
+            "",
+            [
+                {"cuenta": "430", "descripcion_cuenta": "Clientes", "debe": total_amount},
+                {"cuenta": "700", "descripcion_cuenta": "Ventas de mercaderías / servicios", "haber": base_amount},
+                {"cuenta": "477", "descripcion_cuenta": "Hacienda Pública, IVA repercutido", "haber": vat_amount},
+            ],
+        )
+
+    for row in source_data.get("no_invoice_expenses", []):
+        entry_key = f"EXP-{row.get('id')}"
+        expense_type = (row.get("expense_type") or "").strip().lower()
+        amount = round(float(row.get("amount") or 0), 2)
+        base_amount = round(float(row.get("base_amount") or amount), 2)
+        vat_amount = round(float(row.get("vat_amount") or 0), 2)
+        withholding_amount = round(float(row.get("withholding_amount") or 0), 2)
+        expense_account, expense_label = suggest_expense_account(
+            expense_type=expense_type,
+            expense_family=row.get("expense_family"),
+            expense_subtype=row.get("expense_subtype"),
+            pnl_bucket=row.get("pnl_bucket"),
+        )
+        concept = row.get("concept") or expense_type or "Gasto"
+        counterparty = row.get("payroll_employee_name") or concept
+        lines = []
+        if expense_type == "nomina":
+            gross_amount = round(float(row.get("base_amount") or row.get("amount") or 0), 2)
+            net_amount = round(float(row.get("payroll_net_amount") or 0), 2)
+            deductions_amount = round(float(row.get("payroll_total_deductions_amount") or 0), 2)
+            employer_cost_amount = round(float(row.get("payroll_employer_cost_amount") or 0), 2)
+            employer_social_security = round(max(employer_cost_amount - gross_amount, 0), 2)
+            lines.append({"cuenta": "640", "descripcion_cuenta": "Sueldos y salarios", "debe": gross_amount})
+            if employer_social_security > 0:
+                lines.append({"cuenta": "642", "descripcion_cuenta": "Seguridad Social a cargo de la empresa", "debe": employer_social_security})
+            if net_amount > 0:
+                lines.append({"cuenta": "465", "descripcion_cuenta": "Remuneraciones pendientes de pago", "haber": net_amount})
+            if deductions_amount > 0:
+                lines.append({"cuenta": "476", "descripcion_cuenta": "Organismos de la Seguridad Social acreedores", "haber": deductions_amount})
+            journal_balance = round(
+                sum(float(line.get("debe") or 0) for line in lines)
+                - sum(float(line.get("haber") or 0) for line in lines),
+                2,
+            )
+            if abs(journal_balance) >= 0.01:
+                lines.append(
+                    {
+                        "cuenta": "410",
+                        "descripcion_cuenta": "Acreedores varios",
+                        "haber": journal_balance if journal_balance > 0 else 0,
+                        "debe": abs(journal_balance) if journal_balance < 0 else 0,
+                    }
+                )
+        elif expense_type == "seguridad_social":
+            lines = [
+                {"cuenta": "642", "descripcion_cuenta": "Seguridad Social a cargo de la empresa", "debe": amount},
+                {"cuenta": "476", "descripcion_cuenta": "Organismos de la Seguridad Social acreedores", "haber": amount},
+            ]
+        elif expense_type == "prestamo":
+            interest_amount = round(float(row.get("interest_amount") or 0), 2)
+            principal_amount = round(max(amount - interest_amount, 0), 2)
+            lines = [
+                {"cuenta": "520", "descripcion_cuenta": "Deudas a corto plazo con entidades de crédito", "debe": principal_amount},
+                {"cuenta": "662", "descripcion_cuenta": "Intereses de deudas", "debe": interest_amount},
+                {"cuenta": "572", "descripcion_cuenta": "Bancos e instituciones de crédito c/c vista", "haber": amount},
+            ]
+        else:
+            if row.get("vat_deductible") and vat_amount > 0:
+                lines.append({"cuenta": expense_account, "descripcion_cuenta": expense_label, "debe": base_amount})
+                lines.append({"cuenta": "472", "descripcion_cuenta": "Hacienda Pública, IVA soportado", "debe": vat_amount})
+            else:
+                lines.append({"cuenta": expense_account, "descripcion_cuenta": expense_label, "debe": amount})
+            if withholding_amount > 0:
+                lines.append({"cuenta": "4751", "descripcion_cuenta": "Hacienda Pública acreedora por retenciones practicadas", "haber": withholding_amount})
+            creditor_amount = round(amount - withholding_amount, 2)
+            if creditor_amount > 0:
+                lines.append({"cuenta": "410", "descripcion_cuenta": "Acreedores por prestaciones de servicios", "haber": creditor_amount})
+        append_journal_lines(rows, entry_key, row.get("expense_date"), concept, "no_invoice_expense", row.get("id"), counterparty, lines)
+
+    for row in source_data.get("loan_installments", []):
+        entry_key = f"LOA-{row.get('id')}"
+        total_amount = round(float(row.get("total_amount") or 0), 2)
+        interest_amount = round(float(row.get("interest_amount") or 0), 2)
+        principal_amount = round(float(row.get("principal_amount") or max(total_amount - interest_amount, 0)), 2)
+        append_journal_lines(
+            rows,
+            entry_key,
+            row.get("payment_date"),
+            row.get("concept") or "Cuota de préstamo",
+            "loan_installment",
+            row.get("id"),
+            row.get("bank_name") or "",
+            [
+                {"cuenta": "520", "descripcion_cuenta": "Deudas a corto plazo con entidades de crédito", "debe": principal_amount},
+                {"cuenta": "662", "descripcion_cuenta": "Intereses de deudas", "debe": interest_amount},
+                {"cuenta": "572", "descripcion_cuenta": "Bancos e instituciones de crédito c/c vista", "haber": total_amount},
+            ],
+        )
+
+    rows.sort(key=lambda item: (item.get("fecha") or "", item.get("asiento_id") or "", int(item.get("linea") or 0)))
+    return rows
+
+
+def build_document_manifest_rows(source_data):
+    rows = []
+    for row in source_data.get("documents", []):
+        payload = effective_document_data(row)
+        rows.append(
+            {
+                "document_id": row.get("id"),
+                "archivo": row.get("original_filename"),
+                "tipo_detectado": row.get("detected_document_type"),
+                "estado": row.get("validation_status"),
+                "referencia_contable_tipo": row.get("linked_accounting_record_type") or "",
+                "referencia_contable_id": row.get("linked_accounting_record_id") or "",
+                "fecha_referencia": payload.get("invoice_date")
+                or payload.get("expense_date")
+                or payload.get("payment_date")
+                or (normalize_export_text(row.get("registered_at")).split("T", 1)[0]),
+                "contraparte": payload.get("provider_name")
+                or payload.get("counterparty_name")
+                or payload.get("employee_name")
+                or payload.get("concept")
+                or "",
+                "importe_total": float(
+                    payload.get("total_amount")
+                    or payload.get("amount")
+                    or payload.get("payable_amount")
+                    or 0
+                ),
+                "periodo": row.get("period") or "",
+            }
+        )
+    return rows
+
+
+def build_export_matrix(rows, ordered_columns):
+    matrix = [ordered_columns]
+    for row in rows:
+        matrix.append([row.get(column, "") for column in ordered_columns])
+    return matrix
+
+
+def write_csv_export(rows, ordered_columns):
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter=";")
+    writer.writerow(ordered_columns)
+    for row in rows:
+        serialized = []
+        for column in ordered_columns:
+            value = row.get(column, "")
+            if isinstance(value, bool):
+                serialized.append("Sí" if value else "No")
+            elif isinstance(value, (int, float)):
+                serialized.append(csv_decimal(value))
+            else:
+                serialized.append(normalize_export_text(value))
+        writer.writerow(serialized)
+    return output.getvalue().encode("utf-8-sig")
+
+
+def write_xlsx_export(rows, ordered_columns, sheet_name):
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = (sheet_name or "Export")[:31]
+    worksheet.append(ordered_columns)
+    for row in rows:
+        worksheet.append([row.get(column, "") for column in ordered_columns])
+    for column_cells in worksheet.columns:
+        max_length = 0
+        column_letter = column_cells[0].column_letter
+        for cell in column_cells:
+            cell_value = "" if cell.value is None else str(cell.value)
+            max_length = max(max_length, len(cell_value))
+        worksheet.column_dimensions[column_letter].width = min(max_length + 2, 36)
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
+def load_document_binary(row):
+    storage_path = row.get("storage_path")
+    file_url = row.get("file_url")
+    if storage_path and os.path.exists(storage_path):
+        with open(storage_path, "rb") as file_handle:
+            return file_handle.read()
+    if file_url and os.path.exists(file_url):
+        with open(file_url, "rb") as file_handle:
+            return file_handle.read()
+    if file_url and file_url.startswith(("http://", "https://")):
+        try:
+            response = httpx.get(file_url, timeout=30.0)
+            response.raise_for_status()
+            return response.content
+        except Exception:
+            app.logger.warning("No se pudo descargar el documento %s desde %s", row.get("id"), file_url)
+    return None
+
+
+def build_accounting_export_package(source_data, metadata_payload):
+    purchase_rows = build_purchase_export_rows(source_data)
+    sales_rows = build_sales_export_rows(source_data)
+    journal_rows = build_journal_export_rows(source_data)
+    manifest_rows = build_document_manifest_rows(source_data)
+    package_stream = io.BytesIO()
+    with zipfile.ZipFile(package_stream, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "compras.csv",
+            write_csv_export(
+                purchase_rows,
+                [
+                    "fecha",
+                    "documento_tipo",
+                    "origen_tipo",
+                    "origen_id",
+                    "contraparte",
+                    "concepto",
+                    "base",
+                    "iva",
+                    "retencion",
+                    "total",
+                    "iva_deducible",
+                    "cuenta_sugerida",
+                    "familia",
+                    "subtipo",
+                    "bucket_pyg",
+                    "modelos_fiscales",
+                ],
+            ),
+        )
+        archive.writestr(
+            "ventas.csv",
+            write_csv_export(
+                sales_rows,
+                [
+                    "fecha",
+                    "documento_tipo",
+                    "origen_tipo",
+                    "origen_id",
+                    "cliente",
+                    "concepto",
+                    "base",
+                    "iva",
+                    "total",
+                    "tipo_iva",
+                    "vencimiento",
+                    "estado_pago",
+                ],
+            ),
+        )
+        archive.writestr(
+            "asientos.csv",
+            write_csv_export(
+                journal_rows,
+                [
+                    "asiento_id",
+                    "linea",
+                    "fecha",
+                    "diario",
+                    "concepto",
+                    "cuenta",
+                    "descripcion_cuenta",
+                    "debe",
+                    "haber",
+                    "tercero",
+                    "documento_origen",
+                    "origen_tipo",
+                    "origen_id",
+                ],
+            ),
+        )
+        archive.writestr(
+            "manifest_documental.csv",
+            write_csv_export(
+                manifest_rows,
+                [
+                    "document_id",
+                    "archivo",
+                    "tipo_detectado",
+                    "estado",
+                    "referencia_contable_tipo",
+                    "referencia_contable_id",
+                    "fecha_referencia",
+                    "contraparte",
+                    "importe_total",
+                    "periodo",
+                ],
+            ),
+        )
+        archive.writestr(
+            "manifest.json",
+            json.dumps(
+                {
+                    **metadata_payload,
+                    "purchase_rows": len(purchase_rows),
+                    "sales_rows": len(sales_rows),
+                    "journal_rows": len(journal_rows),
+                    "document_rows": len(manifest_rows),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+        for row in source_data.get("documents", []):
+            file_bytes = load_document_binary(row)
+            if not file_bytes:
+                continue
+            safe_name = secure_filename(row.get("original_filename") or f"documento_{row.get('id')}")
+            archive.writestr(f"documentos/{int(row.get('id')):05d}_{safe_name}", file_bytes)
+    package_stream.seek(0)
+    return package_stream
+
+
+def export_response_from_rows(rows, ordered_columns, *, export_format, sheet_name, download_name):
+    if export_format == "xlsx":
+        payload = write_xlsx_export(rows, ordered_columns, sheet_name)
+        return send_file(
+            io.BytesIO(payload),
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name=download_name,
+        )
+    payload = write_csv_export(rows, ordered_columns)
+    return send_file(
+        io.BytesIO(payload),
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name=download_name,
+    )
+
+
 def _quarter_number_for_month(month):
     return ((int(month) - 1) // 3) + 1
 
@@ -2324,10 +4163,32 @@ def _build_fiscal_calendar_items(conn, user_id, company_id, target_month, target
 
     items = []
     due_date = date(target_year, target_month, 20).isoformat()
+    filings_lookup = _fetch_registered_tax_filings(conn, company_id)
 
-    def add_item(model, label, amount):
+    def add_item(model, label, amount, period_key):
         amount = round(float(amount or 0), 2)
-        if amount <= 0:
+        filing = filings_lookup.get((str(model), normalize_tax_period_key(period_key)))
+        if filing:
+            filing_status = filing.get("filing_status") or "a_ingresar"
+            if filing_status == "sin_actividad":
+                amount = 0.0
+                calendar_impact = "informational"
+            elif filing_status == "a_compensar":
+                amount = round(float(filing.get("offset_amount") or filing.get("amount") or 0), 2)
+                calendar_impact = "credit"
+            elif filing_status == "a_devolver":
+                amount = round(float(filing.get("refund_amount") or filing.get("amount") or 0), 2)
+                calendar_impact = "refund"
+            else:
+                amount = round(
+                    float(filing.get("payable_amount") or filing.get("amount") or amount or 0),
+                    2,
+                )
+                calendar_impact = "payment"
+        else:
+            filing_status = "estimated"
+            calendar_impact = "payment"
+        if amount <= 0 and not filing:
             return
         items.append(
             {
@@ -2344,6 +4205,12 @@ def _build_fiscal_calendar_items(conn, user_id, company_id, target_month, target
                 "amount": amount,
                 "type": "tax_obligation",
                 "tax_model": model,
+                "tax_period": period_key,
+                "filing_status": filing_status,
+                "calendar_impact": calendar_impact,
+                "filing_document_id": filing.get("document_id") if filing else None,
+                "filing_registered_at": filing.get("registered_at") if filing else None,
+                "is_filed": bool(filing),
             }
         )
 
@@ -2352,30 +4219,35 @@ def _build_fiscal_calendar_items(conn, user_id, company_id, target_month, target
         monthly_metrics = _build_tax_model_metrics(user_id, company_id, monthly_periods, conn)
         monthly_label = _format_period_label(monthly_periods)
         if company.get("files_model_303") is not False and company.get("vat_regime") != "exempt":
-            add_item("303", f"Modelo 303 · {monthly_label}", monthly_metrics["vat_result"])
+            add_item("303", f"Modelo 303 · {monthly_label}", monthly_metrics["vat_result"], monthly_label)
         if company.get("files_model_111"):
-            add_item("111", f"Modelo 111 · {monthly_label}", monthly_metrics["withholding_111"])
+            add_item("111", f"Modelo 111 · {monthly_label}", monthly_metrics["withholding_111"], monthly_label)
         if company.get("files_model_115"):
-            add_item("115", f"Modelo 115 · {monthly_label}", monthly_metrics["withholding_115"])
+            add_item("115", f"Modelo 115 · {monthly_label}", monthly_metrics["withholding_115"], monthly_label)
 
     quarter_periods, quarter_label = _quarter_periods_due_in_month(target_month, target_year)
     if quarter_periods and quarter_label:
         quarter_metrics = _build_tax_model_metrics(user_id, company_id, quarter_periods, conn)
         if company.get("tax_periodicity") != "monthly":
             if company.get("files_model_303") is not False and company.get("vat_regime") != "exempt":
-                add_item("303", f"Modelo 303 · {quarter_label}", quarter_metrics["vat_result"])
+                add_item("303", f"Modelo 303 · {quarter_label}", quarter_metrics["vat_result"], quarter_label)
             if company.get("files_model_111"):
-                add_item("111", f"Modelo 111 · {quarter_label}", quarter_metrics["withholding_111"])
+                add_item("111", f"Modelo 111 · {quarter_label}", quarter_metrics["withholding_111"], quarter_label)
             if company.get("files_model_115"):
-                add_item("115", f"Modelo 115 · {quarter_label}", quarter_metrics["withholding_115"])
+                add_item("115", f"Modelo 115 · {quarter_label}", quarter_metrics["withholding_115"], quarter_label)
         if company.get("company_type") == "individual" and company.get("files_model_130"):
-            add_item("130", f"Modelo 130 · {quarter_label}", quarter_metrics["model_130_estimate"])
+            add_item("130", f"Modelo 130 · {quarter_label}", quarter_metrics["model_130_estimate"], quarter_label)
 
     if company.get("company_type") == "company" and company.get("files_model_202"):
         model_202_periods, model_202_label = _model_202_periods_for_due_month(target_month, target_year)
         if model_202_periods and model_202_label:
             model_202_metrics = _build_tax_model_metrics(user_id, company_id, model_202_periods, conn)
-            add_item("202", f"Modelo 202 · {model_202_label}", model_202_metrics["model_202_estimate"])
+            add_item(
+                "202",
+                f"Modelo 202 · {model_202_label}",
+                model_202_metrics["model_202_estimate"],
+                f"{model_202_label} {target_year}",
+            )
 
     return items
 
@@ -3059,6 +4931,402 @@ def open_stripe_portal():
         app.logger.exception("Stripe billing portal creation failed")
         return redirect(url_for("app_home", billing_error="portal_failed"))
     return redirect(portal_session.get("url"), code=303)
+
+
+@app.route("/api/document-center/batches")
+def list_document_batches():
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(document_batches_table)
+            .where(document_batches_table.c.company_id == company_id)
+            .order_by(document_batches_table.c.created_at.desc(), document_batches_table.c.id.desc())
+            .limit(25)
+        ).mappings().all()
+
+    return jsonify({"ok": True, "batches": [serialize_document_batch(row) for row in rows]})
+
+
+@app.route("/api/document-center/documents")
+def list_document_center_documents():
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    batch_id = request.args.get("batch_id", type=int)
+    validation_status = (request.args.get("validation_status") or "").strip().lower()
+    query = (
+        select(processed_documents_table)
+        .where(processed_documents_table.c.company_id == company_id)
+        .order_by(processed_documents_table.c.created_at.desc(), processed_documents_table.c.id.desc())
+    )
+    if batch_id:
+        query = query.where(processed_documents_table.c.source_batch_id == batch_id)
+    if validation_status:
+        query = query.where(processed_documents_table.c.validation_status == validation_status)
+
+    with engine.connect() as conn:
+        rows = conn.execute(query).mappings().all()
+
+    return jsonify({"ok": True, "documents": [serialize_processed_document(row) for row in rows]})
+
+
+@app.route("/api/document-center/documents/<int:document_id>")
+def get_document_center_document(document_id):
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    with engine.connect() as conn:
+        row = get_processed_document_for_company(conn, document_id, company_id)
+    if not row:
+        return jsonify({"ok": False, "errors": ["Documento no encontrado."]}), 404
+
+    return jsonify({"ok": True, "document": serialize_processed_document(row)})
+
+
+@app.route("/api/document-center/upload", methods=["POST"])
+def upload_document_center_batch():
+    data_owner_id = get_data_owner_id()
+    current_user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify({"ok": False, "errors": ["No se recibieron archivos."]}), 400
+
+    period = normalize_period_label(request.form.get("period"))
+    created_at = datetime.utcnow().isoformat()
+    inserted_documents = []
+
+    with engine.begin() as conn:
+        company_names = get_company_names(conn, company_id)
+        known_suppliers = fetch_known_suppliers(conn, data_owner_id, company_id)
+        batch_result = conn.execute(
+            document_batches_table.insert().values(
+                company_id=company_id,
+                uploaded_by_user_id=current_user_id,
+                period=period,
+                total_documents=0,
+                processed_documents=0,
+                ready_documents=0,
+                review_documents=0,
+                duplicate_documents=0,
+                failed_documents=0,
+                status="processing",
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+        batch_id = batch_result.inserted_primary_key[0]
+
+        for item in iter_uploaded_documents(files):
+            payload = build_processed_document_payload(
+                file_bytes=item["bytes"],
+                filename=item["filename"],
+                content_type=item.get("content_type") or document_content_type_from_name(item["filename"]),
+                company_id=company_id,
+                data_owner_id=data_owner_id,
+                current_user_id=current_user_id,
+                batch_id=batch_id,
+                period=period,
+                company_names=company_names,
+                known_suppliers=known_suppliers,
+            )
+            duplicate_row = conn.execute(
+                select(processed_documents_table.c.id)
+                .where(processed_documents_table.c.company_id == company_id)
+                .where(processed_documents_table.c.content_hash == payload["content_hash"])
+                .limit(1)
+            ).first()
+            duplicate_id = duplicate_row[0] if duplicate_row else document_duplicate_match(
+                conn,
+                company_id,
+                payload["detected_document_type"],
+                json_loads_dict(payload["original_extracted_data_json"]),
+            )
+            if duplicate_id:
+                payload["validation_status"] = "duplicate"
+                payload["issue_type"] = "duplicate"
+                payload["issue_description"] = "Documento duplicado detectado."
+                payload["duplicate_of_document_id"] = duplicate_id
+                payload["audit_log_json"] = append_document_audit(
+                    payload["audit_log_json"],
+                    "duplicate_detected",
+                    current_user_id,
+                    {"duplicate_of_document_id": duplicate_id},
+                )
+            result = conn.execute(processed_documents_table.insert().values(**payload))
+            inserted_documents.append(result.inserted_primary_key[0])
+
+        refresh_document_batch_counters(conn, batch_id)
+        batch_row = conn.execute(
+            select(document_batches_table).where(document_batches_table.c.id == batch_id)
+        ).mappings().first()
+        document_rows = conn.execute(
+            select(processed_documents_table)
+            .where(processed_documents_table.c.source_batch_id == batch_id)
+            .order_by(processed_documents_table.c.id.desc())
+        ).mappings().all()
+
+    return jsonify(
+        {
+            "ok": True,
+            "batch": serialize_document_batch(batch_row),
+            "documents": [serialize_processed_document(row) for row in document_rows],
+            "count": len(inserted_documents),
+        }
+    )
+
+
+@app.route("/api/document-center/documents/<int:document_id>", methods=["PUT"])
+def update_document_center_document(document_id):
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    current_user_id = get_current_user_id()
+    payload = request.get_json(silent=True) or {}
+    corrected_data = payload.get("corrected_data") or payload.get("correctedData") or {}
+    if not isinstance(corrected_data, dict):
+        return jsonify({"ok": False, "errors": ["Formato de corrección inválido."]}), 400
+    detected_type = (payload.get("detected_document_type") or payload.get("detectedDocumentType") or "").strip()
+
+    with engine.begin() as conn:
+        row = get_processed_document_for_company(conn, document_id, company_id)
+        if not row:
+            return jsonify({"ok": False, "errors": ["Documento no encontrado."]}), 404
+        effective_type = detected_type or row.get("detected_document_type") or "unknown"
+        confidence_score, validation_status, issue_type, issue_description = extract_confidence_and_fields(
+            effective_type,
+            corrected_data,
+            text_value=row.get("extracted_text") or "",
+        )
+        if row.get("duplicate_of_document_id"):
+            validation_status = "duplicate"
+            issue_type = "duplicate"
+            issue_description = "Documento duplicado detectado."
+        update_processed_document_record(
+            conn,
+            document_id,
+            detected_document_type=effective_type,
+            corrected_data_json=json_dumps(corrected_data),
+            confidence_score=confidence_score,
+            validation_status=validation_status,
+            issue_type=issue_type,
+            issue_description=issue_description,
+            audit_log_json=append_document_audit(
+                row.get("audit_log_json"),
+                "edited",
+                current_user_id,
+                {"detected_type": effective_type},
+            ),
+        )
+        refresh_document_batch_counters(conn, row["source_batch_id"])
+        updated = get_processed_document_for_company(conn, document_id, company_id)
+
+    return jsonify({"ok": True, "document": serialize_processed_document(updated)})
+
+
+@app.route("/api/document-center/documents/<int:document_id>/approve", methods=["POST"])
+def approve_document_center_document(document_id):
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+    current_user_id = get_current_user_id()
+
+    with engine.begin() as conn:
+        row = get_processed_document_for_company(conn, document_id, company_id)
+        if not row:
+            return jsonify({"ok": False, "errors": ["Documento no encontrado."]}), 404
+        if row.get("duplicate_of_document_id"):
+            return jsonify({"ok": False, "errors": ["No puedes aprobar un documento duplicado."]}), 400
+        update_processed_document_record(
+            conn,
+            document_id,
+            validation_status="ready_to_register",
+            approved_at=datetime.utcnow().isoformat(),
+            approved_by_user_id=current_user_id,
+            rejected_at=None,
+            rejected_by_user_id=None,
+            issue_type=None,
+            issue_description=None,
+            audit_log_json=append_document_audit(row.get("audit_log_json"), "approved", current_user_id),
+        )
+        refresh_document_batch_counters(conn, row["source_batch_id"])
+        updated = get_processed_document_for_company(conn, document_id, company_id)
+
+    return jsonify({"ok": True, "document": serialize_processed_document(updated)})
+
+
+@app.route("/api/document-center/documents/<int:document_id>/reject", methods=["POST"])
+def reject_document_center_document(document_id):
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+    current_user_id = get_current_user_id()
+    payload = request.get_json(silent=True) or {}
+    reason = (payload.get("reason") or "Documento rechazado manualmente.").strip()
+
+    with engine.begin() as conn:
+        row = get_processed_document_for_company(conn, document_id, company_id)
+        if not row:
+            return jsonify({"ok": False, "errors": ["Documento no encontrado."]}), 404
+        update_processed_document_record(
+            conn,
+            document_id,
+            validation_status="rejected",
+            issue_type="manual_rejection",
+            issue_description=reason,
+            rejected_at=datetime.utcnow().isoformat(),
+            rejected_by_user_id=current_user_id,
+            audit_log_json=append_document_audit(
+                row.get("audit_log_json"),
+                "rejected",
+                current_user_id,
+                {"reason": reason},
+            ),
+        )
+        refresh_document_batch_counters(conn, row["source_batch_id"])
+        updated = get_processed_document_for_company(conn, document_id, company_id)
+
+    return jsonify({"ok": True, "document": serialize_processed_document(updated)})
+
+
+@app.route("/api/document-center/documents/<int:document_id>/register", methods=["POST"])
+def register_document_center_document(document_id):
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+    data_owner_id = get_data_owner_id()
+    current_user_id = get_current_user_id()
+
+    with engine.begin() as conn:
+        row = get_processed_document_for_company(conn, document_id, company_id)
+        if not row:
+            return jsonify({"ok": False, "errors": ["Documento no encontrado."]}), 404
+        if row.get("registered_at"):
+            return jsonify({"ok": False, "errors": ["El documento ya está registrado."]}), 400
+        if row.get("validation_status") == "duplicate":
+            return jsonify({"ok": False, "errors": ["No se puede registrar un documento duplicado."]}), 400
+        try:
+            record_id, record_type = register_processed_document(
+                conn,
+                row,
+                data_owner_id,
+                current_user_id,
+            )
+        except ValueError as exc:
+            return jsonify({"ok": False, "errors": [str(exc)]}), 400
+        update_processed_document_record(
+            conn,
+            document_id,
+            validation_status="registered",
+            linked_accounting_record_id=record_id,
+            linked_accounting_record_type=record_type,
+            registered_at=datetime.utcnow().isoformat(),
+            registered_by_user_id=current_user_id,
+            approved_at=row.get("approved_at") or datetime.utcnow().isoformat(),
+            approved_by_user_id=row.get("approved_by_user_id") or current_user_id,
+            audit_log_json=append_document_audit(
+                row.get("audit_log_json"),
+                "registered",
+                current_user_id,
+                {"record_id": record_id, "record_type": record_type},
+            ),
+        )
+        refresh_document_batch_counters(conn, row["source_batch_id"])
+        updated = get_processed_document_for_company(conn, document_id, company_id)
+
+    return jsonify({"ok": True, "document": serialize_processed_document(updated)})
+
+
+@app.route("/api/document-center/batches/<int:batch_id>/register-ready", methods=["POST"])
+def register_ready_document_batch(batch_id):
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+    data_owner_id = get_data_owner_id()
+    current_user_id = get_current_user_id()
+    registered = 0
+    errors = []
+
+    with engine.begin() as conn:
+        batch = conn.execute(
+            select(document_batches_table)
+            .where(document_batches_table.c.id == batch_id)
+            .where(document_batches_table.c.company_id == company_id)
+        ).mappings().first()
+        if not batch:
+            return jsonify({"ok": False, "errors": ["Lote no encontrado."]}), 404
+        rows = conn.execute(
+            select(processed_documents_table)
+            .where(processed_documents_table.c.source_batch_id == batch_id)
+            .where(processed_documents_table.c.validation_status == "ready_to_register")
+            .where(processed_documents_table.c.registered_at.is_(None))
+        ).mappings().all()
+        for row in rows:
+            try:
+                record_id, record_type = register_processed_document(
+                    conn,
+                    row,
+                    data_owner_id,
+                    current_user_id,
+                )
+            except ValueError as exc:
+                errors.append(f"{row['original_filename']}: {exc}")
+                continue
+            update_processed_document_record(
+                conn,
+                row["id"],
+                validation_status="registered",
+                linked_accounting_record_id=record_id,
+                linked_accounting_record_type=record_type,
+                registered_at=datetime.utcnow().isoformat(),
+                registered_by_user_id=current_user_id,
+                approved_at=row.get("approved_at") or datetime.utcnow().isoformat(),
+                approved_by_user_id=row.get("approved_by_user_id") or current_user_id,
+                audit_log_json=append_document_audit(
+                    row.get("audit_log_json"),
+                    "registered",
+                    current_user_id,
+                    {"record_id": record_id, "record_type": record_type},
+                ),
+            )
+            registered += 1
+        refresh_document_batch_counters(conn, batch_id)
+        updated_batch = conn.execute(
+            select(document_batches_table).where(document_batches_table.c.id == batch_id)
+        ).mappings().first()
+
+    return jsonify({"ok": True, "registered": registered, "errors": errors, "batch": serialize_document_batch(updated_batch)})
+
+
+@app.route("/api/document-center/documents/<int:document_id>/download")
+def download_document_center_document(document_id):
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    with engine.connect() as conn:
+        row = get_processed_document_for_company(conn, document_id, company_id)
+    if not row:
+        return jsonify({"ok": False, "errors": ["Documento no encontrado."]}), 404
+
+    storage_path = row.get("storage_path")
+    file_url = row.get("file_url")
+    if storage_path and os.path.exists(storage_path):
+        return send_file(storage_path, as_attachment=False, download_name=row.get("original_filename"))
+    if file_url and file_url.startswith(("http://", "https://")):
+        return redirect(file_url)
+    if file_url and os.path.exists(file_url):
+        return send_file(file_url, as_attachment=False, download_name=row.get("original_filename"))
+    return jsonify({"ok": False, "errors": ["Archivo no disponible."]}), 404
 
 
 @app.route("/api/account", methods=["PUT"])
@@ -7077,6 +9345,260 @@ def delete_billing(billing_id):
         return jsonify({"ok": False, "errors": ["Registro no encontrado."]}), 404
 
     return jsonify({"ok": True})
+
+
+@app.route("/api/accounting-integrations/summary")
+def accounting_integrations_summary():
+    data_owner_id = get_data_owner_id()
+    user_role = (g.current_user or {}).get("role")
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+    try:
+        start_date, end_date, period_label = build_accounting_export_range()
+    except ValueError as exc:
+        return jsonify({"ok": False, "errors": [str(exc)]}), 400
+
+    with engine.connect() as conn:
+        company_query = select(
+            companies_table.c.id,
+            companies_table.c.display_name,
+            companies_table.c.legal_name,
+            companies_table.c.tax_id,
+        ).where(companies_table.c.id == company_id)
+        if user_role != "owner":
+            company_query = company_query.where(companies_table.c.agency_id == data_owner_id)
+        company = conn.execute(company_query).mappings().first()
+        if not company:
+            return jsonify({"ok": False, "errors": ["Empresa no encontrada."]}), 404
+        source_data = load_accounting_export_source_data(
+            conn,
+            data_owner_id,
+            company_id,
+            start_date,
+            end_date,
+        )
+
+    purchase_rows = build_purchase_export_rows(source_data)
+    sales_rows = build_sales_export_rows(source_data)
+    journal_rows = build_journal_export_rows(source_data)
+    document_rows = build_document_manifest_rows(source_data)
+
+    return jsonify(
+        {
+            "ok": True,
+            "company": {
+                "id": company["id"],
+                "displayName": company.get("display_name"),
+                "legalName": company.get("legal_name"),
+                "taxId": company.get("tax_id"),
+            },
+            "periodLabel": period_label,
+            "startDate": start_date.isoformat(),
+            "endDate": end_date.isoformat(),
+            "stats": {
+                "purchaseDocuments": len(purchase_rows),
+                "salesDocuments": len(sales_rows),
+                "journalLines": len(journal_rows),
+                "journalEntries": len({row["asiento_id"] for row in journal_rows}),
+                "documentFiles": len(document_rows),
+            },
+            "targets": [
+                {
+                    "id": "generic",
+                    "label": "Paquete contable Ledged",
+                    "status": "ready",
+                    "description": "Exportación normalizada PGC con compras, ventas, asientos y trazabilidad documental.",
+                },
+                {
+                    "id": "contasol",
+                    "label": "ContaSOL / importación asistida",
+                    "status": "ready",
+                    "description": "Usa CSV o XLSX como capa puente para importar y revisar asientos desde la gestoría.",
+                },
+                {
+                    "id": "odoo_a3_cegid",
+                    "label": "Odoo / A3 / Cegid",
+                    "status": "bridge",
+                    "description": "Primera fase por exportación puente. La conexión API directa queda preparada como siguiente capa.",
+                },
+            ],
+        }
+    )
+
+
+@app.route("/api/accounting-integrations/export/<export_kind>")
+def accounting_integrations_export(export_kind):
+    data_owner_id = get_data_owner_id()
+    user_role = (g.current_user or {}).get("role")
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    normalized_kind = (export_kind or "").strip().lower()
+    export_format = (request.args.get("format") or "csv").strip().lower()
+    if normalized_kind not in {"purchases", "sales", "journal"}:
+        return jsonify({"ok": False, "errors": ["Tipo de exportación no soportado."]}), 400
+    if export_format not in {"csv", "xlsx"}:
+        return jsonify({"ok": False, "errors": ["Formato no soportado."]}), 400
+
+    try:
+        start_date, end_date, _ = build_accounting_export_range()
+    except ValueError as exc:
+        return jsonify({"ok": False, "errors": [str(exc)]}), 400
+
+    with engine.connect() as conn:
+        company_query = select(
+            companies_table.c.id,
+            companies_table.c.display_name,
+        ).where(companies_table.c.id == company_id)
+        if user_role != "owner":
+            company_query = company_query.where(companies_table.c.agency_id == data_owner_id)
+        company = conn.execute(company_query).mappings().first()
+        if not company:
+            return jsonify({"ok": False, "errors": ["Empresa no encontrada."]}), 404
+        source_data = load_accounting_export_source_data(
+            conn,
+            data_owner_id,
+            company_id,
+            start_date,
+            end_date,
+        )
+
+    if normalized_kind == "purchases":
+        rows = build_purchase_export_rows(source_data)
+        columns = [
+            "fecha",
+            "documento_tipo",
+            "origen_tipo",
+            "origen_id",
+            "contraparte",
+            "concepto",
+            "base",
+            "iva",
+            "retencion",
+            "total",
+            "iva_deducible",
+            "cuenta_sugerida",
+            "familia",
+            "subtipo",
+            "bucket_pyg",
+            "modelos_fiscales",
+        ]
+        sheet_name = "Compras"
+        prefix = "compras"
+    elif normalized_kind == "sales":
+        rows = build_sales_export_rows(source_data)
+        columns = [
+            "fecha",
+            "documento_tipo",
+            "origen_tipo",
+            "origen_id",
+            "cliente",
+            "concepto",
+            "base",
+            "iva",
+            "total",
+            "tipo_iva",
+            "vencimiento",
+            "estado_pago",
+        ]
+        sheet_name = "Ventas"
+        prefix = "ventas"
+    else:
+        rows = build_journal_export_rows(source_data)
+        columns = [
+            "asiento_id",
+            "linea",
+            "fecha",
+            "diario",
+            "concepto",
+            "cuenta",
+            "descripcion_cuenta",
+            "debe",
+            "haber",
+            "tercero",
+            "documento_origen",
+            "origen_tipo",
+            "origen_id",
+        ]
+        sheet_name = "Asientos"
+        prefix = "asientos"
+
+    filename = build_export_row_filename(
+        prefix,
+        company.get("display_name") or "empresa",
+        "xlsx" if export_format == "xlsx" else "csv",
+        start_date,
+        end_date,
+    )
+    return export_response_from_rows(
+        rows,
+        columns,
+        export_format=export_format,
+        sheet_name=sheet_name,
+        download_name=filename,
+    )
+
+
+@app.route("/api/accounting-integrations/export-package")
+def accounting_integrations_export_package():
+    data_owner_id = get_data_owner_id()
+    user_role = (g.current_user or {}).get("role")
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+    try:
+        start_date, end_date, period_label = build_accounting_export_range()
+    except ValueError as exc:
+        return jsonify({"ok": False, "errors": [str(exc)]}), 400
+
+    with engine.connect() as conn:
+        company_query = select(
+            companies_table.c.id,
+            companies_table.c.display_name,
+            companies_table.c.legal_name,
+            companies_table.c.tax_id,
+        ).where(companies_table.c.id == company_id)
+        if user_role != "owner":
+            company_query = company_query.where(companies_table.c.agency_id == data_owner_id)
+        company = conn.execute(company_query).mappings().first()
+        if not company:
+            return jsonify({"ok": False, "errors": ["Empresa no encontrada."]}), 404
+        source_data = load_accounting_export_source_data(
+            conn,
+            data_owner_id,
+            company_id,
+            start_date,
+            end_date,
+        )
+
+    package_stream = build_accounting_export_package(
+        source_data,
+        {
+            "company_id": company["id"],
+            "company_name": company.get("display_name"),
+            "company_legal_name": company.get("legal_name"),
+            "company_tax_id": company.get("tax_id"),
+            "period_label": period_label,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "generated_at": datetime.utcnow().isoformat(),
+        },
+    )
+    filename = build_export_row_filename(
+        "paquete_contable",
+        company.get("display_name") or "empresa",
+        "zip",
+        start_date,
+        end_date,
+    )
+    return send_file(
+        package_stream,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=filename,
+    )
 
 
 @app.route("/api/summary")

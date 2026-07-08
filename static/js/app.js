@@ -32,6 +32,11 @@ let calendarMonth = null;
 let calendarYear = null;
 let calendarOverride = false;
 let currentBalanceManualData = {};
+let currentDocumentBatches = [];
+let currentDocumentCenterDocuments = [];
+let currentAccountingIntegrationSummary = null;
+let selectedDocumentBatchId = "";
+let selectedDocumentCenterDocumentId = null;
 let companies = [];
 let selectedCompanyId = null;
 let pendingIncomeFiles = [];
@@ -1155,7 +1160,64 @@ const reportEndMonthSelect = document.getElementById("reportEndMonthSelect");
 const reportDownloadBtn = document.getElementById("reportDownloadBtn");
 const reportEmailBtn = document.getElementById("reportEmailBtn");
 const reportStatus = document.getElementById("reportStatus");
+const integrationStartDate = document.getElementById("integrationStartDate");
+const integrationEndDate = document.getElementById("integrationEndDate");
+const integrationFormat = document.getElementById("integrationFormat");
+const integrationStatus = document.getElementById("integrationStatus");
+const integrationPurchasesCount = document.getElementById("integrationPurchasesCount");
+const integrationSalesCount = document.getElementById("integrationSalesCount");
+const integrationJournalCount = document.getElementById("integrationJournalCount");
+const integrationDocumentsCount = document.getElementById("integrationDocumentsCount");
+const integrationExportPurchasesBtn = document.getElementById("integrationExportPurchasesBtn");
+const integrationExportSalesBtn = document.getElementById("integrationExportSalesBtn");
+const integrationExportJournalBtn = document.getElementById("integrationExportJournalBtn");
+const integrationExportPackageBtn = document.getElementById("integrationExportPackageBtn");
 const fiscalModelsTableBody = document.getElementById("fiscalModelsTableBody");
+const documentCenterPeriod = document.getElementById("documentCenterPeriod");
+const documentCenterFiles = document.getElementById("documentCenterFiles");
+const documentCenterUploadBtn = document.getElementById("documentCenterUploadBtn");
+const documentCenterStatus = document.getElementById("documentCenterStatus");
+const documentCenterBatchFilter = document.getElementById("documentCenterBatchFilter");
+const documentCenterStatusFilter = document.getElementById("documentCenterStatusFilter");
+const documentCenterBatchCards = document.getElementById("documentCenterBatchCards");
+const documentCenterRegisterReadyBtn = document.getElementById("documentCenterRegisterReadyBtn");
+const documentCenterTableBody = document.querySelector("#documentCenterTable tbody");
+const documentCenterEmpty = document.getElementById("documentCenterEmpty");
+const documentCenterDetail = document.getElementById("documentCenterDetail");
+const documentCenterDetailEmpty = document.getElementById("documentCenterDetailEmpty");
+const documentCenterDetailTitle = document.getElementById("documentCenterDetailTitle");
+const documentCenterDetailMeta = document.getElementById("documentCenterDetailMeta");
+const documentCenterOpenFile = document.getElementById("documentCenterOpenFile");
+const documentCenterDocType = document.getElementById("documentCenterDocType");
+const documentCenterCounterparty = document.getElementById("documentCenterCounterparty");
+const documentCenterTaxId = document.getElementById("documentCenterTaxId");
+const documentCenterInvoiceNumber = document.getElementById("documentCenterInvoiceNumber");
+const documentCenterInvoiceDate = document.getElementById("documentCenterInvoiceDate");
+const documentCenterPaymentDate = document.getElementById("documentCenterPaymentDate");
+const documentCenterBaseAmount = document.getElementById("documentCenterBaseAmount");
+const documentCenterVatAmount = document.getElementById("documentCenterVatAmount");
+const documentCenterTotalAmount = document.getElementById("documentCenterTotalAmount");
+const documentCenterConcept = document.getElementById("documentCenterConcept");
+const documentCenterPayrollFields = document.getElementById("documentCenterPayrollFields");
+const documentCenterPayrollEmployee = document.getElementById("documentCenterPayrollEmployee");
+const documentCenterPayrollPeriod = document.getElementById("documentCenterPayrollPeriod");
+const documentCenterPayrollGross = document.getElementById("documentCenterPayrollGross");
+const documentCenterPayrollNet = document.getElementById("documentCenterPayrollNet");
+const documentCenterPayrollDeductions = document.getElementById("documentCenterPayrollDeductions");
+const documentCenterPayrollEmployerCost = document.getElementById("documentCenterPayrollEmployerCost");
+const documentCenterTaxModelFields = document.getElementById("documentCenterTaxModelFields");
+const documentCenterTaxModelName = document.getElementById("documentCenterTaxModelName");
+const documentCenterTaxModelStatus = document.getElementById("documentCenterTaxModelStatus");
+const documentCenterTaxModelPeriod = document.getElementById("documentCenterTaxModelPeriod");
+const documentCenterTaxModelAmount = document.getElementById("documentCenterTaxModelAmount");
+const documentCenterTaxModelOffsetAmount = document.getElementById("documentCenterTaxModelOffsetAmount");
+const documentCenterTaxModelRefundAmount = document.getElementById("documentCenterTaxModelRefundAmount");
+const documentCenterSaveBtn = document.getElementById("documentCenterSaveBtn");
+const documentCenterApproveBtn = document.getElementById("documentCenterApproveBtn");
+const documentCenterRegisterBtn = document.getElementById("documentCenterRegisterBtn");
+const documentCenterRejectBtn = document.getElementById("documentCenterRejectBtn");
+const documentCenterExtractedJson = document.getElementById("documentCenterExtractedJson");
+const documentCenterAuditLog = document.getElementById("documentCenterAuditLog");
 const currentUserRole = document.body ? document.body.dataset.userRole : null;
 const paymentCalendar = document.getElementById("paymentCalendar");
 const paymentCalendarTitle = document.getElementById("paymentCalendarTitle");
@@ -1913,6 +1975,550 @@ function loadCompanies() {
       updateHeaderContext();
       renderFiscalModelsSummary();
       return companies;
+    });
+}
+
+function documentStatusLabel(status) {
+  const labels = {
+    ready_to_register: "Listo",
+    needs_review: "Revisión",
+    duplicate: "Duplicado",
+    registered: "Registrado",
+    rejected: "Rechazado",
+  };
+  return labels[status] || status || "-";
+}
+
+function documentTypeLabel(type) {
+  const labels = {
+    purchase_invoice: "Factura gasto",
+    sales_invoice: "Factura emitida",
+    receipt: "Ticket",
+    payroll: "Nómina",
+    social_security: "Seguridad Social",
+    loan_document: "Préstamo",
+    bank_statement: "Extracto",
+    tax_model: "Modelo fiscal",
+    unknown: "Sin clasificar",
+  };
+  return labels[type] || type || "-";
+}
+
+function taxFilingStatusLabel(status) {
+  const labels = {
+    estimated: "Estimado",
+    a_ingresar: "Presentado · a ingresar",
+    a_compensar: "Presentado · a compensar",
+    sin_actividad: "Presentado · sin actividad",
+    a_devolver: "Presentado · a devolver",
+  };
+  return labels[status] || status || "";
+}
+
+function toggleDocumentCenterSpecialFields(type) {
+  const isPayroll = type === "payroll";
+  const isTaxModel = type === "tax_model";
+  if (documentCenterPayrollFields) {
+    documentCenterPayrollFields.hidden = !isPayroll;
+  }
+  if (documentCenterTaxModelFields) {
+    documentCenterTaxModelFields.hidden = !isTaxModel;
+  }
+}
+
+function renderDocumentCenterBatches() {
+  if (!documentCenterBatchFilter || !documentCenterBatchCards) {
+    return;
+  }
+  documentCenterBatchFilter.innerHTML = '<option value="">Todos los lotes</option>';
+  documentCenterBatchCards.innerHTML = "";
+  currentDocumentBatches.forEach((batch) => {
+    const option = document.createElement("option");
+    option.value = String(batch.id);
+    option.textContent = `${batch.period} · ${batch.totalDocuments} docs`;
+    documentCenterBatchFilter.appendChild(option);
+
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = `document-center-batch-card${
+      String(selectedDocumentBatchId || "") === String(batch.id) ? " active" : ""
+    }`;
+    card.innerHTML = `
+      <h3>${batch.period}</h3>
+      <p>Total: ${batch.totalDocuments}</p>
+      <p>Listos: ${batch.readyDocuments} · Revisión: ${batch.reviewDocuments} · Duplicados: ${batch.duplicateDocuments}</p>
+      <span class="document-center-status-pill ${batch.status || ""}">${batch.status || "uploaded"}</span>
+    `;
+    card.addEventListener("click", () => {
+      selectedDocumentBatchId = String(batch.id);
+      documentCenterBatchFilter.value = selectedDocumentBatchId;
+      loadDocumentCenterDocuments();
+      renderDocumentCenterBatches();
+    });
+    documentCenterBatchCards.appendChild(card);
+  });
+  documentCenterBatchFilter.value = selectedDocumentBatchId || "";
+}
+
+function renderDocumentCenterDocuments() {
+  if (!documentCenterTableBody || !documentCenterEmpty) {
+    return;
+  }
+  documentCenterTableBody.innerHTML = "";
+  if (!currentDocumentCenterDocuments.length) {
+    documentCenterEmpty.style.display = "block";
+    renderDocumentCenterDetail(null);
+    return;
+  }
+  documentCenterEmpty.style.display = "none";
+  currentDocumentCenterDocuments.forEach((doc) => {
+    const tr = document.createElement("tr");
+    tr.className = `document-center-row${
+      String(selectedDocumentCenterDocumentId || "") === String(doc.id) ? " is-active" : ""
+    }`;
+    tr.innerHTML = `
+      <td>${doc.originalFileName || "-"}</td>
+      <td>${documentTypeLabel(doc.detectedDocumentType)}</td>
+      <td>${doc.counterparty || "-"}</td>
+      <td>${doc.totalAmount !== null && doc.totalAmount !== undefined ? formatCurrency(doc.totalAmount) : "-"}</td>
+      <td>${doc.confidenceScore !== null && doc.confidenceScore !== undefined ? `${Math.round(doc.confidenceScore)}%` : "-"}</td>
+      <td><span class="document-center-status-pill ${doc.validationStatus || ""}">${documentStatusLabel(doc.validationStatus)}</span></td>
+    `;
+    tr.addEventListener("click", () => {
+      selectedDocumentCenterDocumentId = doc.id;
+      renderDocumentCenterDocuments();
+      renderDocumentCenterDetail(doc);
+    });
+    documentCenterTableBody.appendChild(tr);
+  });
+  const selected =
+    currentDocumentCenterDocuments.find((doc) => String(doc.id) === String(selectedDocumentCenterDocumentId)) ||
+    currentDocumentCenterDocuments[0];
+  if (selected) {
+    selectedDocumentCenterDocumentId = selected.id;
+    renderDocumentCenterDetail(selected);
+  }
+}
+
+function renderDocumentCenterAudit(auditLog) {
+  if (!documentCenterAuditLog) {
+    return;
+  }
+  documentCenterAuditLog.innerHTML = "";
+  if (!Array.isArray(auditLog) || !auditLog.length) {
+    documentCenterAuditLog.innerHTML = '<div class="document-center-audit-item"><strong>Sin eventos</strong><span>Todavía no hay trazabilidad registrada.</span></div>';
+    return;
+  }
+  auditLog
+    .slice()
+    .reverse()
+    .forEach((entry) => {
+      const item = document.createElement("div");
+      item.className = "document-center-audit-item";
+      item.innerHTML = `
+        <strong>${entry.action || "evento"}</strong>
+        <span>${entry.timestamp || "-"}</span>
+        <span>${entry.payload ? JSON.stringify(entry.payload) : ""}</span>
+      `;
+      documentCenterAuditLog.appendChild(item);
+    });
+}
+
+function renderDocumentCenterDetail(doc) {
+  if (!documentCenterDetail || !documentCenterDetailEmpty) {
+    return;
+  }
+  if (!doc) {
+    documentCenterDetail.hidden = true;
+    documentCenterDetailEmpty.style.display = "block";
+    toggleDocumentCenterSpecialFields("unknown");
+    return;
+  }
+  documentCenterDetail.hidden = false;
+  documentCenterDetailEmpty.style.display = "none";
+  const effective = doc.effectiveData || {};
+  if (documentCenterDetailTitle) {
+    documentCenterDetailTitle.textContent = doc.originalFileName || `Documento #${doc.id}`;
+  }
+  if (documentCenterDetailMeta) {
+    documentCenterDetailMeta.textContent = `${documentTypeLabel(doc.detectedDocumentType)} · ${documentStatusLabel(doc.validationStatus)} · Confianza ${doc.confidenceScore ? Math.round(doc.confidenceScore) : 0}%`;
+  }
+  if (documentCenterOpenFile) {
+    documentCenterOpenFile.href = `/api/document-center/documents/${doc.id}/download?company_id=${getSelectedCompanyId()}`;
+  }
+  if (documentCenterDocType) {
+    documentCenterDocType.value = doc.detectedDocumentType || "unknown";
+  }
+  toggleDocumentCenterSpecialFields(doc.detectedDocumentType || "unknown");
+  if (documentCenterCounterparty) {
+    documentCenterCounterparty.value =
+      effective.provider_name || effective.client_name || effective.employee_name || effective.bank_name || "";
+  }
+  if (documentCenterTaxId) {
+    documentCenterTaxId.value = effective.tax_id || "";
+  }
+  if (documentCenterInvoiceNumber) {
+    documentCenterInvoiceNumber.value = effective.invoice_number || "";
+  }
+  if (documentCenterInvoiceDate) {
+    documentCenterInvoiceDate.value = effective.invoice_date || "";
+  }
+  if (documentCenterPaymentDate) {
+    documentCenterPaymentDate.value = effective.payment_date || "";
+  }
+  if (documentCenterBaseAmount) {
+    documentCenterBaseAmount.value =
+      effective.base_amount !== null && effective.base_amount !== undefined ? String(effective.base_amount) : "";
+  }
+  if (documentCenterVatAmount) {
+    documentCenterVatAmount.value =
+      effective.vat_amount !== null && effective.vat_amount !== undefined ? String(effective.vat_amount) : "";
+  }
+  if (documentCenterTotalAmount) {
+    documentCenterTotalAmount.value =
+      effective.total_amount !== null && effective.total_amount !== undefined
+        ? String(effective.total_amount)
+        : effective.amount !== null && effective.amount !== undefined
+          ? String(effective.amount)
+          : "";
+  }
+  if (documentCenterConcept) {
+    documentCenterConcept.value = effective.concept || effective.filename || "";
+  }
+  if (documentCenterPayrollEmployee) {
+    documentCenterPayrollEmployee.value = effective.employee_name || effective.provider_name || "";
+  }
+  if (documentCenterPayrollPeriod) {
+    documentCenterPayrollPeriod.value = effective.payroll_period || "";
+  }
+  if (documentCenterPayrollGross) {
+    documentCenterPayrollGross.value =
+      effective.base_amount !== null && effective.base_amount !== undefined ? String(effective.base_amount) : "";
+  }
+  if (documentCenterPayrollNet) {
+    documentCenterPayrollNet.value =
+      effective.payroll_net_amount !== null && effective.payroll_net_amount !== undefined
+        ? String(effective.payroll_net_amount)
+        : effective.total_amount !== null && effective.total_amount !== undefined
+          ? String(effective.total_amount)
+          : "";
+  }
+  if (documentCenterPayrollDeductions) {
+    documentCenterPayrollDeductions.value =
+      effective.payroll_total_deductions_amount !== null &&
+      effective.payroll_total_deductions_amount !== undefined
+        ? String(effective.payroll_total_deductions_amount)
+        : "";
+  }
+  if (documentCenterPayrollEmployerCost) {
+    documentCenterPayrollEmployerCost.value =
+      effective.payroll_employer_cost_amount !== null &&
+      effective.payroll_employer_cost_amount !== undefined
+        ? String(effective.payroll_employer_cost_amount)
+        : "";
+  }
+  if (documentCenterTaxModelName) {
+    documentCenterTaxModelName.value = effective.model_name || "";
+  }
+  if (documentCenterTaxModelStatus) {
+    documentCenterTaxModelStatus.value = effective.filing_status || "";
+  }
+  if (documentCenterTaxModelPeriod) {
+    documentCenterTaxModelPeriod.value = effective.tax_period || "";
+  }
+  if (documentCenterTaxModelAmount) {
+    documentCenterTaxModelAmount.value =
+      effective.amount !== null && effective.amount !== undefined
+        ? String(effective.amount)
+        : effective.total_amount !== null && effective.total_amount !== undefined
+          ? String(effective.total_amount)
+          : "";
+  }
+  if (documentCenterTaxModelOffsetAmount) {
+    documentCenterTaxModelOffsetAmount.value =
+      effective.offset_amount !== null && effective.offset_amount !== undefined
+        ? String(effective.offset_amount)
+        : "";
+  }
+  if (documentCenterTaxModelRefundAmount) {
+    documentCenterTaxModelRefundAmount.value =
+      effective.refund_amount !== null && effective.refund_amount !== undefined
+        ? String(effective.refund_amount)
+        : "";
+  }
+  if (documentCenterExtractedJson) {
+    documentCenterExtractedJson.textContent = JSON.stringify(doc.originalExtractedData || {}, null, 2);
+  }
+  renderDocumentCenterAudit(doc.auditLog || []);
+}
+
+function loadDocumentCenterBatches() {
+  if (!getSelectedCompanyId()) {
+    currentDocumentBatches = [];
+    renderDocumentCenterBatches();
+    return Promise.resolve([]);
+  }
+  return fetch(withCompanyParam("/api/document-center/batches"))
+    .then((res) => res.json())
+    .then((data) => {
+      currentDocumentBatches = data.batches || [];
+      if (
+        selectedDocumentBatchId &&
+        !currentDocumentBatches.some((batch) => String(batch.id) === String(selectedDocumentBatchId))
+      ) {
+        selectedDocumentBatchId = "";
+      }
+      renderDocumentCenterBatches();
+      return currentDocumentBatches;
+    })
+    .catch(() => {
+      currentDocumentBatches = [];
+      renderDocumentCenterBatches();
+      return [];
+    });
+}
+
+function loadDocumentCenterDocuments() {
+  if (!getSelectedCompanyId()) {
+    currentDocumentCenterDocuments = [];
+    renderDocumentCenterDocuments();
+    return Promise.resolve([]);
+  }
+  const params = new URLSearchParams();
+  if (selectedDocumentBatchId) {
+    params.set("batch_id", selectedDocumentBatchId);
+  }
+  if (documentCenterStatusFilter?.value) {
+    params.set("validation_status", documentCenterStatusFilter.value);
+  }
+  const query = params.toString();
+  const url = withCompanyParam(`/api/document-center/documents${query ? `?${query}` : ""}`);
+  return fetch(url)
+    .then((res) => res.json())
+    .then((data) => {
+      currentDocumentCenterDocuments = data.documents || [];
+      if (
+        selectedDocumentCenterDocumentId &&
+        !currentDocumentCenterDocuments.some(
+          (doc) => String(doc.id) === String(selectedDocumentCenterDocumentId)
+        )
+      ) {
+        selectedDocumentCenterDocumentId = null;
+      }
+      renderDocumentCenterDocuments();
+      return currentDocumentCenterDocuments;
+    })
+    .catch(() => {
+      currentDocumentCenterDocuments = [];
+      renderDocumentCenterDocuments();
+      return [];
+    });
+}
+
+function buildCurrentDocumentPayload() {
+  const currentDoc = currentDocumentCenterDocuments.find(
+    (doc) => String(doc.id) === String(selectedDocumentCenterDocumentId)
+  );
+  if (!currentDoc) {
+    return null;
+  }
+  const source = { ...(currentDoc.effectiveData || {}) };
+  const counterparty = documentCenterCounterparty?.value?.trim() || "";
+  if (documentCenterDocType?.value === "sales_invoice") {
+    source.client_name = counterparty;
+    source.client = counterparty;
+    delete source.provider_name;
+    delete source.supplier;
+  } else {
+    source.provider_name = counterparty;
+    source.supplier = counterparty;
+    if (documentCenterDocType?.value === "payroll") {
+      source.employee_name = counterparty;
+    }
+  }
+  source.tax_id = documentCenterTaxId?.value?.trim() || null;
+  source.invoice_number = documentCenterInvoiceNumber?.value?.trim() || null;
+  source.invoice_date = documentCenterInvoiceDate?.value || null;
+  source.payment_date = documentCenterPaymentDate?.value || null;
+  source.base_amount = parseNumberInput(documentCenterBaseAmount?.value);
+  source.vat_amount = parseNumberInput(documentCenterVatAmount?.value);
+  source.total_amount = parseNumberInput(documentCenterTotalAmount?.value);
+  source.amount = source.total_amount;
+  source.concept = documentCenterConcept?.value?.trim() || null;
+  const selectedType = documentCenterDocType?.value || currentDoc.detectedDocumentType;
+  if (selectedType === "payroll") {
+    source.employee_name = documentCenterPayrollEmployee?.value?.trim() || counterparty || null;
+    source.provider_name = source.employee_name;
+    source.supplier = source.employee_name;
+    source.payroll_period = documentCenterPayrollPeriod?.value?.trim() || null;
+    source.base_amount = parseNumberInput(documentCenterPayrollGross?.value);
+    source.payroll_net_amount = parseNumberInput(documentCenterPayrollNet?.value);
+    source.payroll_total_deductions_amount = parseNumberInput(
+      documentCenterPayrollDeductions?.value
+    );
+    source.payroll_employer_cost_amount = parseNumberInput(
+      documentCenterPayrollEmployerCost?.value
+    );
+    source.total_amount = source.payroll_net_amount;
+    source.amount = source.payroll_net_amount;
+    source.vat_amount = null;
+    source.vat_rate = null;
+    source.vat_deductible = false;
+    source.concept =
+      documentCenterConcept?.value?.trim() ||
+      [ "Nómina", source.employee_name, source.payroll_period ].filter(Boolean).join(" - ");
+  } else if (selectedType === "tax_model") {
+    source.model_name = documentCenterTaxModelName?.value?.trim() || null;
+    source.filing_status = documentCenterTaxModelStatus?.value || null;
+    source.tax_period = documentCenterTaxModelPeriod?.value?.trim() || null;
+    source.amount = parseNumberInput(documentCenterTaxModelAmount?.value);
+    source.offset_amount = parseNumberInput(documentCenterTaxModelOffsetAmount?.value);
+    source.refund_amount = parseNumberInput(documentCenterTaxModelRefundAmount?.value);
+    if (source.filing_status === "a_compensar" && source.offset_amount !== null) {
+      source.amount = source.offset_amount;
+    }
+    if (source.filing_status === "a_devolver" && source.refund_amount !== null) {
+      source.amount = source.refund_amount;
+    }
+    if (source.filing_status === "sin_actividad") {
+      source.amount = 0;
+    }
+    source.total_amount = source.amount;
+    source.concept =
+      documentCenterConcept?.value?.trim() ||
+      [
+        source.model_name ? `Modelo ${source.model_name}` : "Modelo fiscal",
+        source.tax_period,
+        source.filing_status ? source.filing_status.replaceAll("_", " ") : "",
+      ]
+        .filter(Boolean)
+        .join(" - ");
+  }
+  return {
+    detected_document_type: selectedType,
+    corrected_data: source,
+  };
+}
+
+function saveDocumentCenterDocument() {
+  const payload = buildCurrentDocumentPayload();
+  if (!payload || !selectedDocumentCenterDocumentId) {
+    return Promise.resolve();
+  }
+  return fetch(withCompanyParam(`/api/document-center/documents/${selectedDocumentCenterDocumentId}`), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        throw new Error((data.errors || ["No se pudo guardar el documento."]).join("\n"));
+      }
+      documentCenterStatus.textContent = "Corrección guardada.";
+      return Promise.all([loadDocumentCenterBatches(), loadDocumentCenterDocuments()]);
+    })
+    .catch((error) => {
+      alert(error.message || "No se pudo guardar el documento.");
+      throw error;
+    });
+}
+
+function changeDocumentCenterState(action, extraPayload = {}) {
+  if (!selectedDocumentCenterDocumentId) {
+    return Promise.resolve();
+  }
+  return fetch(
+    withCompanyParam(`/api/document-center/documents/${selectedDocumentCenterDocumentId}/${action}`),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(extraPayload),
+    }
+  )
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        throw new Error((data.errors || ["No se pudo actualizar el documento."]).join("\n"));
+      }
+      return Promise.all([loadDocumentCenterBatches(), loadDocumentCenterDocuments(), refreshAllData()]);
+    })
+    .catch((error) => {
+      alert(error.message || "No se pudo actualizar el documento.");
+    });
+}
+
+function registerReadyDocumentCenterBatch() {
+  if (!selectedDocumentBatchId) {
+    alert("Selecciona un lote antes de registrar.");
+    return Promise.resolve();
+  }
+  return fetch(
+    withCompanyParam(`/api/document-center/batches/${selectedDocumentBatchId}/register-ready`),
+    { method: "POST" }
+  )
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        throw new Error((data.errors || ["No se pudo registrar el lote."]).join("\n"));
+      }
+      const message = data.errors?.length
+        ? `Registrados ${data.registered}. Revisa incidencias pendientes.`
+        : `Registrados ${data.registered} documentos del lote.`;
+      if (documentCenterStatus) {
+        documentCenterStatus.textContent = message;
+      }
+      return Promise.all([loadDocumentCenterBatches(), loadDocumentCenterDocuments(), refreshAllData()]);
+    })
+    .catch((error) => {
+      alert(error.message || "No se pudo registrar el lote.");
+    });
+}
+
+function uploadDocumentCenterBatch() {
+  if (!getSelectedCompanyId()) {
+    alert("Selecciona una empresa antes de subir documentos.");
+    return Promise.resolve();
+  }
+  const files = documentCenterFiles?.files;
+  if (!files || !files.length) {
+    alert("Selecciona al menos un archivo.");
+    return Promise.resolve();
+  }
+  const formData = new FormData();
+  Array.from(files).forEach((file) => formData.append("files", file));
+  formData.append(
+    "period",
+    documentCenterPeriod?.value?.trim() || getPeriodLabel() || `${new Date().getFullYear()}`
+  );
+  documentCenterUploadBtn.disabled = true;
+  if (documentCenterStatus) {
+    documentCenterStatus.textContent = "Procesando lote documental...";
+  }
+  return fetch(withCompanyParam("/api/document-center/upload"), {
+    method: "POST",
+    body: formData,
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        throw new Error((data.errors || ["No se pudo procesar el lote."]).join("\n"));
+      }
+      selectedDocumentBatchId = String(data.batch?.id || "");
+      selectedDocumentCenterDocumentId = null;
+      if (documentCenterFiles) {
+        documentCenterFiles.value = "";
+      }
+      if (documentCenterStatus) {
+        documentCenterStatus.textContent = `Lote procesado: ${data.count} documentos.`;
+      }
+      return Promise.all([loadDocumentCenterBatches(), loadDocumentCenterDocuments()]);
+    })
+    .catch((error) => {
+      alert(error.message || "No se pudo procesar el lote.");
+    })
+    .finally(() => {
+      documentCenterUploadBtn.disabled = false;
     });
 }
 
@@ -6171,7 +6777,14 @@ function renderPaymentDayDetails(day) {
     }
     supplier.textContent = `${label}: ${item.counterparty || "-"}`;
     const concept = document.createElement("span");
-    concept.textContent = item.concept || "Factura";
+    if (item.type === "tax_obligation") {
+      const filingLabel = taxFilingStatusLabel(item.filing_status);
+      concept.textContent = filingLabel
+        ? `${item.concept || "Modelo fiscal"} · ${filingLabel}`
+        : item.concept || "Modelo fiscal";
+    } else {
+      concept.textContent = item.concept || "Factura";
+    }
     const dateLabel = document.createElement("span");
     dateLabel.textContent = item.payment_date;
     if (item.status === "overdue") {
@@ -6198,9 +6811,18 @@ function renderPaymentDayDetails(day) {
         : item.type === "loan_installment"
         ? "Cuota préstamo"
         : item.type === "tax_obligation"
-        ? `Modelo ${item.tax_model || ""}`.trim()
+        ? item.calendar_impact === "credit"
+          ? "Crédito fiscal"
+          : item.calendar_impact === "refund"
+          ? "Devolución solicitada"
+          : item.calendar_impact === "informational"
+          ? "Expediente sin cuota"
+          : `Modelo ${item.tax_model || ""}`.trim()
         : "Gasto";
-    amount.textContent = `${formatCurrency(item.amount)} (${amountLabel})`;
+    amount.textContent =
+      item.type === "tax_obligation" && item.calendar_impact === "informational"
+        ? amountLabel
+        : `${formatCurrency(item.amount)} (${amountLabel})`;
     const editContainer = document.createElement("div");
     editContainer.className = "payment-edit";
     let editBtn = null;
@@ -6322,6 +6944,8 @@ function refreshAllData() {
     refreshNoInvoiceExpenses(),
     refreshLoanInstallments(),
     refreshAnnualTaxData(),
+    loadDocumentCenterBatches().then(() => loadDocumentCenterDocuments()),
+    loadAccountingIntegrationSummary(),
   ]).then(() => {
     updateDashboardTotals();
     updateDashboardEmptyState();
@@ -8831,6 +9455,124 @@ function buildReportParams() {
   return params;
 }
 
+function padMonthDay(value) {
+  return String(value).padStart(2, "0");
+}
+
+function buildIntegrationRangeFromMainFilters() {
+  const { month, year } = getSelectedMonthYear();
+  const normalizedMonth = Number(month || 1);
+  const normalizedYear = Number(year || new Date().getFullYear());
+  let startMonth = normalizedMonth;
+  let endMonth = normalizedMonth;
+  if (getSelectedPeriod() === "quarterly") {
+    startMonth = Math.max(1, normalizedMonth - 2);
+    endMonth = normalizedMonth;
+  }
+  const startDate = `${normalizedYear}-${padMonthDay(startMonth)}-01`;
+  const endDate = `${normalizedYear}-${padMonthDay(endMonth)}-${padMonthDay(
+    new Date(normalizedYear, endMonth, 0).getDate()
+  )}`;
+  return { startDate, endDate };
+}
+
+function syncIntegrationRangeFromMainFilters() {
+  if (!integrationStartDate || !integrationEndDate) {
+    return;
+  }
+  const { startDate, endDate } = buildIntegrationRangeFromMainFilters();
+  integrationStartDate.value = startDate;
+  integrationEndDate.value = endDate;
+}
+
+function buildIntegrationParams() {
+  const params = new URLSearchParams();
+  if (integrationStartDate?.value) {
+    params.set("start_date", integrationStartDate.value);
+  }
+  if (integrationEndDate?.value) {
+    params.set("end_date", integrationEndDate.value);
+  }
+  if (integrationFormat?.value) {
+    params.set("format", integrationFormat.value);
+  }
+  return params;
+}
+
+function renderAccountingIntegrationSummary() {
+  const stats = currentAccountingIntegrationSummary?.stats || {};
+  if (integrationPurchasesCount) {
+    integrationPurchasesCount.textContent = String(stats.purchaseDocuments || 0);
+  }
+  if (integrationSalesCount) {
+    integrationSalesCount.textContent = String(stats.salesDocuments || 0);
+  }
+  if (integrationJournalCount) {
+    integrationJournalCount.textContent = String(stats.journalEntries || 0);
+  }
+  if (integrationDocumentsCount) {
+    integrationDocumentsCount.textContent = String(stats.documentFiles || 0);
+  }
+  if (integrationStatus) {
+    if (!currentAccountingIntegrationSummary) {
+      integrationStatus.textContent = "";
+      return;
+    }
+    const companyName = currentAccountingIntegrationSummary.company?.displayName || "Empresa seleccionada";
+    const periodLabel = currentAccountingIntegrationSummary.periodLabel || "";
+    integrationStatus.textContent = `${companyName} · ${periodLabel} · ${stats.journalLines || 0} líneas contables preparadas.`;
+  }
+}
+
+function loadAccountingIntegrationSummary() {
+  if (!getSelectedCompanyId()) {
+    currentAccountingIntegrationSummary = null;
+    renderAccountingIntegrationSummary();
+    return Promise.resolve();
+  }
+  const params = buildIntegrationParams();
+  const query = params.toString();
+  const url = withCompanyParam(`/api/accounting-integrations/summary${query ? `?${query}` : ""}`);
+  return fetch(url)
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok) {
+        throw new Error((data.errors || ["No se pudo cargar el resumen de integraciones."]).join("\n"));
+      }
+      currentAccountingIntegrationSummary = data;
+      renderAccountingIntegrationSummary();
+    })
+    .catch((error) => {
+      currentAccountingIntegrationSummary = null;
+      renderAccountingIntegrationSummary();
+      if (integrationStatus) {
+        integrationStatus.textContent = error.message || "No se pudo cargar el resumen de integraciones.";
+      }
+    });
+}
+
+function triggerAccountingExport(kind) {
+  if (!getSelectedCompanyId()) {
+    alert("Selecciona una empresa antes de exportar.");
+    return;
+  }
+  const params = buildIntegrationParams();
+  params.delete("format");
+  if (kind !== "package" && integrationFormat?.value) {
+    params.set("format", integrationFormat.value);
+  }
+  const query = params.toString();
+  const baseUrl =
+    kind === "package"
+      ? `/api/accounting-integrations/export-package${query ? `?${query}` : ""}`
+      : `/api/accounting-integrations/export/${kind}${query ? `?${query}` : ""}`;
+  if (integrationStatus) {
+    integrationStatus.textContent =
+      kind === "package" ? "Preparando paquete contable..." : "Preparando exportación...";
+  }
+  window.location.href = withCompanyParam(baseUrl);
+}
+
 function downloadQuarterlyReport() {
   if (!getSelectedCompanyId()) {
     alert("Selecciona una empresa antes de generar el informe.");
@@ -9222,6 +9964,16 @@ function bindEvents() {
   attachAmountInputBehavior(loanTotalInput);
   attachAmountInputBehavior(loanInterestInput);
   attachAmountInputBehavior(loanPrincipalInput);
+  attachAmountInputBehavior(documentCenterBaseAmount);
+  attachAmountInputBehavior(documentCenterVatAmount);
+  attachAmountInputBehavior(documentCenterTotalAmount);
+  attachAmountInputBehavior(documentCenterPayrollGross);
+  attachAmountInputBehavior(documentCenterPayrollNet);
+  attachAmountInputBehavior(documentCenterPayrollDeductions);
+  attachAmountInputBehavior(documentCenterPayrollEmployerCost);
+  attachAmountInputBehavior(documentCenterTaxModelAmount);
+  attachAmountInputBehavior(documentCenterTaxModelOffsetAmount);
+  attachAmountInputBehavior(documentCenterTaxModelRefundAmount);
   if (companySaveBtn) {
     companySaveBtn.addEventListener("click", saveCompany);
   }
@@ -9231,6 +9983,51 @@ function bindEvents() {
   }
   if (accountSaveBtn) {
     accountSaveBtn.addEventListener("click", saveAccount);
+  }
+  if (documentCenterUploadBtn) {
+    documentCenterUploadBtn.addEventListener("click", uploadDocumentCenterBatch);
+  }
+  if (documentCenterDocType) {
+    documentCenterDocType.addEventListener("change", () => {
+      toggleDocumentCenterSpecialFields(documentCenterDocType.value || "unknown");
+    });
+  }
+  if (documentCenterBatchFilter) {
+    documentCenterBatchFilter.addEventListener("change", () => {
+      selectedDocumentBatchId = documentCenterBatchFilter.value || "";
+      loadDocumentCenterDocuments();
+      renderDocumentCenterBatches();
+    });
+  }
+  if (documentCenterStatusFilter) {
+    documentCenterStatusFilter.addEventListener("change", () => {
+      loadDocumentCenterDocuments();
+    });
+  }
+  if (documentCenterRegisterReadyBtn) {
+    documentCenterRegisterReadyBtn.addEventListener("click", registerReadyDocumentCenterBatch);
+  }
+  if (documentCenterSaveBtn) {
+    documentCenterSaveBtn.addEventListener("click", saveDocumentCenterDocument);
+  }
+  if (documentCenterApproveBtn) {
+    documentCenterApproveBtn.addEventListener("click", () => {
+      saveDocumentCenterDocument().then(() => changeDocumentCenterState("approve"));
+    });
+  }
+  if (documentCenterRegisterBtn) {
+    documentCenterRegisterBtn.addEventListener("click", () => {
+      saveDocumentCenterDocument().then(() => changeDocumentCenterState("register"));
+    });
+  }
+  if (documentCenterRejectBtn) {
+    documentCenterRejectBtn.addEventListener("click", () => {
+      const reason = window.prompt("Motivo del rechazo:", "Documento rechazado manualmente.");
+      if (reason === null) {
+        return;
+      }
+      changeDocumentCenterState("reject", { reason });
+    });
   }
   if (staffSaveBtn) {
     staffSaveBtn.addEventListener("click", saveStaff);
@@ -9242,6 +10039,7 @@ function bindEvents() {
       calendarOverride = false;
       syncCalendarWithFilters();
       syncReportSelectorsFromMain();
+      syncIntegrationRangeFromMainFilters();
       refreshAllData();
     });
   }
@@ -9252,6 +10050,7 @@ function bindEvents() {
       calendarOverride = false;
       syncCalendarWithFilters();
       syncReportSelectorsFromMain();
+      syncIntegrationRangeFromMainFilters();
       refreshAllData();
     });
   }
@@ -9266,6 +10065,7 @@ function bindEvents() {
       calendarOverride = false;
       syncCalendarWithFilters();
       syncReportSelectorsFromMain();
+      syncIntegrationRangeFromMainFilters();
       refreshAllData();
     });
   }
@@ -9280,6 +10080,7 @@ function bindEvents() {
       renderFiscalModelsSummary();
       calendarOverride = false;
       syncCalendarWithFilters();
+      syncIntegrationRangeFromMainFilters();
       renderTable();
       renderIncomeTable();
       loadYears().then(() => {
@@ -9409,6 +10210,27 @@ function bindEvents() {
   if (reportEmailBtn) {
     reportEmailBtn.addEventListener("click", sendQuarterlyReportEmail);
   }
+  if (integrationStartDate) {
+    integrationStartDate.addEventListener("change", loadAccountingIntegrationSummary);
+  }
+  if (integrationEndDate) {
+    integrationEndDate.addEventListener("change", loadAccountingIntegrationSummary);
+  }
+  if (integrationFormat) {
+    integrationFormat.addEventListener("change", loadAccountingIntegrationSummary);
+  }
+  if (integrationExportPurchasesBtn) {
+    integrationExportPurchasesBtn.addEventListener("click", () => triggerAccountingExport("purchases"));
+  }
+  if (integrationExportSalesBtn) {
+    integrationExportSalesBtn.addEventListener("click", () => triggerAccountingExport("sales"));
+  }
+  if (integrationExportJournalBtn) {
+    integrationExportJournalBtn.addEventListener("click", () => triggerAccountingExport("journal"));
+  }
+  if (integrationExportPackageBtn) {
+    integrationExportPackageBtn.addEventListener("click", () => triggerAccountingExport("package"));
+  }
   bindPnlInputs();
 }
 
@@ -9425,6 +10247,7 @@ function init() {
   applyRoleVisibility();
   restoreFilters(now);
   syncCalendarWithFilters();
+  syncIntegrationRangeFromMainFilters();
   loadStaff()
     .then(() => loadCompanies())
     .then(() => loadYears())
@@ -9447,6 +10270,9 @@ function init() {
       }
       if (loanPaymentDateInput && !loanPaymentDateInput.value) {
         loanPaymentDateInput.value = now.toISOString().slice(0, 10);
+      }
+      if (documentCenterPeriod && !documentCenterPeriod.value) {
+        documentCenterPeriod.value = getPeriodLabel() || `${now.getFullYear()}`;
       }
       updateHeaderContext();
       refreshAllData();
