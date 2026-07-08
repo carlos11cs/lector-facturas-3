@@ -6962,7 +6962,6 @@ function refreshAllData() {
     refreshNoInvoiceExpenses(),
     refreshLoanInstallments(),
     refreshAnnualTaxData(),
-    loadDocumentCenterBatches().then(() => loadDocumentCenterDocuments()),
     loadAccountingIntegrationSummary(),
   ]).then(() => {
     updateDashboardTotals();
@@ -9765,6 +9764,7 @@ function initNavigation() {
     taxes: "reports",
     pnl: "statements",
     balance: "statements",
+    "document-center": "expenses",
   };
   const storedSection = legacySectionMap[localStorage.getItem("activeSection")] || localStorage.getItem("activeSection");
   const availableSections = Array.from(sections || []).map(
