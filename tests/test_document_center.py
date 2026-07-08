@@ -1,9 +1,12 @@
 import unittest
+import io
+import zipfile
 
 try:
     from app import (
         detect_document_type,
         enrich_payroll_data,
+        extract_text_from_document_bytes,
         extract_confidence_and_fields,
         extract_tax_model_data,
         normalize_tax_period_key,
@@ -111,6 +114,33 @@ class TestDocumentCenterHelpers(unittest.TestCase):
     def test_normalize_tax_period_key_unifies_quarter_formats(self):
         self.assertEqual(normalize_tax_period_key("T2 2026"), "T2 2026")
         self.assertEqual(normalize_tax_period_key("2 trimestre 2026"), "T2 2026")
+
+    def test_extract_text_from_document_bytes_falls_back_for_xlsx_archive(self):
+        workbook_bytes = io.BytesIO()
+        with zipfile.ZipFile(workbook_bytes, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                "xl/sharedStrings.xml",
+                """<?xml version="1.0" encoding="UTF-8"?>
+                <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                  <si><t>Fecha</t></si>
+                  <si><t>Importe</t></si>
+                  <si><t>30/06/2026</t></si>
+                  <si><t>120,55</t></si>
+                </sst>""",
+            )
+            archive.writestr(
+                "xl/worksheets/sheet1.xml",
+                """<?xml version="1.0" encoding="UTF-8"?>
+                <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                  <sheetData>
+                    <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row>
+                    <row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2" t="s"><v>3</v></c></row>
+                  </sheetData>
+                </worksheet>""",
+            )
+        extracted = extract_text_from_document_bytes(workbook_bytes.getvalue(), "extracto.xlsx")
+        self.assertIn("Fecha | Importe", extracted)
+        self.assertIn("30/06/2026 | 120,55", extracted)
 
 
 if __name__ == "__main__":

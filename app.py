@@ -12,6 +12,7 @@ import tempfile
 import zipfile
 from datetime import date, datetime, timedelta
 from functools import wraps
+from xml.etree import ElementTree as ET
 
 import httpx
 import fitz
@@ -1672,6 +1673,69 @@ def persist_document_bytes(company_id, batch_id, filename, data, content_type=No
     return key, get_public_url(key)
 
 
+def extract_text_from_spreadsheet_archive(file_bytes):
+    lines = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as archive:
+            shared_strings = []
+            if "xl/sharedStrings.xml" in archive.namelist():
+                try:
+                    shared_root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+                    for node in shared_root.iter():
+                        if node.tag.endswith("}t") and node.text:
+                            shared_strings.append(node.text.strip())
+                except Exception:
+                    shared_strings = []
+
+            sheet_names = sorted(
+                name
+                for name in archive.namelist()
+                if name.startswith("xl/worksheets/sheet") and name.endswith(".xml")
+            )[:3]
+            for sheet_name in sheet_names:
+                try:
+                    root = ET.fromstring(archive.read(sheet_name))
+                except Exception:
+                    continue
+                for row in root.iter():
+                    if not row.tag.endswith("}row"):
+                        continue
+                    values = []
+                    for cell in row:
+                        if not cell.tag.endswith("}c"):
+                            continue
+                        raw_value = None
+                        cell_type = cell.attrib.get("t")
+                        for child in cell:
+                            if child.tag.endswith("}v") and child.text not in (None, ""):
+                                raw_value = child.text.strip()
+                                break
+                            if child.tag.endswith("}is"):
+                                texts = [node.text.strip() for node in child.iter() if node.tag.endswith("}t") and node.text]
+                                if texts:
+                                    raw_value = " ".join(texts)
+                                    break
+                        if raw_value in (None, ""):
+                            continue
+                        if cell_type == "s":
+                            try:
+                                shared_index = int(raw_value)
+                                raw_value = shared_strings[shared_index] if 0 <= shared_index < len(shared_strings) else raw_value
+                            except (TypeError, ValueError):
+                                pass
+                        values.append(str(raw_value).strip())
+                    if values:
+                        lines.append(" | ".join(values))
+                    if len(lines) >= 200:
+                        return "\n".join(lines)
+    except zipfile.BadZipFile:
+        return ""
+    except Exception:
+        app.logger.exception("No se pudo extraer texto del spreadsheet como archivo ZIP estructurado")
+        return ""
+    return "\n".join(lines)
+
+
 def extract_text_from_document_bytes(file_bytes, filename):
     extension = os.path.splitext((filename or "").lower())[1]
     if extension == ".pdf":
@@ -1687,14 +1751,30 @@ def extract_text_from_document_bytes(file_bytes, filename):
         except UnicodeDecodeError:
             return file_bytes.decode("latin-1", errors="ignore")
     if extension in {".xlsx", ".xls"}:
-        workbook = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
-        lines = []
-        for sheet in workbook.worksheets[:3]:
-            for row in sheet.iter_rows(values_only=True):
-                values = [str(cell).strip() for cell in row if cell not in (None, "")]
-                if values:
-                    lines.append(" | ".join(values))
-        return "\n".join(lines)
+        try:
+            workbook = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+            lines = []
+            for sheet in workbook.worksheets[:3]:
+                for row in sheet.iter_rows(values_only=True):
+                    values = [str(cell).strip() for cell in row if cell not in (None, "")]
+                    if values:
+                        lines.append(" | ".join(values))
+                    if len(lines) >= 200:
+                        return "\n".join(lines)
+            return "\n".join(lines)
+        except Exception:
+            app.logger.warning(
+                "Fallo leyendo spreadsheet %s con openpyxl. Se intenta extracción degradada.",
+                filename,
+                exc_info=True,
+            )
+            fallback_text = extract_text_from_spreadsheet_archive(file_bytes)
+            if fallback_text.strip():
+                return fallback_text
+            try:
+                return file_bytes.decode("latin-1", errors="ignore")[:12000]
+            except Exception:
+                return ""
     return ""
 
 
