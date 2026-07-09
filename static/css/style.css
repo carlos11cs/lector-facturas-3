@@ -666,6 +666,35 @@ h1 {
   white-space: nowrap;
 }
 
+.archive-status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.archive-status-pill.pending {
+  background: rgba(34, 124, 101, 0.1);
+  color: var(--accent-strong);
+}
+
+.archive-status-pill.paid {
+  background: rgba(34, 124, 101, 0.14);
+  color: #1f6b53;
+}
+
+.archive-status-pill.overdue {
+  background: rgba(198, 40, 40, 0.12);
+  color: #b42318;
+}
+
+.archive-status-pill.untracked {
+  background: rgba(96, 108, 122, 0.12);
+  color: #475467;
+}
+
 .auth-page {
   min-height: 100vh;
   background: var(--background);

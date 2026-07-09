@@ -1217,6 +1217,9 @@
               <h2>Archivo</h2>
               <p>Consulta el histórico operativo del periodo cargado por proveedor, trabajador, banco, cliente o mes sin necesidad de conservar el PDF.</p>
             </div>
+            <div class="panel-actions">
+              <button id="archiveExportBtn" class="button ghost" type="button">Exportar CSV</button>
+            </div>
           </div>
           <div class="report-form archive-filters">
             <div class="field">
@@ -1242,6 +1245,22 @@
                 <option value="counterparty">Tercero</option>
                 <option value="month">Mes</option>
                 <option value="type">Tipo documental</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="archiveMonthFilter">Mes</label>
+              <select id="archiveMonthFilter">
+                <option value="all">Todos</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="archiveStatusFilter">Estado</label>
+              <select id="archiveStatusFilter">
+                <option value="all">Todos</option>
+                <option value="pending">Pendientes</option>
+                <option value="paid">Pagados / cobrados</option>
+                <option value="overdue">Atrasados</option>
+                <option value="untracked">Sin seguimiento</option>
               </select>
             </div>
           </div>
@@ -1271,6 +1290,7 @@
                 <tr>
                   <th>Grupo</th>
                   <th>Tipo principal</th>
+                  <th>Estado</th>
                   <th>Meses</th>
                   <th>Registros</th>
                   <th>Base (€)</th>

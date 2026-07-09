@@ -1255,6 +1255,9 @@ const incomeSearchInput = document.getElementById("incomeSearchInput");
 const archiveSearchInput = document.getElementById("archiveSearchInput");
 const archiveTypeFilter = document.getElementById("archiveTypeFilter");
 const archiveGroupBy = document.getElementById("archiveGroupBy");
+const archiveMonthFilter = document.getElementById("archiveMonthFilter");
+const archiveStatusFilter = document.getElementById("archiveStatusFilter");
+const archiveExportBtn = document.getElementById("archiveExportBtn");
 const archiveTableBody = document.querySelector("#archiveTable tbody");
 const archiveEmpty = document.getElementById("archiveEmpty");
 const archiveSummaryCount = document.getElementById("archiveSummaryCount");
@@ -1744,6 +1747,150 @@ function formatArchiveMonthLabel(dateValue, monthValue = null, yearValue = null)
   return "Sin periodo";
 }
 
+function getArchiveRecordStatus(paymentDates, completedDates) {
+  const dates = normalizePaymentDateList(paymentDates);
+  if (!dates.length) {
+    return "untracked";
+  }
+  const completed = new Set(normalizePaymentDateList(completedDates));
+  if (dates.every((value) => completed.has(value))) {
+    return "paid";
+  }
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const pendingDates = dates.filter((value) => !completed.has(value));
+  if (pendingDates.some((value) => value < todayIso)) {
+    return "overdue";
+  }
+  return "pending";
+}
+
+function archiveStatusLabel(status) {
+  const labels = {
+    pending: "Pendiente",
+    paid: "Pagado",
+    overdue: "Atrasado",
+    untracked: "Sin seguimiento",
+  };
+  return labels[status] || "Sin seguimiento";
+}
+
+function getArchiveGroupStatusMeta(records) {
+  const counts = {
+    pending: 0,
+    paid: 0,
+    overdue: 0,
+    untracked: 0,
+  };
+  (records || []).forEach((record) => {
+    const status = counts[record.status] !== undefined ? record.status : "untracked";
+    counts[status] += 1;
+  });
+  const activeStatuses = Object.entries(counts).filter(([, count]) => count > 0);
+  if (!activeStatuses.length) {
+    return {
+      key: "untracked",
+      label: archiveStatusLabel("untracked"),
+      breakdown: "",
+    };
+  }
+  if (activeStatuses.length === 1) {
+    const [status, count] = activeStatuses[0];
+    return {
+      key: status,
+      label: archiveStatusLabel(status),
+      breakdown: `${count} registro(s)`,
+    };
+  }
+  if (counts.overdue > 0) {
+    return {
+      key: "overdue",
+      label: "Mixto con atrasos",
+      breakdown: `Atrasados: ${counts.overdue}, pendientes: ${counts.pending}, pagados: ${counts.paid}, sin seguimiento: ${counts.untracked}`,
+    };
+  }
+  if (counts.pending > 0) {
+    return {
+      key: "pending",
+      label: "Mixto pendiente",
+      breakdown: `Pendientes: ${counts.pending}, pagados: ${counts.paid}, sin seguimiento: ${counts.untracked}`,
+    };
+  }
+  if (counts.paid > 0) {
+    return {
+      key: "paid",
+      label: "Mixto cerrado",
+      breakdown: `Pagados: ${counts.paid}, sin seguimiento: ${counts.untracked}`,
+    };
+  }
+  return {
+    key: "untracked",
+    label: "Mixto sin seguimiento",
+    breakdown: `Sin seguimiento: ${counts.untracked}`,
+  };
+}
+
+function buildArchiveCsv(records) {
+  const rows = [
+    ["Tipo", "Estado", "Tercero", "Concepto", "Fecha", "Mes", "Base", "IVA", "Total"],
+    ...records.map((record) => [
+      formatArchiveRecordType(record.type),
+      archiveStatusLabel(record.status),
+      record.counterparty || "",
+      record.concept || "",
+      record.date || "",
+      record.monthLabel || "",
+      (Number(record.base) || 0).toFixed(2),
+      (Number(record.vat) || 0).toFixed(2),
+      (Number(record.total) || 0).toFixed(2),
+    ]),
+  ];
+  return rows
+    .map((row) =>
+      row
+        .map((value) => `"${String(value ?? "").replace(/"/g, '""')}"`)
+        .join(";")
+    )
+    .join("\n");
+}
+
+function exportArchiveCsv() {
+  const records = getArchiveFilteredRecords();
+  if (!records.length) {
+    alert("No hay registros en el archivo para exportar.");
+    return;
+  }
+  const csv = buildArchiveCsv(records);
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const href = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const { month, year } = getSelectedMonthYear();
+  link.href = href;
+  link.download = `archivo_ledged_${year || "periodo"}_${month || "00"}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(href);
+}
+
+function syncArchiveMonthFilter() {
+  if (!archiveMonthFilter) {
+    return;
+  }
+  const selectedValue = archiveMonthFilter.value || "all";
+  const records = buildArchiveRecords();
+  const labels = Array.from(new Set(records.map((record) => record.monthLabel).filter(Boolean))).sort(
+    (a, b) => a.localeCompare(b, "es")
+  );
+  archiveMonthFilter.innerHTML = '<option value="all">Todos</option>';
+  labels.forEach((label) => {
+    const option = document.createElement("option");
+    option.value = label;
+    option.textContent = label;
+    archiveMonthFilter.appendChild(option);
+  });
+  archiveMonthFilter.value = labels.includes(selectedValue) ? selectedValue : "all";
+}
+
 function buildArchiveRecords() {
   const expenseInvoices = (currentInvoices || []).map((invoice) => ({
     type: "expense_invoice",
@@ -1756,6 +1903,10 @@ function buildArchiveRecords() {
     total: Number(invoice.total_amount) || 0,
     searchKey: invoice.supplier || "",
     subview: "received",
+    status: getArchiveRecordStatus(
+      getInvoicePaymentDates(invoice),
+      invoice.payment_completed_dates
+    ),
   }));
   const noInvoiceRecords = (currentNoInvoiceExpenses || []).map((expense) => {
     let type = "adjustment";
@@ -1789,6 +1940,10 @@ function buildArchiveRecords() {
             : type === "loan"
               ? "financing"
               : "adjustments",
+      status: getArchiveRecordStatus(
+        getNoInvoicePaymentDates(expense),
+        expense.payment_completed_dates
+      ),
     };
   });
   const loanRecords = (currentLoanInstallments || []).map((installment) => ({
@@ -1802,6 +1957,7 @@ function buildArchiveRecords() {
     total: Number(installment.total_amount) || 0,
     searchKey: installment.bank_name || installment.concept || "",
     subview: "financing",
+    status: getArchiveRecordStatus([installment.payment_date], installment.payment_completed_dates),
   }));
   const incomeInvoiceRecords = (currentIncomeInvoices || []).map((invoice) => ({
     type: "income_invoice",
@@ -1814,6 +1970,10 @@ function buildArchiveRecords() {
     total: Number(invoice.total_amount) || 0,
     searchKey: invoice.client || "",
     section: "income",
+    status: getArchiveRecordStatus(
+      getIncomeInvoicePaymentDates(invoice),
+      invoice.payment_completed_dates
+    ),
   }));
   const manualIncomeRecords = (currentBillingEntries || []).map((entry) => ({
     type: "manual_income",
@@ -1826,6 +1986,7 @@ function buildArchiveRecords() {
     total: Number(entry.total) || 0,
     searchKey: entry.concept || "",
     section: "income",
+    status: "untracked",
   }));
   currentArchiveRecords = [
     ...expenseInvoices,
@@ -1840,9 +2001,17 @@ function buildArchiveRecords() {
 function getArchiveFilteredRecords() {
   const searchTerm = archiveSearchInput?.value || "";
   const selectedType = archiveTypeFilter?.value || "all";
+  const selectedMonth = archiveMonthFilter?.value || "all";
+  const selectedStatus = archiveStatusFilter?.value || "all";
   const source = buildArchiveRecords();
   return source.filter((record) => {
     if (selectedType !== "all" && record.type !== selectedType) {
+      return false;
+    }
+    if (selectedMonth !== "all" && record.monthLabel !== selectedMonth) {
+      return false;
+    }
+    if (selectedStatus !== "all" && record.status !== selectedStatus) {
       return false;
     }
     return recordMatchesSearch(
@@ -1908,6 +2077,7 @@ function renderArchive() {
   if (!archiveTableBody || !archiveEmpty) {
     return;
   }
+  syncArchiveMonthFilter();
   const filteredRecords = getArchiveFilteredRecords();
   const groupMode = archiveGroupBy?.value || "counterparty";
   const grouped = new Map();
@@ -1987,6 +2157,16 @@ function renderArchive() {
     const monthsTd = document.createElement("td");
     monthsTd.textContent = Array.from(group.months).join(", ");
 
+    const statusTd = document.createElement("td");
+    const statusMeta = getArchiveGroupStatusMeta(group.records);
+    const statusPill = document.createElement("span");
+    statusPill.className = `archive-status-pill ${statusMeta.key}`;
+    statusPill.textContent = statusMeta.label;
+    if (statusMeta.breakdown) {
+      statusPill.title = statusMeta.breakdown;
+    }
+    statusTd.appendChild(statusPill);
+
     const countTd = document.createElement("td");
     countTd.textContent = String(group.count);
 
@@ -2009,6 +2189,7 @@ function renderArchive() {
 
     tr.appendChild(labelTd);
     tr.appendChild(typeTd);
+    tr.appendChild(statusTd);
     tr.appendChild(monthsTd);
     tr.appendChild(countTd);
     tr.appendChild(baseTd);
@@ -10379,11 +10560,16 @@ function bindEvents() {
   [
     [archiveTypeFilter, renderArchive],
     [archiveGroupBy, renderArchive],
+    [archiveMonthFilter, renderArchive],
+    [archiveStatusFilter, renderArchive],
   ].forEach(([input, handler]) => {
     if (input) {
       input.addEventListener("change", handler);
     }
   });
+  if (archiveExportBtn) {
+    archiveExportBtn.addEventListener("click", exportArchiveCsv);
+  }
   const selectFilesBtn = document.getElementById("selectFiles");
   const selectFolderBtn = document.getElementById("selectFolder");
   const incomeSelectFilesBtn = document.getElementById("incomeSelectFiles");
