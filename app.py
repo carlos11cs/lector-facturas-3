@@ -8403,6 +8403,7 @@ def list_no_invoice_expenses():
                 no_invoice_table.c.expense_date,
                 no_invoice_table.c.payment_date,
                 no_invoice_table.c.payment_dates,
+                no_invoice_table.c.payment_completed_dates,
                 no_invoice_table.c.concept,
                 no_invoice_table.c.amount,
                 no_invoice_table.c.interest_amount,
