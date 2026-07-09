@@ -1299,7 +1299,7 @@ def normalize_entity_name(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower())
 
 
-def get_company_names(company_id: int, conn) -> list:
+def get_company_names_for_supplier_check(company_id: int, conn) -> list:
     if not company_id:
         return []
     row = conn.execute(
@@ -1318,7 +1318,7 @@ def is_supplier_same_as_company(supplier: str, company_id: int, conn) -> bool:
     normalized_supplier = normalize_entity_name(supplier)
     if not normalized_supplier:
         return False
-    for name in get_company_names(company_id, conn):
+    for name in get_company_names_for_supplier_check(company_id, conn):
         if normalize_entity_name(name) == normalized_supplier:
             return True
     return False
@@ -2265,7 +2265,9 @@ def serialize_document_batch(row):
     }
 
 
-def get_company_names(conn, company_id):
+def get_company_names_for_analysis(conn, company_id):
+    if not conn or not company_id:
+        return []
     row = conn.execute(
         select(companies_table.c.display_name, companies_table.c.legal_name).where(
             companies_table.c.id == company_id
@@ -4016,35 +4018,90 @@ def _fetch_company_fiscal_profile(conn, company_id):
     ).mappings().first()
 
 
-def _build_tax_model_metrics(user_id, company_id, periods, conn):
-    income_base = 0.0
-    income_vat = 0.0
-    expense_base = 0.0
-    expense_vat = 0.0
-    withholding_111 = 0.0
-    withholding_115 = 0.0
+def _split_amount_across_dates(total_amount, payment_dates):
+    normalized_dates = parse_payment_dates(payment_dates)
+    if not normalized_dates:
+        return []
+    total_amount = round(float(total_amount or 0), 2)
+    base_share = round(total_amount / len(normalized_dates), 2)
+    scheduled = [base_share for _ in normalized_dates]
+    diff = round(total_amount - sum(scheduled), 2)
+    index = 0
+    while abs(diff) >= 0.01 and scheduled:
+        step = 0.01 if diff > 0 else -0.01
+        scheduled[index] = round(scheduled[index] + step, 2)
+        diff = round(diff - step, 2)
+        index = (index + 1) % len(scheduled)
+    return list(zip(normalized_dates, scheduled))
+
+
+def _sum_amount_for_period_dates(total_amount, payment_dates, period_prefixes):
+    scheduled = _split_amount_across_dates(total_amount, payment_dates)
+    if not scheduled:
+        return 0.0
+    return round(
+        sum(
+            amount
+            for scheduled_date, amount in scheduled
+            if any(str(scheduled_date).startswith(prefix) for prefix in period_prefixes)
+        ),
+        2,
+    )
+
+
+def _build_financial_metrics(user_id, company_id, periods, conn):
+    period_prefixes = [f"{period_year}-{period_month:02d}" for period_year, period_month in periods]
+    daily_expense_totals = {}
+    supplier_totals = {}
+
+    metrics = {
+        "income_base": 0.0,
+        "income_vat": 0.0,
+        "income_gross_total": 0.0,
+        "expense_base": 0.0,
+        "expense_vat": 0.0,
+        "expense_gross_total": 0.0,
+        "withholding_111": 0.0,
+        "withholding_115": 0.0,
+        "invoice_expenses": 0.0,
+        "payroll_expenses": 0.0,
+        "other_operating_expenses": 0.0,
+        "amortization_expenses": 0.0,
+        "loan_interest": 0.0,
+        "supplier_totals": supplier_totals,
+        "daily_expense_totals": daily_expense_totals,
+    }
 
     for period_year, period_month in periods:
         prefix = f"{period_year}-{period_month:02d}"
         invoice_rows = conn.execute(
             select(
+                invoices_table.c.invoice_date,
+                invoices_table.c.supplier,
                 invoices_table.c.base_amount,
                 invoices_table.c.total_amount,
                 invoices_table.c.vat_deductible,
                 invoices_table.c.vat_amount,
                 invoices_table.c.expense_category,
-                invoices_table.c.tax_model_targets,
-                invoices_table.c.expense_family,
-                invoices_table.c.pnl_bucket,
             )
             .where(invoices_table.c.user_id == user_id)
             .where(invoices_table.c.company_id == company_id)
             .where(invoices_table.c.invoice_date.like(f"{prefix}%"))
         ).mappings().all()
         for row in invoice_rows:
-            expense_base += get_invoice_deductible_amount(row)
+            gross_total = float(row.get("total_amount") or 0)
+            deductible_amount = get_invoice_deductible_amount(row)
+            metrics["expense_gross_total"] += gross_total
+            metrics["expense_base"] += deductible_amount
+            metrics["invoice_expenses"] += deductible_amount
             if row.get("expense_category") != "non_deductible" and row.get("vat_deductible") is not False:
-                expense_vat += float(row["vat_amount"] or 0)
+                metrics["expense_vat"] += float(row.get("vat_amount") or 0)
+            supplier_name = (row.get("supplier") or "Sin proveedor").strip() or "Sin proveedor"
+            supplier_totals[supplier_name] = supplier_totals.get(supplier_name, 0.0) + gross_total
+            invoice_date = normalize_date(row.get("invoice_date"))
+            if invoice_date and invoice_date.startswith(prefix):
+                invoice_day = int(invoice_date[-2:])
+                daily_expense_totals[invoice_day] = daily_expense_totals.get(invoice_day, 0.0) + gross_total
 
         no_invoice_rows = conn.execute(
             select(
@@ -4060,6 +4117,10 @@ def _build_tax_model_metrics(user_id, company_id, periods, conn):
                 no_invoice_table.c.expense_subtype,
                 no_invoice_table.c.pnl_bucket,
                 no_invoice_table.c.tax_model_targets,
+                no_invoice_table.c.expense_date,
+                no_invoice_table.c.payment_date,
+                no_invoice_table.c.payment_dates,
+                no_invoice_table.c.concept,
             )
             .where(no_invoice_table.c.user_id == user_id)
             .where(
@@ -4069,18 +4130,47 @@ def _build_tax_model_metrics(user_id, company_id, periods, conn):
             .where(no_invoice_table.c.expense_date.like(f"{prefix}%"))
         ).mappings().all()
         for row in no_invoice_rows:
+            gross_total = float(row.get("amount") or 0)
+            deductible_amount = get_no_invoice_deductible_amount(row)
             expense_type = row.get("expense_type")
             tax_targets = parse_tax_model_targets(row.get("tax_model_targets"))
             withholding_amount = float(row.get("withholding_amount") or 0)
+            payment_dates = parse_payment_dates(row.get("payment_dates"))
+            if not payment_dates:
+                fallback_date = normalize_date(row.get("payment_date")) or normalize_date(row.get("expense_date"))
+                payment_dates = [fallback_date] if fallback_date else []
             if withholding_amount > 0:
-                if "115" in tax_targets:
-                    withholding_115 += withholding_amount
-                elif "111" in tax_targets:
-                    withholding_111 += withholding_amount
+                amount_in_selected_period = _sum_amount_for_period_dates(
+                    withholding_amount,
+                    payment_dates,
+                    period_prefixes,
+                )
+                if amount_in_selected_period > 0:
+                    if "115" in tax_targets:
+                        metrics["withholding_115"] += amount_in_selected_period
+                    elif "111" in tax_targets:
+                        metrics["withholding_111"] += amount_in_selected_period
 
-            expense_base += get_no_invoice_deductible_amount(row)
+            metrics["expense_gross_total"] += gross_total
+            metrics["expense_base"] += deductible_amount
             if row.get("vat_deductible"):
-                expense_vat += float(row.get("vat_amount") or 0)
+                metrics["expense_vat"] += float(row.get("vat_amount") or 0)
+
+            if expense_type in {"nomina", "seguridad_social"}:
+                metrics["payroll_expenses"] += deductible_amount
+            elif expense_type == "amortizacion":
+                metrics["amortization_expenses"] += deductible_amount
+            elif expense_type == "prestamo":
+                metrics["loan_interest"] += deductible_amount
+            else:
+                metrics["other_operating_expenses"] += deductible_amount
+
+            expense_date = normalize_date(row.get("expense_date"))
+            if expense_date and expense_date.startswith(prefix):
+                expense_day = int(expense_date[-2:])
+                daily_expense_totals[expense_day] = daily_expense_totals.get(expense_day, 0.0) + gross_total
+            supplier_name = (row.get("concept") or expense_type or "Sin concepto").strip() or "Sin concepto"
+            supplier_totals[supplier_name] = supplier_totals.get(supplier_name, 0.0) + gross_total
 
         loan_rows = conn.execute(
             select(loan_installments_table.c.interest_amount)
@@ -4089,7 +4179,9 @@ def _build_tax_model_metrics(user_id, company_id, periods, conn):
             .where(loan_installments_table.c.payment_date.like(f"{prefix}%"))
         ).mappings().all()
         for row in loan_rows:
-            expense_base += float(row.get("interest_amount") or 0)
+            interest_amount = float(row.get("interest_amount") or 0)
+            metrics["expense_base"] += interest_amount
+            metrics["loan_interest"] += interest_amount
 
         income_invoice_rows = conn.execute(
             select(income_invoices_table.c.base_amount, income_invoices_table.c.vat_amount)
@@ -4098,8 +4190,11 @@ def _build_tax_model_metrics(user_id, company_id, periods, conn):
             .where(income_invoices_table.c.invoice_date.like(f"{prefix}%"))
         ).mappings().all()
         for row in income_invoice_rows:
-            income_base += float(row.get("base_amount") or 0)
-            income_vat += float(row.get("vat_amount") or 0)
+            base_amount = float(row.get("base_amount") or 0)
+            vat_amount = float(row.get("vat_amount") or 0)
+            metrics["income_base"] += base_amount
+            metrics["income_vat"] += vat_amount
+            metrics["income_gross_total"] += base_amount + vat_amount
 
         billing_rows = conn.execute(
             select(
@@ -4112,24 +4207,53 @@ def _build_tax_model_metrics(user_id, company_id, periods, conn):
             .where(facturacion_table.c.mes == period_month)
         ).mappings().all()
         for row in billing_rows:
-            income_base += float(row.get("base_facturada") or 0)
-            income_vat += float(row.get("iva_repercutido") or 0)
+            base_amount = float(row.get("base_facturada") or 0)
+            vat_amount = float(row.get("iva_repercutido") or 0)
+            metrics["income_base"] += base_amount
+            metrics["income_vat"] += vat_amount
+            metrics["income_gross_total"] += base_amount + vat_amount
 
-    net_result = round(income_base - expense_base, 2)
-    vat_result = round(income_vat - expense_vat, 2)
+    metrics["income_base"] = round(metrics["income_base"], 2)
+    metrics["income_vat"] = round(metrics["income_vat"], 2)
+    metrics["income_gross_total"] = round(metrics["income_gross_total"], 2)
+    metrics["expense_base"] = round(metrics["expense_base"], 2)
+    metrics["expense_vat"] = round(metrics["expense_vat"], 2)
+    metrics["expense_gross_total"] = round(metrics["expense_gross_total"], 2)
+    metrics["invoice_expenses"] = round(metrics["invoice_expenses"], 2)
+    metrics["payroll_expenses"] = round(metrics["payroll_expenses"], 2)
+    metrics["other_operating_expenses"] = round(metrics["other_operating_expenses"], 2)
+    metrics["amortization_expenses"] = round(metrics["amortization_expenses"], 2)
+    metrics["loan_interest"] = round(metrics["loan_interest"], 2)
+    metrics["withholding_111"] = round(metrics["withholding_111"], 2)
+    metrics["withholding_115"] = round(metrics["withholding_115"], 2)
+    metrics["net_result"] = round(metrics["income_base"] - metrics["expense_base"], 2)
+    metrics["vat_result"] = round(metrics["income_vat"] - metrics["expense_vat"], 2)
+    metrics["model_130_estimate"] = round(max(metrics["net_result"], 0) * 0.20, 2)
+    metrics["corporate_tax_estimate"] = round(max(metrics["net_result"], 0) * 0.25, 2)
+    metrics["model_202_estimate"] = round(max(metrics["net_result"], 0) * 0.18, 2)
+    metrics["supplier_totals"] = {
+        key: round(value, 2) for key, value in sorted(supplier_totals.items(), key=lambda item: item[0])
+    }
+    metrics["daily_expense_totals"] = {
+        day: round(value, 2) for day, value in sorted(daily_expense_totals.items())
+    }
+    return metrics
 
+
+def _build_tax_model_metrics(user_id, company_id, periods, conn):
+    metrics = _build_financial_metrics(user_id, company_id, periods, conn)
     return {
-        "income_base": round(income_base, 2),
-        "income_vat": round(income_vat, 2),
-        "expense_base": round(expense_base, 2),
-        "expense_vat": round(expense_vat, 2),
-        "net_result": net_result,
-        "vat_result": vat_result,
-        "withholding_111": round(withholding_111, 2),
-        "withholding_115": round(withholding_115, 2),
-        "model_130_estimate": round(max(net_result, 0) * 0.20, 2),
-        "corporate_tax_estimate": round(max(net_result, 0) * 0.25, 2),
-        "model_202_estimate": round(max(net_result, 0) * 0.18, 2),
+        "income_base": metrics["income_base"],
+        "income_vat": metrics["income_vat"],
+        "expense_base": metrics["expense_base"],
+        "expense_vat": metrics["expense_vat"],
+        "net_result": metrics["net_result"],
+        "vat_result": metrics["vat_result"],
+        "withholding_111": metrics["withholding_111"],
+        "withholding_115": metrics["withholding_115"],
+        "model_130_estimate": metrics["model_130_estimate"],
+        "corporate_tax_estimate": metrics["corporate_tax_estimate"],
+        "model_202_estimate": metrics["model_202_estimate"],
     }
 
 
@@ -4336,96 +4460,21 @@ def _build_fiscal_calendar_items(conn, user_id, company_id, target_month, target
 
 
 def _build_report_totals(user_id, company_id, months, year):
-    income_base = 0.0
-    income_vat = 0.0
-    expense_base = 0.0
-    expense_vat = 0.0
     with engine.connect() as conn:
-        for month in months:
-            prefix = f"{year}-{month:02d}"
-            invoice_rows = conn.execute(
-                select(
-                    invoices_table.c.base_amount,
-                    invoices_table.c.total_amount,
-                    invoices_table.c.vat_deductible,
-                    invoices_table.c.vat_amount,
-                    invoices_table.c.expense_category,
-                    invoices_table.c.tax_model_targets,
-                )
-                .where(invoices_table.c.user_id == user_id)
-                .where(invoices_table.c.company_id == company_id)
-                .where(invoices_table.c.invoice_date.like(f"{prefix}%"))
-            ).mappings().all()
-            for row in invoice_rows:
-                expense_base += get_invoice_deductible_amount(row)
-                if row.get("expense_category") != "non_deductible" and row.get("vat_deductible") is not False:
-                    expense_vat += float(row["vat_amount"] or 0)
-
-            no_invoice_rows = conn.execute(
-                select(
-                    no_invoice_table.c.amount,
-                    no_invoice_table.c.deductible,
-                    no_invoice_table.c.expense_type,
-                    no_invoice_table.c.interest_amount,
-                    no_invoice_table.c.vat_deductible,
-                    no_invoice_table.c.vat_rate,
-                    no_invoice_table.c.vat_amount,
-                    no_invoice_table.c.base_amount,
-                    no_invoice_table.c.expense_family,
-                    no_invoice_table.c.tax_model_targets,
-                )
-                .where(no_invoice_table.c.user_id == user_id)
-                .where(
-                    (no_invoice_table.c.company_id == company_id)
-                    | (no_invoice_table.c.company_id.is_(None))
-                )
-                .where(no_invoice_table.c.expense_date.like(f"{prefix}%"))
-            ).mappings().all()
-            for row in no_invoice_rows:
-                expense_base += get_no_invoice_deductible_amount(row)
-                if row.get("vat_deductible"):
-                    expense_vat += float(row.get("vat_amount") or 0)
-
-            loan_rows = conn.execute(
-                select(loan_installments_table.c.interest_amount)
-                .where(loan_installments_table.c.user_id == user_id)
-                .where(loan_installments_table.c.company_id == company_id)
-                .where(loan_installments_table.c.payment_date.like(f"{prefix}%"))
-            ).mappings().all()
-            for row in loan_rows:
-                expense_base += float(row.get("interest_amount") or 0)
-
-            income_invoice_rows = conn.execute(
-                select(income_invoices_table.c.base_amount, income_invoices_table.c.vat_amount)
-                .where(income_invoices_table.c.user_id == user_id)
-                .where(income_invoices_table.c.company_id == company_id)
-                .where(income_invoices_table.c.invoice_date.like(f"{prefix}%"))
-            ).mappings().all()
-            for row in income_invoice_rows:
-                income_base += float(row["base_amount"] or 0)
-                income_vat += float(row["vat_amount"] or 0)
-
-            billing_rows = conn.execute(
-                select(
-                    facturacion_table.c.base_facturada,
-                    facturacion_table.c.iva_repercutido,
-                )
-                .where(facturacion_table.c.user_id == user_id)
-                .where(facturacion_table.c.company_id == company_id)
-                .where(facturacion_table.c.anio == year)
-                .where(facturacion_table.c.mes == month)
-            ).mappings().all()
-            for row in billing_rows:
-                income_base += float(row["base_facturada"] or 0)
-                income_vat += float(row["iva_repercutido"] or 0)
+        metrics = _build_financial_metrics(
+            user_id,
+            company_id,
+            _periods_for_months(year, months),
+            conn,
+        )
 
     return {
-        "income_base": round(income_base, 2),
-        "income_vat": round(income_vat, 2),
-        "expense_base": round(expense_base, 2),
-        "expense_vat": round(expense_vat, 2),
-        "net_result": round(income_base - expense_base, 2),
-        "vat_result": round(income_vat - expense_vat, 2),
+        "income_base": metrics["income_base"],
+        "income_vat": metrics["income_vat"],
+        "expense_base": metrics["expense_base"],
+        "expense_vat": metrics["expense_vat"],
+        "net_result": metrics["net_result"],
+        "vat_result": metrics["vat_result"],
     }
 
 
@@ -5088,7 +5137,7 @@ def upload_document_center_batch():
     inserted_documents = []
 
     with engine.begin() as conn:
-        company_names = get_company_names(conn, company_id)
+        company_names = get_company_names_for_analysis(conn, company_id)
         known_suppliers = fetch_known_suppliers(conn, data_owner_id, company_id)
         batch_result = conn.execute(
             document_batches_table.insert().values(
@@ -9684,6 +9733,48 @@ def accounting_integrations_export_package():
     )
 
 
+@app.route("/api/financial-metrics")
+def financial_metrics():
+    month = request.args.get("month", type=int)
+    year = request.args.get("year", type=int)
+    period = (request.args.get("period") or "monthly").strip().lower()
+    data_owner_id = get_data_owner_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    today = date.today()
+    month = month or today.month
+    year = year or today.year
+    if period not in {"monthly", "quarterly"}:
+        period = "monthly"
+
+    selected_months = _quarter_months_for_month(month) if period == "quarterly" else [month]
+    selected_periods = _periods_for_months(year, selected_months)
+    ytd_periods = _periods_for_months(year, range(1, month + 1))
+    full_year_periods = _periods_for_months(year, range(1, 13))
+
+    with engine.connect() as conn:
+        company = _fetch_company_fiscal_profile(conn, company_id)
+        if not company:
+            return jsonify({"ok": False, "errors": ["Empresa no encontrada."]}), 404
+        selected_metrics = _build_financial_metrics(data_owner_id, company_id, selected_periods, conn)
+        ytd_metrics = _build_financial_metrics(data_owner_id, company_id, ytd_periods, conn)
+        full_year_metrics = _build_financial_metrics(data_owner_id, company_id, full_year_periods, conn)
+
+    return jsonify(
+        {
+            "ok": True,
+            "companyType": company.get("company_type"),
+            "period": period,
+            "selectedMonths": selected_months,
+            "selected": selected_metrics,
+            "yearToDate": ytd_metrics,
+            "fullYear": full_year_metrics,
+        }
+    )
+
+
 @app.route("/api/summary")
 def summary():
     month = request.args.get("month", type=int)
@@ -9698,15 +9789,12 @@ def summary():
     year = year or today.year
 
     _, last_day = calendar.monthrange(year, month)
-    start = date(year, month, 1).isoformat()
-    end = date(year, month, last_day).isoformat()
+    month_prefix = f"{year}-{month:02d}"
 
     with engine.connect() as conn:
+        metrics = _build_financial_metrics(data_owner_id, company_id, [(year, month)], conn)
         rows = conn.execute(
             select(
-                invoices_table.c.invoice_date,
-                invoices_table.c.supplier,
-                invoices_table.c.total_amount,
                 invoices_table.c.expense_category,
                 invoices_table.c.vat_deductible,
                 invoices_table.c.vat_rate,
@@ -9716,28 +9804,23 @@ def summary():
             )
             .where(invoices_table.c.user_id == data_owner_id)
             .where(invoices_table.c.company_id == company_id)
-            .where(invoices_table.c.invoice_date.between(start, end))
-            .order_by(invoices_table.c.invoice_date)
+            .where(invoices_table.c.invoice_date.like(f"{month_prefix}%"))
+        ).mappings().all()
+        no_invoice_rows = conn.execute(
+            select(
+                no_invoice_table.c.vat_deductible,
+                no_invoice_table.c.vat_rate,
+                no_invoice_table.c.vat_amount,
+            )
+            .where(no_invoice_table.c.user_id == data_owner_id)
+            .where(no_invoice_table.c.company_id == company_id)
+            .where(no_invoice_table.c.expense_date.like(f"{month_prefix}%"))
         ).mappings().all()
 
     daily_totals = {day: 0.0 for day in range(1, last_day + 1)}
-    supplier_totals = {}
     vat_totals = {0: 0.0, 4: 0.0, 10: 0.0, 21: 0.0}
-    total_spent = 0.0
 
     for row in rows:
-        try:
-            row_date = date.fromisoformat(row["invoice_date"])
-        except ValueError:
-            continue
-        day = row_date.day
-        amount = float(row["total_amount"])
-        base_amount = float(row["base_amount"])
-        daily_totals[day] += amount
-        total_spent += amount
-
-        supplier = row["supplier"]
-        supplier_totals[supplier] = supplier_totals.get(supplier, 0.0) + amount
         if row.get("expense_category") != "non_deductible" and row.get("vat_deductible") is not False:
             breakdown = parse_vat_breakdown(row.get("vat_breakdown"))
             if breakdown:
@@ -9747,21 +9830,10 @@ def summary():
                     if rate in vat_totals:
                         vat_totals[rate] += vat_value
             else:
+                base_amount = float(row.get("base_amount") or 0)
                 vat_rate = int(row["vat_rate"])
                 vat_totals[vat_rate] += float(row.get("vat_amount") or base_amount * (vat_rate / 100))
 
-    with engine.connect() as conn:
-        no_invoice_rows = conn.execute(
-            select(
-                no_invoice_table.c.amount,
-                no_invoice_table.c.vat_deductible,
-                no_invoice_table.c.vat_rate,
-                no_invoice_table.c.vat_amount,
-            )
-            .where(no_invoice_table.c.user_id == data_owner_id)
-            .where(no_invoice_table.c.company_id == company_id)
-            .where(no_invoice_table.c.expense_date.between(start, end))
-        ).mappings().all()
     for row in no_invoice_rows:
         if not row.get("vat_deductible"):
             continue
@@ -9770,14 +9842,19 @@ def summary():
         if rate in vat_totals:
             vat_totals[rate] += vat_value
 
+    for day, amount in metrics["daily_expense_totals"].items():
+        day_number = int(day)
+        if 1 <= day_number <= last_day:
+            daily_totals[day_number] = round(float(amount or 0), 2)
+
     cumulative = []
     running = 0.0
     for day in range(1, last_day + 1):
         running += daily_totals[day]
         cumulative.append(round(running, 2))
 
-    suppliers = list(supplier_totals.keys())
-    supplier_values = [round(supplier_totals[name], 2) for name in suppliers]
+    suppliers = list(metrics["supplier_totals"].keys())
+    supplier_values = [round(metrics["supplier_totals"][name], 2) for name in suppliers]
 
     vat_total_deductible = round(sum(vat_totals.values()), 2)
 
@@ -9787,7 +9864,7 @@ def summary():
             "cumulative": cumulative,
             "suppliers": suppliers,
             "supplierTotals": supplier_values,
-            "totalSpent": round(total_spent, 2),
+            "totalSpent": metrics["expense_gross_total"],
             "vatTotals": {
                 "0": round(vat_totals[0], 2),
                 "4": round(vat_totals[4], 2),

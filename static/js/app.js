@@ -16,11 +16,13 @@ let currentLoanInstallments = [];
 let billingBaseTotal = 0;
 let currentSummary = null;
 let currentBillingSummary = null;
+let currentFinancialMetrics = null;
 let currentBillingEntries = [];
 let currentDeductibleExpenses = 0;
 let annualBillingBaseTotal = 0;
 let annualDeductibleExpenses = 0;
 let annualLoanInterestTotal = 0;
+let annualTaxEstimateTotal = 0;
 let pnlInvoices = [];
 let pnlNoInvoiceExpenses = [];
 let pnlLoanInstallments = [];
@@ -35,6 +37,7 @@ let currentBalanceManualData = {};
 let currentDocumentBatches = [];
 let currentDocumentCenterDocuments = [];
 let currentAccountingIntegrationSummary = null;
+let currentArchiveRecords = [];
 let selectedDocumentBatchId = "";
 let selectedDocumentCenterDocumentId = null;
 let companies = [];
@@ -345,8 +348,11 @@ function getBalanceAutoValues(netResult = null) {
   const autoValues = {
     bsAssetReceivables: getBalanceReceivablesEstimate(),
     bsAssetCash: getBalanceCashEstimate(),
+    bsAssetCurrentTax: getCurrentTaxAssetEstimate(),
     bsEquityResult: netResult !== null ? netResult : getBalanceInputValue("bsEquityResult"),
+    bsLiabShortTermDebt: getBalanceShortTermDebtEstimate(),
     bsLiabPayables: getBalancePayablesEstimate(),
+    bsLiabOtherCurrent: getOutstandingTaxLiabilitiesEstimate(),
   };
   return autoValues;
 }
@@ -491,6 +497,75 @@ function getNoInvoiceCashAmount(expense) {
   return Math.max((Number(expense.amount) || 0) - (Number(expense.withholding_amount) || 0), 0);
 }
 
+function sumCompletedScheduledAmount(totalAmount, paymentDates, completedDates) {
+  const dates = normalizePaymentDateList(paymentDates);
+  if (!dates.length) {
+    return 0;
+  }
+  const completed = new Set(normalizePaymentDateList(completedDates));
+  const amounts = splitScheduledAmounts(totalAmount, dates);
+  return dates.reduce((sum, paymentDate, index) => {
+    if (!completed.has(paymentDate)) {
+      return sum;
+    }
+    return sum + (Number(amounts[index]) || 0);
+  }, 0);
+}
+
+function getIncomeInvoicePaymentDates(invoice) {
+  const paymentDates = normalizePaymentDateList(invoice?.payment_dates);
+  if (paymentDates.length) {
+    return paymentDates;
+  }
+  if (invoice?.payment_date) {
+    return [invoice.payment_date];
+  }
+  if (invoice?.invoice_date) {
+    return [computePaymentDate(invoice.invoice_date, invoice.payment_date)];
+  }
+  return [];
+}
+
+function getOutstandingTaxLiabilitiesEstimate() {
+  return roundAmount(
+    (currentPayments?.items || []).reduce((sum, item) => {
+      if (item?.type !== "tax_obligation" || item?.calendar_impact !== "payment") {
+        return sum;
+      }
+      return sum + (Number(item.amount) || 0);
+    }, 0)
+  );
+}
+
+function getCurrentTaxAssetEstimate() {
+  return roundAmount(
+    (currentPayments?.items || []).reduce((sum, item) => {
+      if (item?.type !== "tax_obligation") {
+        return sum;
+      }
+      if (item.calendar_impact === "credit" || item.calendar_impact === "refund") {
+        return sum + (Number(item.amount) || 0);
+      }
+      return sum;
+    }, 0)
+  );
+}
+
+function getBalanceShortTermDebtEstimate() {
+  return roundAmount(
+    (currentLoanInstallments || []).reduce((sum, installment) => {
+      return (
+        sum +
+        sumOutstandingScheduledAmount(
+          Number(installment.total_amount) || 0,
+          normalizePaymentDateList([installment.payment_date]),
+          installment.payment_completed_dates
+        )
+      );
+    }, 0)
+  );
+}
+
 function sumOutstandingScheduledAmount(totalAmount, paymentDates, completedDates) {
   const dates = normalizePaymentDateList(paymentDates);
   if (!dates.length) {
@@ -542,7 +617,7 @@ function getBalanceReceivablesEstimate() {
         sum +
         sumOutstandingScheduledAmount(
           Number(invoice.total_amount) || 0,
-          normalizePaymentDateList(invoice.payment_dates),
+          getIncomeInvoicePaymentDates(invoice),
           invoice.payment_completed_dates
         )
       );
@@ -551,35 +626,48 @@ function getBalanceReceivablesEstimate() {
 }
 
 function getBalanceCashEstimate() {
-  const baseTotals = currentBillingSummary?.baseTotals || {};
-  const vatTotals = currentBillingSummary?.vatTotals || {};
-  const billingTreasury =
-    (Number(baseTotals["0"]) || 0) +
-    (Number(baseTotals["4"]) || 0) +
-    (Number(baseTotals["10"]) || 0) +
-    (Number(baseTotals["21"]) || 0) +
-    (Number(vatTotals["0"]) || 0) +
-    (Number(vatTotals["4"]) || 0) +
-    (Number(vatTotals["10"]) || 0) +
-    (Number(vatTotals["21"]) || 0);
   const incomeInvoicesTreasury = (currentIncomeInvoices || []).reduce(
-    (sum, invoice) => sum + (Number(invoice.total_amount) || 0),
+    (sum, invoice) =>
+      sum +
+      sumCompletedScheduledAmount(
+        Number(invoice.total_amount) || 0,
+        getIncomeInvoicePaymentDates(invoice),
+        invoice.payment_completed_dates
+      ),
     0
   );
   const invoiceOutflows = (currentInvoices || []).reduce(
-    (sum, invoice) => sum + (Number(invoice.total_amount) || 0),
+    (sum, invoice) =>
+      sum +
+      sumCompletedScheduledAmount(
+        Number(invoice.total_amount) || 0,
+        getInvoicePaymentDates(invoice),
+        invoice.payment_completed_dates
+      ),
     0
   );
   const noInvoiceOutflows = (currentNoInvoiceExpenses || []).reduce(
-    (sum, expense) => sum + getNoInvoiceCashAmount(expense),
+    (sum, expense) =>
+      sum +
+      sumCompletedScheduledAmount(
+        getNoInvoiceCashAmount(expense),
+        getNoInvoicePaymentDates(expense),
+        expense.payment_completed_dates
+      ),
     0
   );
   const loanOutflows = (currentLoanInstallments || []).reduce(
-    (sum, installment) => sum + (Number(installment.total_amount) || 0),
+    (sum, installment) =>
+      sum +
+      sumCompletedScheduledAmount(
+        Number(installment.total_amount) || 0,
+        normalizePaymentDateList([installment.payment_date]),
+        installment.payment_completed_dates
+      ),
     0
   );
   return roundAmount(
-    billingTreasury + incomeInvoicesTreasury - invoiceOutflows - noInvoiceOutflows - loanOutflows
+    incomeInvoicesTreasury - invoiceOutflows - noInvoiceOutflows - loanOutflows
   );
 }
 
@@ -644,6 +732,12 @@ function renderBalanceMissingInfo(netResult = null) {
     if (Math.abs(debtTotal) < 0.005) {
       missing.push("deudas a corto o largo plazo vinculadas a financiación");
     }
+  }
+
+  if ((currentBillingEntries || []).length) {
+    missing.push(
+      "cobros reales de la facturación manual, que hoy impacta en resultado pero no en tesorería ni clientes hasta que se registre su seguimiento de cobro"
+    );
   }
 
   if (!missing.length) {
@@ -1024,8 +1118,10 @@ const billingTotalInput = document.getElementById("billingTotalInput");
 const billingSaveBtn = document.getElementById("billingSaveBtn");
 const billingEntriesBody = document.querySelector("#billingEntriesTable tbody");
 const billingEntriesEmpty = document.getElementById("billingEntriesEmpty");
+const billingSearchInput = document.getElementById("billingSearchInput");
 const invoicesTableBody = document.querySelector("#invoicesTable tbody");
 const invoicesEmpty = document.getElementById("invoicesEmpty");
+const invoiceSearchInput = document.getElementById("invoiceSearchInput");
 const taxPeriodBadge = document.getElementById("taxPeriodBadge");
 const noInvoiceDate = document.getElementById("noInvoiceDate");
 const noInvoiceConcept = document.getElementById("noInvoiceConcept");
@@ -1046,6 +1142,7 @@ const noInvoiceDeductible = document.getElementById("noInvoiceDeductible");
 const noInvoiceSaveBtn = document.getElementById("noInvoiceSaveBtn");
 const noInvoiceTableBody = document.querySelector("#noInvoiceTable tbody");
 const noInvoiceEmpty = document.getElementById("noInvoiceEmpty");
+const noInvoiceSearchInput = document.getElementById("noInvoiceSearchInput");
 const loanConceptInput = document.getElementById("loanConceptInput");
 const loanPaymentDateInput = document.getElementById("loanPaymentDateInput");
 const loanTotalInput = document.getElementById("loanTotalInput");
@@ -1062,6 +1159,7 @@ const loanPlanPreviewEmpty = document.getElementById("loanPlanPreviewEmpty");
 const loanPlanSaveBtn = document.getElementById("loanPlanSaveBtn");
 const loanTableBody = document.querySelector("#loanTable tbody");
 const loanEmpty = document.getElementById("loanEmpty");
+const loanSearchInput = document.getElementById("loanSearchInput");
 const fileInput = document.getElementById("fileInput");
 const folderInput = document.getElementById("folderInput");
 const dropZone = document.getElementById("dropZone");
@@ -1153,6 +1251,16 @@ const incomeUploadTableBody = document.querySelector("#incomeUploadTable tbody")
 const incomeEmptyMessage = document.getElementById("incomeEmptyMessage");
 const incomeInvoicesTableBody = document.querySelector("#incomeInvoicesTable tbody");
 const incomeInvoicesEmpty = document.getElementById("incomeInvoicesEmpty");
+const incomeSearchInput = document.getElementById("incomeSearchInput");
+const archiveSearchInput = document.getElementById("archiveSearchInput");
+const archiveTypeFilter = document.getElementById("archiveTypeFilter");
+const archiveGroupBy = document.getElementById("archiveGroupBy");
+const archiveTableBody = document.querySelector("#archiveTable tbody");
+const archiveEmpty = document.getElementById("archiveEmpty");
+const archiveSummaryCount = document.getElementById("archiveSummaryCount");
+const archiveSummaryBase = document.getElementById("archiveSummaryBase");
+const archiveSummaryVat = document.getElementById("archiveSummaryVat");
+const archiveSummaryTotal = document.getElementById("archiveSummaryTotal");
 const reportYearSelect = document.getElementById("reportYearSelect");
 const reportQuarterSelect = document.getElementById("reportQuarterSelect");
 const reportStartMonthSelect = document.getElementById("reportStartMonthSelect");
@@ -1585,6 +1693,330 @@ function createExpenseCategorySelect(selected) {
 
 function formatNoInvoiceType(type) {
   return noInvoiceTypeLabels[type] || noInvoiceTypeLabels.otro;
+}
+
+function normalizeSearchText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function recordMatchesSearch(parts, searchTerm) {
+  const needle = normalizeSearchText(searchTerm);
+  if (!needle) {
+    return true;
+  }
+  const haystack = normalizeSearchText(
+    parts
+      .filter((part) => part !== null && part !== undefined)
+      .join(" ")
+  );
+  return haystack.includes(needle);
+}
+
+function formatArchiveRecordType(type) {
+  const labels = {
+    expense_invoice: "Factura proveedor",
+    payroll: "Personal",
+    rent: "Alquiler",
+    loan: "Financiación",
+    adjustment: "Otro ajuste",
+    income_invoice: "Factura emitida",
+    manual_income: "Facturación manual",
+  };
+  return labels[type] || type;
+}
+
+function formatArchiveMonthLabel(dateValue, monthValue = null, yearValue = null) {
+  if (dateValue) {
+    const raw = String(dateValue);
+    const year = raw.slice(0, 4);
+    const month = Number(raw.slice(5, 7));
+    if (year && month) {
+      return `${monthNames[month - 1]} ${year}`;
+    }
+  }
+  if (monthValue && yearValue) {
+    return `${monthNames[Number(monthValue) - 1]} ${yearValue}`;
+  }
+  return "Sin periodo";
+}
+
+function buildArchiveRecords() {
+  const expenseInvoices = (currentInvoices || []).map((invoice) => ({
+    type: "expense_invoice",
+    counterparty: invoice.supplier || "Proveedor pendiente",
+    concept: invoice.original_filename || invoice.supplier || "Factura proveedor",
+    monthLabel: formatArchiveMonthLabel(invoice.invoice_date),
+    date: invoice.invoice_date || "",
+    base: Number(invoice.base_amount) || 0,
+    vat: Number(invoice.vat_amount) || 0,
+    total: Number(invoice.total_amount) || 0,
+    searchKey: invoice.supplier || "",
+    subview: "received",
+  }));
+  const noInvoiceRecords = (currentNoInvoiceExpenses || []).map((expense) => {
+    let type = "adjustment";
+    if (["nomina", "seguridad_social"].includes(expense.expense_type)) {
+      type = "payroll";
+    } else if (["alquiler_local", "alquiler_cabina"].includes(expense.expense_type)) {
+      type = "rent";
+    } else if (expense.expense_type === "prestamo") {
+      type = "loan";
+    }
+    return {
+      type,
+      counterparty:
+        expense.payroll_employee_name ||
+        expense.concept ||
+        formatNoInvoiceType(expense.expense_type),
+      concept: expense.concept || formatNoInvoiceType(expense.expense_type),
+      monthLabel: formatArchiveMonthLabel(expense.expense_date),
+      date: expense.expense_date || "",
+      base: Number(
+        expense.base_amount_no_invoice ?? expense.base_amount ?? expense.amount
+      ) || 0,
+      vat: Number(expense.vat_amount_no_invoice ?? expense.vat_amount) || 0,
+      total: Number(expense.amount) || 0,
+      searchKey: expense.payroll_employee_name || expense.concept || "",
+      subview:
+        type === "payroll"
+          ? "payroll"
+          : type === "rent"
+            ? "rent"
+            : type === "loan"
+              ? "financing"
+              : "adjustments",
+    };
+  });
+  const loanRecords = (currentLoanInstallments || []).map((installment) => ({
+    type: "loan",
+    counterparty: installment.bank_name || installment.concept || "Entidad financiera",
+    concept: installment.concept || "Cuota préstamo",
+    monthLabel: formatArchiveMonthLabel(installment.payment_date),
+    date: installment.payment_date || "",
+    base: Number(installment.principal_amount) || 0,
+    vat: 0,
+    total: Number(installment.total_amount) || 0,
+    searchKey: installment.bank_name || installment.concept || "",
+    subview: "financing",
+  }));
+  const incomeInvoiceRecords = (currentIncomeInvoices || []).map((invoice) => ({
+    type: "income_invoice",
+    counterparty: invoice.client || "Cliente pendiente",
+    concept: invoice.original_filename || invoice.client || "Factura emitida",
+    monthLabel: formatArchiveMonthLabel(invoice.invoice_date),
+    date: invoice.invoice_date || "",
+    base: Number(invoice.base_amount) || 0,
+    vat: Number(invoice.vat_amount) || 0,
+    total: Number(invoice.total_amount) || 0,
+    searchKey: invoice.client || "",
+    section: "income",
+  }));
+  const manualIncomeRecords = (currentBillingEntries || []).map((entry) => ({
+    type: "manual_income",
+    counterparty: entry.concept || "Facturación manual",
+    concept: entry.concept || "Facturación manual",
+    monthLabel: formatArchiveMonthLabel(entry.invoice_date, entry.month, entry.year),
+    date: entry.invoice_date || `${entry.year}-${String(entry.month).padStart(2, "0")}-01`,
+    base: Number(entry.base) || 0,
+    vat: Number(entry.vatAmount) || 0,
+    total: Number(entry.total) || 0,
+    searchKey: entry.concept || "",
+    section: "income",
+  }));
+  currentArchiveRecords = [
+    ...expenseInvoices,
+    ...noInvoiceRecords,
+    ...loanRecords,
+    ...incomeInvoiceRecords,
+    ...manualIncomeRecords,
+  ];
+  return currentArchiveRecords;
+}
+
+function getArchiveFilteredRecords() {
+  const searchTerm = archiveSearchInput?.value || "";
+  const selectedType = archiveTypeFilter?.value || "all";
+  const source = buildArchiveRecords();
+  return source.filter((record) => {
+    if (selectedType !== "all" && record.type !== selectedType) {
+      return false;
+    }
+    return recordMatchesSearch(
+      [
+        record.counterparty,
+        record.concept,
+        record.monthLabel,
+        record.date,
+        record.base,
+        record.vat,
+        record.total,
+        formatArchiveRecordType(record.type),
+      ],
+      searchTerm
+    );
+  });
+}
+
+function applyArchiveDrilldown(group) {
+  if (!group || !group.records?.length) {
+    return;
+  }
+  const targetRecord = group.records[0];
+  if (targetRecord.type === "income_invoice") {
+    setActiveSection("income");
+    if (incomeSearchInput) {
+      incomeSearchInput.value = group.searchValue || targetRecord.searchKey || group.label;
+      renderIncomeInvoices(currentIncomeInvoices || []);
+    }
+    return;
+  }
+  if (targetRecord.type === "manual_income") {
+    setActiveSection("income");
+    if (billingSearchInput) {
+      billingSearchInput.value = group.searchValue || targetRecord.searchKey || group.label;
+      renderBillingEntries(currentBillingEntries || []);
+    }
+    return;
+  }
+  setActiveSection("expenses");
+  setExpenseSubview(targetRecord.subview || "adjustments");
+  if (targetRecord.type === "expense_invoice") {
+    if (invoiceSearchInput) {
+      invoiceSearchInput.value = group.searchValue || targetRecord.searchKey || group.label;
+      renderInvoices(currentInvoices || []);
+    }
+    return;
+  }
+  if (targetRecord.type === "loan") {
+    if (loanSearchInput) {
+      loanSearchInput.value = group.searchValue || targetRecord.searchKey || group.label;
+      renderLoanInstallments(currentLoanInstallments || []);
+    }
+    return;
+  }
+  if (noInvoiceSearchInput) {
+    noInvoiceSearchInput.value = group.searchValue || targetRecord.searchKey || group.label;
+    renderNoInvoiceExpenses(currentNoInvoiceExpenses || []);
+  }
+}
+
+function renderArchive() {
+  if (!archiveTableBody || !archiveEmpty) {
+    return;
+  }
+  const filteredRecords = getArchiveFilteredRecords();
+  const groupMode = archiveGroupBy?.value || "counterparty";
+  const grouped = new Map();
+
+  filteredRecords.forEach((record) => {
+    const groupLabel =
+      groupMode === "month"
+        ? record.monthLabel
+        : groupMode === "type"
+          ? formatArchiveRecordType(record.type)
+          : record.counterparty || "Sin tercero";
+    const groupKey =
+      groupMode === "type"
+        ? record.type
+        : normalizeSearchText(groupLabel);
+    if (!grouped.has(groupKey)) {
+      grouped.set(groupKey, {
+        label: groupLabel,
+        type: record.type,
+        types: new Set(),
+        months: new Set(),
+        base: 0,
+        vat: 0,
+        total: 0,
+        count: 0,
+        records: [],
+        searchValue:
+          groupMode === "month"
+            ? String(record.date || "").slice(0, 7)
+            : groupMode === "type"
+              ? ""
+              : record.searchKey || groupLabel,
+      });
+    }
+    const bucket = grouped.get(groupKey);
+    bucket.types.add(formatArchiveRecordType(record.type));
+    bucket.months.add(record.monthLabel);
+    bucket.base += Number(record.base) || 0;
+    bucket.vat += Number(record.vat) || 0;
+    bucket.total += Number(record.total) || 0;
+    bucket.count += 1;
+    bucket.records.push(record);
+  });
+
+  const rows = Array.from(grouped.values()).sort((a, b) => a.label.localeCompare(b.label, "es"));
+  archiveTableBody.innerHTML = "";
+  archiveEmpty.style.display = rows.length ? "none" : "block";
+
+  if (archiveSummaryCount) {
+    archiveSummaryCount.textContent = String(filteredRecords.length);
+  }
+  if (archiveSummaryBase) {
+    archiveSummaryBase.textContent = formatCurrency(
+      filteredRecords.reduce((sum, item) => sum + (Number(item.base) || 0), 0)
+    );
+  }
+  if (archiveSummaryVat) {
+    archiveSummaryVat.textContent = formatCurrency(
+      filteredRecords.reduce((sum, item) => sum + (Number(item.vat) || 0), 0)
+    );
+  }
+  if (archiveSummaryTotal) {
+    archiveSummaryTotal.textContent = formatCurrency(
+      filteredRecords.reduce((sum, item) => sum + (Number(item.total) || 0), 0)
+    );
+  }
+
+  rows.forEach((group) => {
+    const tr = document.createElement("tr");
+
+    const labelTd = document.createElement("td");
+    labelTd.textContent = group.label;
+
+    const typeTd = document.createElement("td");
+    typeTd.textContent = Array.from(group.types).join(", ");
+
+    const monthsTd = document.createElement("td");
+    monthsTd.textContent = Array.from(group.months).join(", ");
+
+    const countTd = document.createElement("td");
+    countTd.textContent = String(group.count);
+
+    const baseTd = document.createElement("td");
+    baseTd.textContent = formatCurrency(group.base);
+
+    const vatTd = document.createElement("td");
+    vatTd.textContent = formatCurrency(group.vat);
+
+    const totalTd = document.createElement("td");
+    totalTd.textContent = formatCurrency(group.total);
+
+    const actionsTd = document.createElement("td");
+    const actionBtn = document.createElement("button");
+    actionBtn.type = "button";
+    actionBtn.className = "button ghost archive-link-btn";
+    actionBtn.textContent = "Ver detalle";
+    actionBtn.addEventListener("click", () => applyArchiveDrilldown(group));
+    actionsTd.appendChild(actionBtn);
+
+    tr.appendChild(labelTd);
+    tr.appendChild(typeTd);
+    tr.appendChild(monthsTd);
+    tr.appendChild(countTd);
+    tr.appendChild(baseTd);
+    tr.appendChild(vatTd);
+    tr.appendChild(totalTd);
+    tr.appendChild(actionsTd);
+    archiveTableBody.appendChild(tr);
+  });
 }
 
 function createNoInvoiceTypeSelect(selected, allowedTypes = Object.keys(noInvoiceTypeLabels)) {
@@ -5760,6 +6192,7 @@ function updateSummary(data) {
 }
 
 function updateDashboardTotals() {
+  const selectedMetrics = currentFinancialMetrics?.selected || null;
   const expenseInvoiceTotal = (currentInvoices || []).reduce(
     (sum, invoice) => sum + (Number(invoice.total_amount) || 0),
     0
@@ -5830,11 +6263,21 @@ function updateDashboardTotals() {
     0
   );
 
-  expenseGrossTotal = roundAmount(expenseTotalGross);
-  expenseVatSupportedTotal = roundAmount(vatSupported);
-  expenseVatDeductibleTotal = roundAmount(vatDeductible);
-  incomeGrossTotal = roundAmount(billingBase + billingVat + incomeInvoicesGross);
-  incomeVatOutputTotal = roundAmount(billingVat + incomeInvoicesVat);
+  expenseGrossTotal = roundAmount(
+    selectedMetrics ? Number(selectedMetrics.expense_gross_total) || 0 : expenseTotalGross
+  );
+  expenseVatSupportedTotal = roundAmount(
+    selectedMetrics ? Number(selectedMetrics.expense_vat) || 0 : vatSupported
+  );
+  expenseVatDeductibleTotal = roundAmount(
+    selectedMetrics ? Number(selectedMetrics.expense_vat) || 0 : vatDeductible
+  );
+  incomeGrossTotal = roundAmount(
+    selectedMetrics ? Number(selectedMetrics.income_gross_total) || 0 : billingBase + billingVat + incomeInvoicesGross
+  );
+  incomeVatOutputTotal = roundAmount(
+    selectedMetrics ? Number(selectedMetrics.income_vat) || 0 : billingVat + incomeInvoicesVat
+  );
   expenseVatTotal = expenseVatDeductibleTotal;
 
   const expenseTotalEl = document.getElementById("expenseTotalGross");
@@ -6966,6 +7409,10 @@ function refreshAllData() {
   ]).then(() => {
     updateDashboardTotals();
     updateDashboardEmptyState();
+    renderArchive();
+    const netResult =
+      parseNumberInput(document.getElementById("pnlNet")?.textContent || "") || 0;
+    syncBalanceStatementFields(netResult);
   });
 }
 
@@ -6996,70 +7443,37 @@ function updatePeriodBadge() {
   taxPeriodBadge.textContent = label ? `Periodo: ${label}` : "";
 }
 
-// IRPF e IS se calculan siempre a nivel anual, ignorando mes/trimestre.
+function fetchFinancialMetrics() {
+  const companyId = getSelectedCompanyId();
+  const { month, year } = getSelectedMonthYear();
+  const period = getSelectedPeriod();
+  if (!companyId || !month || !year) {
+    return Promise.resolve(null);
+  }
+  return fetch(
+    `/api/financial-metrics?month=${month}&year=${year}&period=${period}&company_id=${companyId}`
+  )
+    .then((res) => res.json())
+    .then((data) => (data?.ok ? data : null));
+}
+
+// IRPF e IS pasan a venir del backend para usar el mismo motor que calendario y modelos.
 function refreshAnnualTaxData() {
   const { year } = getSelectedMonthYear();
   if (!year) {
     return Promise.resolve();
   }
-
-  const months = Array.from({ length: 12 }, (_, index) => index + 1);
-
-  return Promise.all([
-    Promise.all(months.map((targetMonth) => fetchInvoices(targetMonth, year))).then(
-      (invoicesByMonth) => invoicesByMonth.flat()
-    ),
-    Promise.all(months.map((targetMonth) => fetchNoInvoiceExpenses(targetMonth, year))).then(
-      (expensesByMonth) => expensesByMonth.flat()
-    ),
-    Promise.all(months.map((targetMonth) => fetchLoanInstallments(targetMonth, year))).then(
-      (installmentsByMonth) => installmentsByMonth.flat()
-    ),
-    Promise.all(months.map((targetMonth) => fetchIncomeInvoices(targetMonth, year))).then(
-      (invoicesByMonth) => invoicesByMonth.flat()
-    ),
-    Promise.all(months.map((targetMonth) => fetchBillingSummary(targetMonth, year))).then(
-      (summaries) => mergeBillingSummaries(summaries, months)
-    ),
-  ]).then(([invoices, expenses, loanInstallments, incomeInvoices, billingSummary]) => {
-    const baseTotals = billingSummary.baseTotals || {};
-    annualBillingBaseTotal =
-      (Number(baseTotals["0"]) || 0) +
-      (Number(baseTotals["4"]) || 0) +
-      (Number(baseTotals["10"]) || 0) +
-      (Number(baseTotals["21"]) || 0);
-    const annualIncomeInvoicesBase = incomeInvoices.reduce(
-      (total, invoice) => total + (Number(invoice.base_amount) || 0),
-      0
-    );
-    annualBillingBaseTotal += annualIncomeInvoicesBase;
-
-    const annualInvoices = invoices.reduce((total, invoice) => {
-      return total + getInvoiceDeductibleAmount(invoice);
-    }, 0);
-
-    const annualNoInvoice = expenses.reduce(
-      (total, expense) => total + getNoInvoiceDeductibleAmount(expense),
-      0
-    );
-
-    annualLoanInterestTotal =
-      expenses.reduce((total, expense) => {
-        if (expense.expense_type === "prestamo") {
-          return total + (Number(expense.interest_amount) || 0);
-        }
-        return total;
-      }, 0) +
-      loanInstallments.reduce(
-        (total, installment) => total + (Number(installment.interest_amount) || 0),
-        0
-      );
-    annualDeductibleExpenses = annualInvoices + annualNoInvoice + annualLoanInterestTotal;
-    pnlInvoices = invoices;
-    pnlNoInvoiceExpenses = expenses;
-    pnlLoanInstallments = loanInstallments;
-    pnlIncomeInvoices = incomeInvoices;
-    pnlDataReady = true;
+  return fetchFinancialMetrics().then((data) => {
+    currentFinancialMetrics = data;
+    const fullYear = data?.fullYear || {};
+    annualBillingBaseTotal = Number(fullYear.income_base) || 0;
+    annualLoanInterestTotal = Number(fullYear.loan_interest) || 0;
+    annualDeductibleExpenses = Number(fullYear.expense_base) || 0;
+    annualTaxEstimateTotal =
+      getSelectedCompanyType() === "individual"
+        ? Number(fullYear.model_130_estimate) || 0
+        : Number(fullYear.corporate_tax_estimate) || 0;
+    pnlDataReady = Boolean(data?.selected && data?.fullYear);
     updateTaxSummary();
     updatePnlSummary();
   });
@@ -7119,8 +7533,25 @@ function refreshPayments() {
 function renderInvoices(invoices) {
   invoicesTableBody.innerHTML = "";
   currentInvoices = invoices;
-  if (!invoices.length) {
+  const filteredInvoices = invoices.filter((invoice) =>
+    recordMatchesSearch(
+      [
+        invoice.invoice_date,
+        invoice.supplier,
+        invoice.base_amount,
+        invoice.vat_amount,
+        invoice.total_amount,
+        formatExpenseCategory(invoice.expense_category || "with_invoice"),
+      ],
+      invoiceSearchInput?.value || ""
+    )
+  );
+  if (!filteredInvoices.length) {
     invoicesEmpty.style.display = "block";
+    invoicesEmpty.textContent = invoices.length
+      ? "No hay facturas que coincidan con la búsqueda."
+      : "No hay facturas para este período.";
+    renderArchive();
     updateTaxSummary();
     updateDashboardTotals();
     updateSupplierSuggestions();
@@ -7128,7 +7559,7 @@ function renderInvoices(invoices) {
   }
   invoicesEmpty.style.display = "none";
 
-  invoices.forEach((invoice) => {
+  filteredInvoices.forEach((invoice) => {
     const tr = document.createElement("tr");
     tr.dataset.id = invoice.id;
 
@@ -7198,6 +7629,7 @@ function renderInvoices(invoices) {
     invoicesTableBody.appendChild(tr);
   });
 
+  renderArchive();
   updateTaxSummary();
   updateDashboardTotals();
   updateSupplierSuggestions();
@@ -7234,15 +7666,31 @@ function renderIncomeInvoices(invoices) {
   }
   incomeInvoicesTableBody.innerHTML = "";
   currentIncomeInvoices = invoices;
-  if (!invoices.length) {
+  const filteredInvoices = invoices.filter((invoice) =>
+    recordMatchesSearch(
+      [
+        invoice.invoice_date,
+        invoice.client,
+        invoice.base_amount,
+        invoice.vat_amount,
+        invoice.total_amount,
+      ],
+      incomeSearchInput?.value || ""
+    )
+  );
+  if (!filteredInvoices.length) {
     incomeInvoicesEmpty.style.display = "block";
+    incomeInvoicesEmpty.textContent = invoices.length
+      ? "No hay facturas emitidas que coincidan con la búsqueda."
+      : "No hay facturas emitidas para este período.";
+    renderArchive();
     updateBillingChart();
     updateDashboardTotals();
     return;
   }
   incomeInvoicesEmpty.style.display = "none";
 
-  invoices.forEach((invoice) => {
+  filteredInvoices.forEach((invoice) => {
     const tr = document.createElement("tr");
     tr.dataset.id = invoice.id;
 
@@ -7302,6 +7750,7 @@ function renderIncomeInvoices(invoices) {
     tr.appendChild(actionsTd);
     incomeInvoicesTableBody.appendChild(tr);
   });
+  renderArchive();
   updateBillingChart();
 }
 
@@ -7710,10 +8159,24 @@ function getFilteredNoInvoiceExpenses(expenses) {
 function renderNoInvoiceExpenses(expenses) {
   noInvoiceTableBody.innerHTML = "";
   currentNoInvoiceExpenses = expenses;
-  const filteredExpenses = getFilteredNoInvoiceExpenses(expenses);
+  const filteredExpenses = getFilteredNoInvoiceExpenses(expenses).filter((expense) =>
+    recordMatchesSearch(
+      [
+        expense.expense_date,
+        expense.concept,
+        expense.payroll_employee_name,
+        expense.payroll_period,
+        expense.amount,
+        expense.interest_amount,
+        expense.withholding_amount,
+        formatNoInvoiceType(expense.expense_type),
+      ],
+      noInvoiceSearchInput?.value || ""
+    )
+  );
   if (!filteredExpenses.length) {
     noInvoiceEmpty.style.display = "block";
-    noInvoiceEmpty.textContent =
+    const emptyByMode =
       currentExpenseMode === "rent"
         ? "No hay gastos de alquiler en este período."
         : currentExpenseMode === "payroll"
@@ -7721,6 +8184,11 @@ function renderNoInvoiceExpenses(expenses) {
           : currentExpenseMode === "financing"
             ? "No hay movimientos de financiación en este período."
             : "No hay otros ajustes en este período.";
+    noInvoiceEmpty.textContent =
+      expenses.length && (noInvoiceSearchInput?.value || "").trim()
+        ? "No hay resultados para ese filtro."
+        : emptyByMode;
+    renderArchive();
     updateTaxSummary();
     updateDashboardTotals();
     return;
@@ -7808,6 +8276,7 @@ function renderNoInvoiceExpenses(expenses) {
     noInvoiceTableBody.appendChild(tr);
   });
 
+  renderArchive();
   updateTaxSummary();
   updateDashboardTotals();
 }
@@ -7863,15 +8332,32 @@ function renderLoanInstallments(installments) {
   }
   loanTableBody.innerHTML = "";
   currentLoanInstallments = installments;
-  if (!installments.length) {
+  const filteredInstallments = installments.filter((installment) =>
+    recordMatchesSearch(
+      [
+        installment.payment_date,
+        installment.bank_name,
+        installment.concept,
+        installment.total_amount,
+        installment.interest_amount,
+        installment.principal_amount,
+      ],
+      loanSearchInput?.value || ""
+    )
+  );
+  if (!filteredInstallments.length) {
     loanEmpty.style.display = "block";
+    loanEmpty.textContent = installments.length
+      ? "No hay cuotas que coincidan con la búsqueda."
+      : "No hay cuotas registradas en este período.";
+    renderArchive();
     updateTaxSummary();
     updateDashboardTotals();
     return;
   }
   loanEmpty.style.display = "none";
 
-  installments.forEach((installment) => {
+  filteredInstallments.forEach((installment) => {
     const tr = document.createElement("tr");
     tr.dataset.id = installment.id;
 
@@ -7928,6 +8414,7 @@ function renderLoanInstallments(installments) {
     loanTableBody.appendChild(tr);
   });
 
+  renderArchive();
   updateTaxSummary();
   updateDashboardTotals();
 }
@@ -8613,15 +9100,34 @@ function deleteNoInvoiceExpense(expenseId) {
 function renderBillingEntries(entries) {
   billingEntriesBody.innerHTML = "";
   currentBillingEntries = entries;
-  if (!entries.length) {
+  const filteredEntries = entries.filter((entry) =>
+    recordMatchesSearch(
+      [
+        entry.concept,
+        entry.invoice_date,
+        entry.month ? monthNames[Number(entry.month) - 1] : "",
+        entry.year,
+        entry.base,
+        entry.vat,
+        entry.vatAmount,
+        entry.total,
+      ],
+      billingSearchInput?.value || ""
+    )
+  );
+  if (!filteredEntries.length) {
     billingEntriesEmpty.style.display = "block";
+    billingEntriesEmpty.textContent = entries.length
+      ? "No hay resultados para ese filtro."
+      : "No hay entradas de facturación.";
+    renderArchive();
     updateBillingChart();
     return;
   }
   billingEntriesEmpty.style.display = "none";
 
   const showMonth = getSelectedPeriod() === "quarterly";
-  entries.forEach((entry) => {
+  filteredEntries.forEach((entry) => {
     const tr = document.createElement("tr");
     tr.dataset.id = entry.id;
 
@@ -8669,6 +9175,7 @@ function renderBillingEntries(entries) {
     tr.appendChild(actionsTd);
     billingEntriesBody.appendChild(tr);
   });
+  renderArchive();
   updateBillingChart();
 }
 
@@ -8782,31 +9289,50 @@ function updateVatResult() {
 }
 
 function updateTaxSummary() {
-  const deductibleInvoices = currentInvoices.reduce((total, invoice) => {
-    return total + getInvoiceDeductibleAmount(invoice);
-  }, 0);
+  const selectedMetrics = currentFinancialMetrics?.selected || null;
+  const fullYearMetrics = currentFinancialMetrics?.fullYear || null;
+  const deductibleInvoices = selectedMetrics
+    ? Number(selectedMetrics.invoice_expenses) || 0
+    : currentInvoices.reduce((total, invoice) => {
+        return total + getInvoiceDeductibleAmount(invoice);
+      }, 0);
 
-  const deductibleNoInvoice = currentNoInvoiceExpenses.reduce(
-    (total, expense) => total + getNoInvoiceDeductibleAmount(expense),
-    0
-  );
-  const loanInterestPeriod = currentLoanInstallments.reduce(
-    (total, installment) => total + (Number(installment.interest_amount) || 0),
-    0
-  );
+  const deductibleNoInvoice = selectedMetrics
+    ? Math.max(
+        (Number(selectedMetrics.expense_base) || 0) -
+          (Number(selectedMetrics.invoice_expenses) || 0) -
+          (Number(selectedMetrics.loan_interest) || 0),
+        0
+      )
+    : currentNoInvoiceExpenses.reduce(
+        (total, expense) => total + getNoInvoiceDeductibleAmount(expense),
+        0
+      );
+  const loanInterestPeriod = selectedMetrics
+    ? Number(selectedMetrics.loan_interest) || 0
+    : currentLoanInstallments.reduce(
+        (total, installment) => total + (Number(installment.interest_amount) || 0),
+        0
+      );
 
-  const periodExpenses = deductibleInvoices + deductibleNoInvoice + loanInterestPeriod;
+  const periodExpenses = selectedMetrics
+    ? Number(selectedMetrics.expense_base) || 0
+    : deductibleInvoices + deductibleNoInvoice + loanInterestPeriod;
   currentDeductibleExpenses = periodExpenses;
 
-  const annualIncome = annualBillingBaseTotal;
-  const annualExpenses = annualDeductibleExpenses;
+  const annualIncome = fullYearMetrics ? Number(fullYearMetrics.income_base) || 0 : annualBillingBaseTotal;
+  const annualExpenses = fullYearMetrics ? Number(fullYearMetrics.expense_base) || 0 : annualDeductibleExpenses;
   const annualOperatingExpenses = annualExpenses - annualLoanInterestTotal;
   const annualOperatingResult = annualIncome - annualOperatingExpenses;
   const annualNet = annualIncome - annualExpenses;
   const companyType = getSelectedCompanyType();
-  const taxRate =
-    companyType === "company" ? 0.25 : companyType === "individual" ? 0.15 : 0;
-  const annualTaxEstimate = annualNet > 0 ? annualNet * taxRate : 0;
+  const annualTaxEstimate = fullYearMetrics
+    ? companyType === "individual"
+      ? Number(fullYearMetrics.model_130_estimate) || 0
+      : Number(fullYearMetrics.corporate_tax_estimate) || 0
+    : annualNet > 0
+      ? annualNet * (companyType === "company" ? 0.25 : companyType === "individual" ? 0.15 : 0)
+      : 0;
 
   document.getElementById("irpfIncome").textContent = formatCurrency(annualIncome);
   document.getElementById("irpfExpenses").textContent = formatCurrency(annualExpenses);
@@ -8825,7 +9351,9 @@ function updateTaxSummary() {
 }
 
 function updatePnlSummary() {
-  const useAnnual = pnlDataReady;
+  const selectedMetrics = currentFinancialMetrics?.selected || null;
+  const fullYearMetrics = currentFinancialMetrics?.fullYear || null;
+  const useAnnual = pnlDataReady && Boolean(fullYearMetrics);
   const sourceInvoices = useAnnual ? pnlInvoices : currentInvoices;
   const sourceNoInvoice = useAnnual ? pnlNoInvoiceExpenses : currentNoInvoiceExpenses;
   const sourceLoans = useAnnual ? pnlLoanInstallments : currentLoanInstallments;
@@ -8836,43 +9364,65 @@ function updatePnlSummary() {
     0
   );
   const incomeTotal = useAnnual
-    ? annualBillingBaseTotal
-    : billingBaseTotal + incomeInvoicesBase;
-  const loanInterest = sourceNoInvoice.reduce((sum, expense) => {
-    if (expense.expense_type === "prestamo") {
-      return sum + (Number(expense.interest_amount) || 0);
-    }
-    return sum;
-  }, 0) + sourceLoans.reduce(
-    (sum, installment) => sum + (Number(installment.interest_amount) || 0),
-    0
-  );
-  const invoiceExpenses = sourceInvoices.reduce((sum, invoice) => {
-    return sum + getInvoiceDeductibleAmount(invoice);
-  }, 0);
-  const payrollExpenses = sourceNoInvoice.reduce((sum, expense) => {
-    if (expense.expense_type === "nomina" || expense.expense_type === "seguridad_social") {
-      return sum + getNoInvoiceDeductibleAmount(expense);
-    }
-    return sum;
-  }, 0);
-  const amortizationExpenses = sourceNoInvoice.reduce((sum, expense) => {
-    if (expense.expense_type === "amortizacion") {
-      return sum + getNoInvoiceDeductibleAmount(expense);
-    }
-    return sum;
-  }, 0);
-  const otherOperatingExpenses = sourceNoInvoice.reduce((sum, expense) => {
-    if (
-      expense.expense_type === "kilometraje" ||
-      expense.expense_type === "otro" ||
-      expense.expense_type === "alquiler_local" ||
-      expense.expense_type === "alquiler_cabina"
-    ) {
-      return sum + getNoInvoiceDeductibleAmount(expense);
-    }
-    return sum;
-  }, 0);
+    ? Number(fullYearMetrics.income_base) || 0
+    : selectedMetrics
+      ? Number(selectedMetrics.income_base) || 0
+      : billingBaseTotal + incomeInvoicesBase;
+  const loanInterest = useAnnual
+    ? Number(fullYearMetrics.loan_interest) || 0
+    : selectedMetrics
+      ? Number(selectedMetrics.loan_interest) || 0
+      : sourceNoInvoice.reduce((sum, expense) => {
+          if (expense.expense_type === "prestamo") {
+            return sum + (Number(expense.interest_amount) || 0);
+          }
+          return sum;
+        }, 0) + sourceLoans.reduce(
+          (sum, installment) => sum + (Number(installment.interest_amount) || 0),
+          0
+        );
+  const invoiceExpenses = useAnnual
+    ? Number(fullYearMetrics.invoice_expenses) || 0
+    : selectedMetrics
+      ? Number(selectedMetrics.invoice_expenses) || 0
+      : sourceInvoices.reduce((sum, invoice) => {
+          return sum + getInvoiceDeductibleAmount(invoice);
+        }, 0);
+  const payrollExpenses = useAnnual
+    ? Number(fullYearMetrics.payroll_expenses) || 0
+    : selectedMetrics
+      ? Number(selectedMetrics.payroll_expenses) || 0
+      : sourceNoInvoice.reduce((sum, expense) => {
+          if (expense.expense_type === "nomina" || expense.expense_type === "seguridad_social") {
+            return sum + getNoInvoiceDeductibleAmount(expense);
+          }
+          return sum;
+        }, 0);
+  const amortizationExpenses = useAnnual
+    ? Number(fullYearMetrics.amortization_expenses) || 0
+    : selectedMetrics
+      ? Number(selectedMetrics.amortization_expenses) || 0
+      : sourceNoInvoice.reduce((sum, expense) => {
+          if (expense.expense_type === "amortizacion") {
+            return sum + getNoInvoiceDeductibleAmount(expense);
+          }
+          return sum;
+        }, 0);
+  const otherOperatingExpenses = useAnnual
+    ? Number(fullYearMetrics.other_operating_expenses) || 0
+    : selectedMetrics
+      ? Number(selectedMetrics.other_operating_expenses) || 0
+      : sourceNoInvoice.reduce((sum, expense) => {
+          if (
+            expense.expense_type === "kilometraje" ||
+            expense.expense_type === "otro" ||
+            expense.expense_type === "alquiler_local" ||
+            expense.expense_type === "alquiler_cabina"
+          ) {
+            return sum + getNoInvoiceDeductibleAmount(expense);
+          }
+          return sum;
+        }, 0);
   const operatingExpenses =
     invoiceExpenses + payrollExpenses + amortizationExpenses + otherOperatingExpenses;
   const operatingResultEl = document.getElementById("pnlOperatingResult");
@@ -8921,9 +9471,17 @@ function updatePnlSummary() {
   const preTax = operatingResult + financialResult;
 
   const companyType = getSelectedCompanyType();
-  const taxRate =
-    companyType === "company" ? 0.25 : companyType === "individual" ? 0.15 : 0;
-  const defaultTaxes = preTax > 0 ? preTax * taxRate : 0;
+  const defaultTaxes = useAnnual
+    ? companyType === "individual"
+      ? Number(fullYearMetrics.model_130_estimate) || 0
+      : Number(fullYearMetrics.corporate_tax_estimate) || 0
+    : selectedMetrics
+      ? companyType === "individual"
+        ? Number(selectedMetrics.model_130_estimate) || 0
+        : Number(selectedMetrics.corporate_tax_estimate) || 0
+      : preTax > 0
+        ? preTax * (companyType === "company" ? 0.25 : companyType === "individual" ? 0.15 : 0)
+        : 0;
   setPnlInputValue("pnlLine19", defaultTaxes, true);
   const taxes = getPnlInputValue("pnlLine19");
   const netResult = preTax - taxes;
@@ -9806,6 +10364,26 @@ function initNavigation() {
 }
 
 function bindEvents() {
+  [
+    [invoiceSearchInput, () => renderInvoices(currentInvoices || [])],
+    [noInvoiceSearchInput, () => renderNoInvoiceExpenses(currentNoInvoiceExpenses || [])],
+    [loanSearchInput, () => renderLoanInstallments(currentLoanInstallments || [])],
+    [incomeSearchInput, () => renderIncomeInvoices(currentIncomeInvoices || [])],
+    [billingSearchInput, () => renderBillingEntries(currentBillingEntries || [])],
+    [archiveSearchInput, renderArchive],
+  ].forEach(([input, handler]) => {
+    if (input) {
+      input.addEventListener("input", handler);
+    }
+  });
+  [
+    [archiveTypeFilter, renderArchive],
+    [archiveGroupBy, renderArchive],
+  ].forEach(([input, handler]) => {
+    if (input) {
+      input.addEventListener("change", handler);
+    }
+  });
   const selectFilesBtn = document.getElementById("selectFiles");
   const selectFolderBtn = document.getElementById("selectFolder");
   const incomeSelectFilesBtn = document.getElementById("incomeSelectFiles");

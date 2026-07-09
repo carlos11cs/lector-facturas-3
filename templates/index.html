@@ -28,6 +28,7 @@
         <button class="nav-link" data-section="account" type="button">Mi cuenta</button>
         <button class="nav-link" data-section="companies" type="button">Mis empresas</button>
         <button class="nav-link" data-section="expenses" type="button">Gastos</button>
+        <button class="nav-link" data-section="archive" type="button">Archivo</button>
         <button class="nav-link" data-section="integrations" type="button">Integraciones</button>
         <button class="nav-link" data-section="income" type="button">Ingresos</button>
         <button class="nav-link" data-section="reports" type="button">Informes</button>
@@ -842,6 +843,12 @@
           <div class="panel-header">
             <h2>Facturas guardadas</h2>
           </div>
+          <div class="report-form archive-filters">
+            <div class="field">
+              <label for="invoiceSearchInput">Buscar facturas proveedor</label>
+              <input type="text" id="invoiceSearchInput" placeholder="Proveedor, fecha, base o tipo de gasto" />
+            </div>
+          </div>
           <div class="billing-table">
             <table id="invoicesTable">
               <thead>
@@ -952,6 +959,12 @@
           </div>
           <div class="billing-entries">
             <h3>Entradas del periodo</h3>
+            <div class="report-form archive-filters">
+              <div class="field">
+                <label for="noInvoiceSearchInput">Buscar en gastos manuales</label>
+                <input type="text" id="noInvoiceSearchInput" placeholder="Concepto, trabajador, tipo o importe" />
+              </div>
+            </div>
             <div class="billing-table">
               <table id="noInvoiceTable">
                 <thead>
@@ -1018,6 +1031,12 @@
             </div>
             <div class="loan-actions">
               <button id="loanImportBtn" class="button ghost">Importar plan</button>
+            </div>
+            <div class="report-form archive-filters">
+              <div class="field">
+                <label for="loanSearchInput">Buscar financiación</label>
+                <input type="text" id="loanSearchInput" placeholder="Banco, concepto, fecha o importe" />
+              </div>
             </div>
             <div class="billing-table">
               <table id="loanTable">
@@ -1095,6 +1114,12 @@
           </div>
           <div class="billing-entries">
             <h3>Entradas del periodo</h3>
+            <div class="report-form archive-filters">
+              <div class="field">
+                <label for="billingSearchInput">Buscar facturación manual</label>
+                <input type="text" id="billingSearchInput" placeholder="Concepto, fecha, mes o importe" />
+              </div>
+            </div>
             <div class="billing-table">
               <table id="billingEntriesTable">
                 <thead>
@@ -1158,6 +1183,12 @@
 
           <div class="billing-entries">
             <h3>Facturas emitidas guardadas</h3>
+            <div class="report-form archive-filters">
+              <div class="field">
+                <label for="incomeSearchInput">Buscar facturas emitidas</label>
+                <input type="text" id="incomeSearchInput" placeholder="Cliente, fecha o importe" />
+              </div>
+            </div>
             <div class="billing-table">
               <table id="incomeInvoicesTable">
                 <thead>
@@ -1176,6 +1207,82 @@
             </div>
             <p class="empty" id="incomeInvoicesEmpty">No hay facturas emitidas para este período.</p>
           </div>
+        </section>
+      </section>
+
+      <section class="page-section" data-section="archive">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Archivo</h2>
+              <p>Consulta el histórico operativo del periodo cargado por proveedor, trabajador, banco, cliente o mes sin necesidad de conservar el PDF.</p>
+            </div>
+          </div>
+          <div class="report-form archive-filters">
+            <div class="field">
+              <label for="archiveSearchInput">Buscar</label>
+              <input type="text" id="archiveSearchInput" placeholder="Proveedor, trabajador, banco, cliente, concepto..." />
+            </div>
+            <div class="field">
+              <label for="archiveTypeFilter">Tipo</label>
+              <select id="archiveTypeFilter">
+                <option value="all">Todos</option>
+                <option value="expense_invoice">Facturas proveedor</option>
+                <option value="payroll">Personal</option>
+                <option value="rent">Alquileres</option>
+                <option value="loan">Financiación</option>
+                <option value="adjustment">Otros ajustes</option>
+                <option value="income_invoice">Facturas emitidas</option>
+                <option value="manual_income">Facturación manual</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="archiveGroupBy">Agrupar por</label>
+              <select id="archiveGroupBy">
+                <option value="counterparty">Tercero</option>
+                <option value="month">Mes</option>
+                <option value="type">Tipo documental</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="summary-cards archive-summary-grid">
+            <article class="summary-card">
+              <h3>Registros</h3>
+              <p id="archiveSummaryCount">0</p>
+            </article>
+            <article class="summary-card">
+              <h3>Total base</h3>
+              <p id="archiveSummaryBase">0,00 €</p>
+            </article>
+            <article class="summary-card">
+              <h3>Total IVA</h3>
+              <p id="archiveSummaryVat">0,00 €</p>
+            </article>
+            <article class="summary-card">
+              <h3>Total bruto</h3>
+              <p id="archiveSummaryTotal">0,00 €</p>
+            </article>
+          </div>
+
+          <div class="billing-table">
+            <table id="archiveTable">
+              <thead>
+                <tr>
+                  <th>Grupo</th>
+                  <th>Tipo principal</th>
+                  <th>Meses</th>
+                  <th>Registros</th>
+                  <th>Base (€)</th>
+                  <th>IVA (€)</th>
+                  <th>Total (€)</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <p class="empty" id="archiveEmpty">No hay movimientos archivados para este periodo.</p>
         </section>
       </section>
 
