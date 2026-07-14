@@ -6916,9 +6916,66 @@ function refreshBillingSummary() {
     });
 }
 
-function updateBillingSummary(data) {
+function buildFiscalVatSummaryData(data) {
   const baseTotals = data.baseTotals || {};
   const vatTotals = data.vatTotals || {};
+  const mergedBaseTotals = {
+    "0": Number(baseTotals["0"]) || 0,
+    "4": Number(baseTotals["4"]) || 0,
+    "10": Number(baseTotals["10"]) || 0,
+    "21": Number(baseTotals["21"]) || 0,
+  };
+  const mergedVatTotals = {
+    "0": Number(vatTotals["0"]) || 0,
+    "4": Number(vatTotals["4"]) || 0,
+    "10": Number(vatTotals["10"]) || 0,
+    "21": Number(vatTotals["21"]) || 0,
+  };
+
+  (currentIncomeInvoices || []).forEach((invoice) => {
+    const breakdown = buildVatBreakdownPayload(
+      parseVatBreakdown(invoice.vat_breakdown || invoice.vatBreakdown)
+    );
+    if (breakdown.length) {
+      breakdown.forEach((line) => {
+        const rateKey = String(Math.round(Number(line.rate) || 0));
+        if (!(rateKey in mergedBaseTotals)) {
+          return;
+        }
+        mergedBaseTotals[rateKey] += Number(line.base) || 0;
+        mergedVatTotals[rateKey] += Number(line.vat_amount) || 0;
+      });
+      return;
+    }
+
+    const rateKey = resolveVatRateValue(invoice.vat_rate, "21");
+    if (!(rateKey in mergedBaseTotals)) {
+      return;
+    }
+    mergedBaseTotals[rateKey] += Number(invoice.base_amount) || 0;
+    mergedVatTotals[rateKey] += Number(invoice.vat_amount) || 0;
+  });
+
+  return {
+    baseTotals: {
+      "0": Number(mergedBaseTotals["0"].toFixed(2)),
+      "4": Number(mergedBaseTotals["4"].toFixed(2)),
+      "10": Number(mergedBaseTotals["10"].toFixed(2)),
+      "21": Number(mergedBaseTotals["21"].toFixed(2)),
+    },
+    vatTotals: {
+      "0": Number(mergedVatTotals["0"].toFixed(2)),
+      "4": Number(mergedVatTotals["4"].toFixed(2)),
+      "10": Number(mergedVatTotals["10"].toFixed(2)),
+      "21": Number(mergedVatTotals["21"].toFixed(2)),
+    },
+  };
+}
+
+function updateBillingSummary(data) {
+  const merged = buildFiscalVatSummaryData(data);
+  const baseTotals = merged.baseTotals;
+  const vatTotals = merged.vatTotals;
 
   document.getElementById("billingBase0").textContent = formatCurrency(
     baseTotals["0"] || 0
@@ -6951,7 +7008,11 @@ function updateBillingSummary(data) {
     (Number(baseTotals["4"]) || 0) +
     (Number(baseTotals["10"]) || 0) +
     (Number(baseTotals["21"]) || 0);
-  billingVatTotal = Number(data.totalVat) || 0;
+  billingVatTotal =
+    (Number(vatTotals["0"]) || 0) +
+    (Number(vatTotals["4"]) || 0) +
+    (Number(vatTotals["10"]) || 0) +
+    (Number(vatTotals["21"]) || 0);
   updateDashboardTotals();
   updateTaxSummary();
 }
@@ -7154,6 +7215,28 @@ function executePaymentStatusUpdate(item, payload, options = {}) {
         return false;
       });
   }
+  if (item.type === "income") {
+    return fetch(withCompanyParam(`/api/income-invoices/${item.id}`), {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (!data.ok) {
+          handleFailure(data);
+          return false;
+        }
+        handleSuccess();
+        return true;
+      })
+      .catch(() => {
+        handleCatch("No se pudo marcar el cobro como realizado.");
+        return false;
+      });
+  }
   return Promise.resolve(false);
 }
 
@@ -7252,7 +7335,7 @@ function markPaymentAsPaid(item) {
   };
   if (item.type === "no_invoice") {
     payload.expense_date = item.invoice_date;
-  } else if (item.type === "expense") {
+  } else if (item.type === "expense" || item.type === "income") {
     payload.invoice_date = item.invoice_date;
   }
   return executePaymentStatusUpdate(item, payload);
@@ -7864,6 +7947,9 @@ function renderIncomeInvoices(invoices) {
     incomeInvoicesEmpty.textContent = invoices.length
       ? "No hay facturas emitidas que coincidan con la búsqueda."
       : "No hay facturas emitidas para este período.";
+    if (currentBillingSummary) {
+      updateBillingSummary(currentBillingSummary);
+    }
     renderArchive();
     updateBillingChart();
     updateDashboardTotals();
@@ -7932,6 +8018,9 @@ function renderIncomeInvoices(invoices) {
     incomeInvoicesTableBody.appendChild(tr);
   });
   renderArchive();
+  if (currentBillingSummary) {
+    updateBillingSummary(currentBillingSummary);
+  }
   updateBillingChart();
 }
 
