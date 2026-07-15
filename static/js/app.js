@@ -4694,6 +4694,20 @@ function renderTable() {
     });
     vatAmountTd.appendChild(vatAmountInput);
 
+    const withholdingTd = document.createElement("td");
+    const withholdingInput = document.createElement("input");
+    withholdingInput.type = "text";
+    withholdingInput.min = "0";
+    withholdingInput.placeholder = "0,00";
+    withholdingInput.value = item.withholdingAmount || "";
+    withholdingInput.disabled = item.analysisPending;
+    attachAmountInputBehavior(withholdingInput);
+    withholdingInput.addEventListener("input", () => {
+      item.withholdingAmount = withholdingInput.value;
+      item.touched.withholdingAmount = true;
+    });
+    withholdingTd.appendChild(withholdingInput);
+
     const totalTd = document.createElement("td");
     const totalInput = document.createElement("input");
     totalInput.type = "text";
@@ -4738,6 +4752,7 @@ function renderTable() {
     tr.appendChild(baseTd);
     tr.appendChild(vatTd);
     tr.appendChild(vatAmountTd);
+    tr.appendChild(withholdingTd);
     tr.appendChild(totalTd);
     tr.appendChild(actionsTd);
     uploadTableBody.appendChild(tr);
@@ -4754,6 +4769,7 @@ function renderTable() {
         const baseCell = document.createElement("td");
         const rateCell = document.createElement("td");
         const vatCell = document.createElement("td");
+        const withholdingCell = document.createElement("td");
         const totalCell = document.createElement("td");
         const actionsCell = document.createElement("td");
         actionsCell.className = "row-actions";
@@ -4858,6 +4874,7 @@ function renderTable() {
         row.appendChild(baseCell);
         row.appendChild(rateCell);
         row.appendChild(vatCell);
+        row.appendChild(withholdingCell);
         row.appendChild(totalCell);
         row.appendChild(actionsCell);
         uploadTableBody.appendChild(row);
@@ -4867,7 +4884,7 @@ function renderTable() {
     const paymentRow = document.createElement("tr");
     paymentRow.className = "payment-dates-row";
     const paymentCell = document.createElement("td");
-    paymentCell.colSpan = 8;
+    paymentCell.colSpan = 9;
     const paymentWrap = document.createElement("div");
     paymentWrap.className = "payment-dates-wrap";
     const paymentLabel = document.createElement("span");
@@ -4982,7 +4999,7 @@ function renderTable() {
         statusRow.classList.add("error");
       }
       const statusTd = document.createElement("td");
-      statusTd.colSpan = 8;
+      statusTd.colSpan = 9;
       const statusWrapper = document.createElement("div");
       statusWrapper.className = "processing-status";
       if (item.analysisPending) {
