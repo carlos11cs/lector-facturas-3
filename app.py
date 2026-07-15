@@ -242,6 +242,7 @@ invoices_table = Table(
     Column("vat_amount", Float),
     Column("total_amount", Float, nullable=False),
     Column("vat_breakdown", Text),
+    Column("withholding_amount", Float),
     Column("payment_date", String),
     Column("payment_dates", Text),
     Column("payment_completed_dates", Text),
@@ -917,6 +918,7 @@ def init_db():
     add_column_if_missing("invoices", "payment_dates", "TEXT")
     add_column_if_missing("invoices", "payment_completed_dates", "TEXT")
     add_column_if_missing("invoices", "vat_breakdown", "TEXT")
+    add_column_if_missing("invoices", "withholding_amount", "FLOAT")
     add_column_if_missing("invoices", "vat_deductible", "BOOLEAN")
     add_column_if_missing("invoices", "extraction_source", "VARCHAR")
     add_column_if_missing("invoices", "confidence_score", "FLOAT")
@@ -2413,7 +2415,9 @@ def register_processed_document(conn, row, data_owner_id, current_user_id):
             expense_category,
             data.get("vat_deductible") is not False,
             vat_amount,
+            parse_amount(data.get("withholding_amount")) or 0.0,
         )
+        withholding_amount = parse_amount(data.get("withholding_amount")) or 0.0
         result = conn.execute(
             invoices_table.insert().values(
                 user_id=data_owner_id,
@@ -2428,6 +2432,7 @@ def register_processed_document(conn, row, data_owner_id, current_user_id):
                 vat_amount=vat_amount,
                 total_amount=total_amount or 0.0,
                 vat_breakdown=vat_breakdown_json,
+                withholding_amount=withholding_amount,
                 payment_date=payment_date,
                 payment_dates=serialize_payment_dates(payment_dates),
                 ocr_text=row.get("extracted_text"),
@@ -2749,15 +2754,25 @@ def serialize_tax_model_targets(targets):
     return json.dumps(parse_tax_model_targets(targets))
 
 
-def derive_invoice_profile(expense_category, vat_deductible=True, vat_amount=None):
+def derive_invoice_profile(
+    expense_category,
+    vat_deductible=True,
+    vat_amount=None,
+    withholding_amount=0.0,
+):
     category = (expense_category or "with_invoice").strip()
+    withholding_amount = float(withholding_amount or 0)
     if category == "non_deductible":
         targets = []
         subtype = "non_deductible_invoice"
         pnl_bucket = "non_deductible_expense"
     else:
         targets = ["303"] if bool(vat_deductible) else []
-        subtype = "supplier_invoice"
+        if withholding_amount > 0:
+            targets.extend(["111", "190"])
+            subtype = "professional_invoice"
+        else:
+            subtype = "supplier_invoice"
         pnl_bucket = "operating_expense"
     return {
         "expense_family": "supplier",
@@ -3551,6 +3566,7 @@ def build_journal_export_rows(source_data):
         base_amount = round(float(row.get("base_amount") or 0), 2)
         vat_amount = round(float(row.get("vat_amount") or 0), 2)
         total_amount = round(float(row.get("total_amount") or 0), 2)
+        withholding_amount = round(float(row.get("withholding_amount") or 0), 2)
         expense_account, expense_label = suggest_expense_account(
             expense_family=row.get("expense_family"),
             expense_subtype=row.get("expense_subtype"),
@@ -3562,7 +3578,11 @@ def build_journal_export_rows(source_data):
             lines.append({"cuenta": "472", "descripcion_cuenta": "Hacienda Pública, IVA soportado", "debe": vat_amount})
         else:
             lines.append({"cuenta": expense_account, "descripcion_cuenta": expense_label, "debe": total_amount})
-        lines.append({"cuenta": "410", "descripcion_cuenta": "Acreedores por prestaciones de servicios", "haber": total_amount})
+        if withholding_amount > 0:
+            lines.append({"cuenta": "4751", "descripcion_cuenta": "Hacienda Pública acreedora por retenciones practicadas", "haber": withholding_amount})
+        creditor_amount = round(total_amount - withholding_amount, 2)
+        if creditor_amount > 0:
+            lines.append({"cuenta": "410", "descripcion_cuenta": "Acreedores por prestaciones de servicios", "haber": creditor_amount})
         append_journal_lines(
             rows,
             entry_key,
@@ -4077,12 +4097,16 @@ def _build_financial_metrics(user_id, company_id, periods, conn):
         invoice_rows = conn.execute(
             select(
                 invoices_table.c.invoice_date,
+                invoices_table.c.payment_date,
+                invoices_table.c.payment_dates,
                 invoices_table.c.supplier,
                 invoices_table.c.base_amount,
                 invoices_table.c.total_amount,
                 invoices_table.c.vat_deductible,
                 invoices_table.c.vat_amount,
+                invoices_table.c.withholding_amount,
                 invoices_table.c.expense_category,
+                invoices_table.c.tax_model_targets,
             )
             .where(invoices_table.c.user_id == user_id)
             .where(invoices_table.c.company_id == company_id)
@@ -4091,11 +4115,25 @@ def _build_financial_metrics(user_id, company_id, periods, conn):
         for row in invoice_rows:
             gross_total = float(row.get("total_amount") or 0)
             deductible_amount = get_invoice_deductible_amount(row)
+            withholding_amount = float(row.get("withholding_amount") or 0)
+            tax_targets = parse_tax_model_targets(row.get("tax_model_targets"))
+            payment_dates = parse_payment_dates(row.get("payment_dates"))
+            if not payment_dates:
+                fallback = normalize_date(row.get("payment_date")) or normalize_date(
+                    row.get("invoice_date")
+                )
+                payment_dates = [fallback] if fallback else []
             metrics["expense_gross_total"] += gross_total
             metrics["expense_base"] += deductible_amount
             metrics["invoice_expenses"] += deductible_amount
             if row.get("expense_category") != "non_deductible" and row.get("vat_deductible") is not False:
                 metrics["expense_vat"] += float(row.get("vat_amount") or 0)
+            if withholding_amount > 0 and payment_dates and "111" in tax_targets:
+                metrics["withholding_111"] += _sum_amount_for_period_dates(
+                    withholding_amount,
+                    payment_dates,
+                    period_prefixes,
+                )
             supplier_name = (row.get("supplier") or "Sin proveedor").strip() or "Sin proveedor"
             supplier_totals[supplier_name] = supplier_totals.get(supplier_name, 0.0) + gross_total
             invoice_date = normalize_date(row.get("invoice_date"))
@@ -6530,6 +6568,13 @@ def upload_invoices():
                 vat_rate_raw = vat_rate_to_str(entry.get("vat"))
                 vat_amount = parse_amount(str(entry.get("vatAmount") or ""))
                 total_amount = parse_amount(str(entry.get("total") or ""))
+                withholding_amount = parse_amount(
+                    str(
+                        entry.get("withholding_amount")
+                        or entry.get("withholdingAmount")
+                        or ""
+                    )
+                )
                 is_rectificativa = bool(entry.get("isRectificativa"))
                 vat_breakdown = parse_vat_breakdown(
                     entry.get("vatBreakdown") or entry.get("vat_breakdown")
@@ -6580,6 +6625,16 @@ def upload_invoices():
                 if total_amount is None:
                     errors.append(f"Total inválido para {original_name}.")
                     continue
+                if withholding_amount is None:
+                    withholding_amount = 0.0
+                if withholding_amount < 0:
+                    errors.append(f"Retención inválida para {original_name}.")
+                    continue
+                if withholding_amount > total_amount:
+                    errors.append(
+                        f"La retención no puede superar el total en {original_name}."
+                    )
+                    continue
                 if (base_amount < 0 or total_amount < 0) and not is_rectificativa:
                     errors.append(f"Factura rectificativa no indicada en {original_name}.")
                     continue
@@ -6602,6 +6657,7 @@ def upload_invoices():
                     expense_category,
                     vat_deductible,
                     vat_amount,
+                    withholding_amount,
                 )
 
                 created_at = datetime.utcnow().isoformat()
@@ -6620,6 +6676,7 @@ def upload_invoices():
                         vat_amount=vat_amount,
                         total_amount=total_amount,
                         vat_breakdown=vat_breakdown_json,
+                        withholding_amount=withholding_amount,
                         payment_date=payment_date,
                         payment_dates=json.dumps(payment_dates) if payment_dates else None,
                         ocr_text=None,
@@ -6735,6 +6792,7 @@ def upload_invoices():
                     vat_rate=vat_rate_int,
                     vat_amount=vat_amount,
                     total_amount=total_amount,
+                    withholding_amount=0.0,
                     payment_date=payment_date,
                     payment_dates=json.dumps(payment_dates_list) if payment_dates_list else None,
                     ocr_text=None,
@@ -6974,6 +7032,7 @@ def list_invoices():
                 invoices_table.c.vat_amount,
                 invoices_table.c.total_amount,
                 invoices_table.c.vat_breakdown,
+                invoices_table.c.withholding_amount,
                 invoices_table.c.payment_date,
                 invoices_table.c.payment_dates,
                 invoices_table.c.payment_completed_dates,
@@ -7008,6 +7067,7 @@ def list_invoices():
             "vat_amount": float(row["vat_amount"]) if row["vat_amount"] is not None else None,
             "total_amount": float(row["total_amount"]),
             "vat_breakdown": row["vat_breakdown"],
+            "withholding_amount": float(row["withholding_amount"] or 0),
             "extraction_source": row.get("extraction_source"),
             "confidence_score": float(row["confidence_score"]) if row["confidence_score"] is not None else None,
             "original_filename": row["original_filename"],
@@ -7060,6 +7120,7 @@ def list_payments():
                 invoices_table.c.vat_amount,
                 invoices_table.c.total_amount,
                 invoices_table.c.original_filename,
+                invoices_table.c.withholding_amount,
                 invoices_table.c.expense_category,
                 invoices_table.c.expense_family,
                 invoices_table.c.expense_subtype,
@@ -7190,11 +7251,13 @@ def list_payments():
         if not payment_dates:
             continue
         total_amount = float(row["total_amount"] or 0)
+        withholding_amount = float(row.get("withholding_amount") or 0)
+        payable_amount = max(round(total_amount - withholding_amount, 2), 0.0)
         split_count = len(payment_dates)
-        base_amount = round(total_amount / split_count, 2) if split_count else total_amount
+        base_amount = round(payable_amount / split_count, 2) if split_count else payable_amount
         amounts = [base_amount] * split_count
         if split_count > 1:
-            amounts[-1] = round(total_amount - base_amount * (split_count - 1), 2)
+            amounts[-1] = round(payable_amount - base_amount * (split_count - 1), 2)
         for payment_date, amount in zip(payment_dates, amounts):
             try:
                 payment_dt = date.fromisoformat(payment_date)
@@ -7234,6 +7297,7 @@ def list_payments():
                     if row["vat_amount"] is not None
                     else None,
                     "total_amount": total_amount,
+                    "withholding_amount": withholding_amount,
                     "expense_category": row["expense_category"] or "with_invoice",
                     "expense_family": row.get("expense_family"),
                     "expense_subtype": row.get("expense_subtype"),
@@ -7891,6 +7955,9 @@ def update_invoice(invoice_id):
     vat_rate_raw = vat_rate_to_str(payload.get("vat_rate"))
     vat_amount = parse_amount(str(payload.get("vat_amount") or ""))
     total_amount = parse_amount(str(payload.get("total_amount") or ""))
+    withholding_amount = parse_amount(
+        str(payload.get("withholding_amount") or payload.get("withholdingAmount") or "")
+    )
     is_rectificativa = bool(payload.get("is_rectificativa") or payload.get("isRectificativa"))
     is_rectificativa = bool(payload.get("is_rectificativa") or payload.get("isRectificativa"))
     vat_breakdown = parse_vat_breakdown(
@@ -7934,6 +8001,12 @@ def update_invoice(invoice_id):
         vat_deductible = vat_deductible in (True, "true", "True", 1, "1")
     if expense_category == "non_deductible":
         vat_deductible = False
+    if withholding_amount is None:
+        withholding_amount = 0.0
+    if withholding_amount < 0:
+        errors.append("Retención inválida.")
+    elif total_amount is not None and withholding_amount > total_amount:
+        errors.append("La retención no puede superar el total.")
 
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
@@ -7942,7 +8015,9 @@ def update_invoice(invoice_id):
         base_amount, vat_amount, total_amount = normalize_vat_amounts(
             base_amount, vat_rate, vat_amount, total_amount
         )
-    expense_profile = derive_invoice_profile(expense_category, vat_deductible, vat_amount)
+    expense_profile = derive_invoice_profile(
+        expense_category, vat_deductible, vat_amount, withholding_amount
+    )
 
     updates = {
         "invoice_date": invoice_date,
@@ -7953,6 +8028,7 @@ def update_invoice(invoice_id):
         "vat_amount": vat_amount,
         "total_amount": total_amount,
         "vat_breakdown": vat_breakdown_json,
+        "withholding_amount": withholding_amount,
         "payment_date": payment_date,
         "expense_category": expense_category,
         **expense_profile,
@@ -7993,6 +8069,7 @@ def update_invoice(invoice_id):
                 "vat_amount": vat_amount,
                 "total_amount": total_amount,
                 "vat_breakdown": vat_breakdown,
+                "withholding_amount": withholding_amount,
                 "expense_category": expense_category,
                 "vat_deductible": vat_deductible,
                 "expense_family": expense_profile.get("expense_family"),

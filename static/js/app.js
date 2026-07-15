@@ -470,6 +470,16 @@ function getInvoicePaymentDates(invoice) {
   return [];
 }
 
+function getInvoiceCashAmount(invoice) {
+  if (!invoice) {
+    return 0;
+  }
+  return Math.max(
+    (Number(invoice.total_amount) || 0) - (Number(invoice.withholding_amount) || 0),
+    0
+  );
+}
+
 function getNoInvoicePaymentDates(expense) {
   const paymentDates = normalizePaymentDateList(expense?.payment_dates);
   if (paymentDates.length) {
@@ -586,7 +596,7 @@ function getBalancePayablesEstimate() {
     return (
       sum +
       sumOutstandingScheduledAmount(
-        Number(invoice.total_amount) || 0,
+        getInvoiceCashAmount(invoice),
         getInvoicePaymentDates(invoice),
         invoice.payment_completed_dates
       )
@@ -640,7 +650,7 @@ function getBalanceCashEstimate() {
     (sum, invoice) =>
       sum +
       sumCompletedScheduledAmount(
-        Number(invoice.total_amount) || 0,
+        getInvoiceCashAmount(invoice),
         getInvoicePaymentDates(invoice),
         invoice.payment_completed_dates
       ),
@@ -5740,8 +5750,15 @@ function validatePending() {
     }
     const baseValue = parseNumberInput(item.base);
     const totalValue = parseNumberInput(item.total);
+    const withholdingValue = parseNumberInput(item.withholdingAmount);
     if (baseValue === null && totalValue === null) {
       errors.push(`Base imponible o total obligatorio: ${item.file.name}`);
+    }
+    if (withholdingValue !== null && withholdingValue < 0) {
+      errors.push(`Retención inválida: ${item.file.name}`);
+    }
+    if (withholdingValue !== null && totalValue !== null && withholdingValue > totalValue) {
+      errors.push(`La retención no puede superar el total: ${item.file.name}`);
     }
     const isRectificativa =
       item.isRectificativa ||
@@ -6207,6 +6224,7 @@ function uploadPending() {
           : resolveVatRateValue(item.vat),
         vatAmount: breakdownTotals ? breakdownTotals.vatAmount : normalized.vatAmount || item.vatAmount,
         total: breakdownTotals ? breakdownTotals.total : normalized.total || item.total,
+        withholding_amount: parseNumberInput(item.withholdingAmount) || 0,
         vatBreakdown: breakdownPayload,
       };
     }),
@@ -7805,6 +7823,7 @@ function renderInvoices(invoices) {
         invoice.base_amount,
         invoice.vat_amount,
         invoice.total_amount,
+        invoice.withholding_amount,
         formatExpenseCategory(invoice.expense_category || "with_invoice"),
       ],
       invoiceSearchInput?.value || ""
@@ -7845,6 +7864,11 @@ function renderInvoices(invoices) {
 
     const vatAmountTd = document.createElement("td");
     vatAmountTd.textContent = formatCurrency(invoice.vat_amount || 0);
+
+    const withholdingTd = document.createElement("td");
+    const withholdingValue = Number(invoice.withholding_amount || 0);
+    withholdingTd.textContent =
+      withholdingValue > 0 ? formatCurrency(withholdingValue) : "-";
 
     const totalTd = document.createElement("td");
     totalTd.textContent = formatCurrency(invoice.total_amount);
@@ -7887,6 +7911,7 @@ function renderInvoices(invoices) {
     tr.appendChild(baseTd);
     tr.appendChild(vatTd);
     tr.appendChild(vatAmountTd);
+    tr.appendChild(withholdingTd);
     tr.appendChild(totalTd);
     tr.appendChild(categoryTd);
     tr.appendChild(actionsTd);
@@ -8182,9 +8207,10 @@ function enterInvoiceEditMode(row, invoice) {
   const baseTd = row.children[2];
   const vatTd = row.children[3];
   const vatAmountTd = row.children[4];
-  const totalTd = row.children[5];
-  const categoryTd = row.children[6];
-  const actionsTd = row.children[7];
+  const withholdingTd = row.children[5];
+  const totalTd = row.children[6];
+  const categoryTd = row.children[7];
+  const actionsTd = row.children[8];
 
   const dateInput = document.createElement("input");
   dateInput.type = "date";
@@ -8236,6 +8262,11 @@ function enterInvoiceEditMode(row, invoice) {
   totalInput.min = "0";
   totalInput.value = formatAmountInput(invoice.total_amount);
 
+  const withholdingInput = document.createElement("input");
+  withholdingInput.type = "text";
+  withholdingInput.min = "0";
+  withholdingInput.value = formatAmountInput(invoice.withholding_amount || 0);
+
   const calcInputs = {
     base: baseInput,
     vat: vatSelect,
@@ -8245,6 +8276,7 @@ function enterInvoiceEditMode(row, invoice) {
   attachAmountInputBehavior(baseInput);
   attachAmountInputBehavior(vatAmountInput);
   attachAmountInputBehavior(totalInput);
+  attachAmountInputBehavior(withholdingInput);
   baseInput.addEventListener("input", () => {
     applyVatCalculation(invoice, calcInputs, "base");
   });
@@ -8287,6 +8319,8 @@ function enterInvoiceEditMode(row, invoice) {
   vatTd.appendChild(vatSelect);
   vatAmountTd.textContent = "";
   vatAmountTd.appendChild(vatAmountInput);
+  withholdingTd.textContent = "";
+  withholdingTd.appendChild(withholdingInput);
   totalTd.textContent = "";
   totalTd.appendChild(totalInput);
   categoryTd.textContent = "";
@@ -8308,6 +8342,7 @@ function enterInvoiceEditMode(row, invoice) {
       base_amount: baseInput.value,
       vat_rate: vatSelect.value,
       vat_amount: vatAmountInput.value,
+      withholding_amount: withholdingInput.value,
       total_amount: totalInput.value,
       expense_category: categorySelect.value,
       vat_deductible: vatDeductibleSelect.value === "true",
