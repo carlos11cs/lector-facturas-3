@@ -1793,6 +1793,13 @@ def _is_same_entity(candidate: Optional[str], company_names) -> bool:
         normalized_name = _normalize_entity_name(name)
         if normalized == normalized_name:
             return True
+        if normalized_name:
+            shorter, longer = sorted(
+                [normalized, normalized_name],
+                key=len,
+            )
+            if len(shorter) >= 5 and shorter in longer:
+                return True
         if (
             normalized_name
             and len(normalized) >= 10
@@ -2196,6 +2203,10 @@ def _appears_in_customer_context(
         "datos fiscales",
         "destinatario factura",
         "facturado a",
+        "direccion de facturacion",
+        "dirección de facturación",
+        "datos de facturacion",
+        "datos de facturación",
         "receptor",
         "enviado a",
         "bill to",
@@ -2275,6 +2286,10 @@ def _extract_supplier_candidates(text: str, company_names=None) -> List[Tuple[st
         "enviado a",
         "destinatario",
         "facturado a",
+        "direccion de facturacion",
+        "dirección de facturación",
+        "datos de facturacion",
+        "datos de facturación",
         "receptor",
         "bill to",
         "ship to",
@@ -2393,6 +2408,10 @@ def _extract_client_candidates(text: str, company_names=None) -> List[Tuple[str,
     client_keywords = [
         "cliente",
         "facturado a",
+        "direccion de facturacion",
+        "dirección de facturación",
+        "datos de facturacion",
+        "datos de facturación",
         "destinatario",
         "receptor",
         "enviado a",
@@ -2469,6 +2488,7 @@ def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
         return None
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     supplier_keywords = [
+        "nombre empresa",
         "expedido por",
         "emisor",
         "proveedor",
@@ -2505,6 +2525,11 @@ def _select_best_supplier(text: str, company_names=None) -> Optional[str]:
 
     for idx, line in enumerate(lines):
         lowered = line.lower()
+        if "nombre empresa" in lowered:
+            for offset in (1, 2):
+                if idx + offset < len(lines):
+                    candidate = lines[idx + offset].strip()
+                    candidate_pool.append((candidate, 160 - offset, idx + offset))
         if any(keyword in lowered for keyword in supplier_keywords):
             for keyword in supplier_keywords:
                 if keyword in lowered:
@@ -2556,6 +2581,10 @@ def _select_best_client(text: str, company_names=None) -> Optional[str]:
     client_keywords = [
         "cliente",
         "facturado a",
+        "direccion de facturacion",
+        "dirección de facturación",
+        "datos de facturacion",
+        "datos de facturación",
         "destinatario",
         "receptor",
         "enviado a",
@@ -2577,7 +2606,11 @@ def _select_best_client(text: str, company_names=None) -> Optional[str]:
         if any(keyword in lowered for keyword in supplier_keywords):
             continue
         if any(keyword in lowered for keyword in client_keywords):
-            parts = re.split(r"cliente|facturado a|destinatario|receptor|enviado a|bill to|ship to", line, flags=re.IGNORECASE)
+            parts = re.split(
+                r"cliente|facturado a|direccion de facturacion|dirección de facturación|datos de facturacion|datos de facturación|destinatario|receptor|enviado a|bill to|ship to",
+                line,
+                flags=re.IGNORECASE,
+            )
             if len(parts) > 1:
                 candidate = parts[1].strip(" :-")
                 if _is_valid_client(candidate, company_names, text):
@@ -2828,8 +2861,21 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
             elif llm_consistent:
                 amount_source = incoming_source
             else:
-                # Keep explicit total even if base/vat are incomplete.
-                amount_source = incoming_source
+                # If a coherent breakdown matches the explicit total, repair the
+                # incomplete summary using the breakdown instead of dropping the
+                # whole extraction as inconsistent.
+                if (
+                    breakdown_consistent
+                    and abs(total_sum - total_amount) <= 0.02
+                    and (base_amount is None or vat_amount is None or not llm_consistent)
+                ):
+                    base_amount = base_sum
+                    vat_amount = vat_sum
+                    total_amount = total_sum
+                    amount_source = "breakdown"
+                else:
+                    # Keep explicit total even if base/vat are incomplete.
+                    amount_source = incoming_source
         elif breakdown_consistent:
             llm_matches_breakdown = (
                 totals_match(base_amount, base_sum)
