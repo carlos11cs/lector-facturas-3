@@ -951,6 +951,7 @@ def init_db():
                     invoices_table.c.expense_category,
                     invoices_table.c.vat_deductible,
                     invoices_table.c.vat_amount,
+                    invoices_table.c.withholding_amount,
                     invoices_table.c.expense_family,
                     invoices_table.c.expense_subtype,
                     invoices_table.c.pnl_bucket,
@@ -958,17 +959,31 @@ def init_db():
                 )
             ).mappings().all()
             for row in invoice_rows:
+                existing_targets = parse_tax_model_targets(row.get("tax_model_targets"))
+                inferred_targets = parse_tax_model_targets(
+                    derive_invoice_profile(
+                        row.get("expense_category"),
+                        row.get("vat_deductible"),
+                        row.get("vat_amount"),
+                        row.get("withholding_amount"),
+                    ).get("tax_model_targets")
+                )
                 if (
                     row.get("expense_family")
                     and row.get("expense_subtype")
                     and row.get("pnl_bucket")
                     and row.get("tax_model_targets")
+                    and (
+                        "111" not in inferred_targets
+                        or "111" in existing_targets
+                    )
                 ):
                     continue
                 profile = derive_invoice_profile(
                     row.get("expense_category"),
                     row.get("vat_deductible"),
                     row.get("vat_amount"),
+                    row.get("withholding_amount"),
                 )
                 conn.execute(
                     invoices_table.update()
@@ -1059,11 +1074,23 @@ def init_db():
                 )
             ).mappings().all()
             for row in expense_rows:
+                existing_targets = parse_tax_model_targets(row.get("tax_model_targets"))
+                inferred_targets = parse_tax_model_targets(
+                    derive_no_invoice_profile(
+                        row.get("expense_type"),
+                        row.get("vat_deductible"),
+                        row.get("withholding_amount"),
+                    ).get("tax_model_targets")
+                )
                 if (
                     row.get("expense_family")
                     and row.get("expense_subtype")
                     and row.get("pnl_bucket")
                     and row.get("tax_model_targets")
+                    and (
+                        ("115" not in inferred_targets or "115" in existing_targets)
+                        and ("111" not in inferred_targets or "111" in existing_targets)
+                    )
                 ):
                     continue
                 profile = derive_no_invoice_profile(
@@ -2849,6 +2876,37 @@ def derive_no_invoice_profile(expense_type, vat_deductible=False, withholding_am
     }
 
 
+def get_effective_invoice_tax_targets(row):
+    tax_targets = parse_tax_model_targets(row.get("tax_model_targets"))
+    if tax_targets:
+        return tax_targets
+    profile = derive_invoice_profile(
+        row.get("expense_category"),
+        row.get("vat_deductible"),
+        row.get("vat_amount"),
+        row.get("withholding_amount"),
+    )
+    return parse_tax_model_targets(profile.get("tax_model_targets"))
+
+
+def get_effective_no_invoice_tax_targets(row):
+    tax_targets = parse_tax_model_targets(row.get("tax_model_targets"))
+    inferred_targets = parse_tax_model_targets(
+        derive_no_invoice_profile(
+            row.get("expense_type"),
+            row.get("vat_deductible"),
+            row.get("withholding_amount"),
+        ).get("tax_model_targets")
+    )
+    if not tax_targets:
+        return inferred_targets
+    if "115" in inferred_targets and "115" not in tax_targets:
+        return inferred_targets
+    if "111" in inferred_targets and "111" not in tax_targets:
+        return inferred_targets
+    return tax_targets
+
+
 def get_no_invoice_deductible_amount(row):
     expense_type = row.get("expense_type")
     if row.get("expense_family") == "financing" or expense_type == "prestamo":
@@ -4116,7 +4174,7 @@ def _build_financial_metrics(user_id, company_id, periods, conn):
             gross_total = float(row.get("total_amount") or 0)
             deductible_amount = get_invoice_deductible_amount(row)
             withholding_amount = float(row.get("withholding_amount") or 0)
-            tax_targets = parse_tax_model_targets(row.get("tax_model_targets"))
+            tax_targets = get_effective_invoice_tax_targets(row)
             payment_dates = parse_payment_dates(row.get("payment_dates"))
             if not payment_dates:
                 fallback = normalize_date(row.get("payment_date")) or normalize_date(
@@ -4128,12 +4186,17 @@ def _build_financial_metrics(user_id, company_id, periods, conn):
             metrics["invoice_expenses"] += deductible_amount
             if row.get("expense_category") != "non_deductible" and row.get("vat_deductible") is not False:
                 metrics["expense_vat"] += float(row.get("vat_amount") or 0)
-            if withholding_amount > 0 and payment_dates and "111" in tax_targets:
-                metrics["withholding_111"] += _sum_amount_for_period_dates(
+            if withholding_amount > 0 and payment_dates:
+                amount_in_selected_period = _sum_amount_for_period_dates(
                     withholding_amount,
                     payment_dates,
                     period_prefixes,
                 )
+                if amount_in_selected_period > 0:
+                    if "115" in tax_targets:
+                        metrics["withholding_115"] += amount_in_selected_period
+                    elif "111" in tax_targets:
+                        metrics["withholding_111"] += amount_in_selected_period
             supplier_name = (row.get("supplier") or "Sin proveedor").strip() or "Sin proveedor"
             supplier_totals[supplier_name] = supplier_totals.get(supplier_name, 0.0) + gross_total
             invoice_date = normalize_date(row.get("invoice_date"))
@@ -4171,7 +4234,7 @@ def _build_financial_metrics(user_id, company_id, periods, conn):
             gross_total = float(row.get("amount") or 0)
             deductible_amount = get_no_invoice_deductible_amount(row)
             expense_type = row.get("expense_type")
-            tax_targets = parse_tax_model_targets(row.get("tax_model_targets"))
+            tax_targets = get_effective_no_invoice_tax_targets(row)
             withholding_amount = float(row.get("withholding_amount") or 0)
             payment_dates = parse_payment_dates(row.get("payment_dates"))
             if not payment_dates:
