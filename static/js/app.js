@@ -7525,6 +7525,7 @@ function renderPaymentDayDetails(day) {
       row.classList.add(`is-${item.status}`);
     }
     const supplier = document.createElement("span");
+    supplier.className = "payment-day-supplier";
     let label = "Proveedor";
     if (item.type === "income") {
       label = "Cliente";
@@ -7537,6 +7538,7 @@ function renderPaymentDayDetails(day) {
     }
     supplier.textContent = `${label}: ${item.counterparty || "-"}`;
     const concept = document.createElement("span");
+    concept.className = "payment-day-concept";
     if (item.type === "tax_obligation") {
       const filingLabel = taxFilingStatusLabel(item.filing_status);
       concept.textContent = filingLabel
@@ -7561,6 +7563,7 @@ function renderPaymentDayDetails(day) {
       dateLabel.textContent = `Pagado · ${item.payment_date}`;
     }
     const amount = document.createElement("span");
+    amount.className = "payment-day-amount";
     const amountLabel =
       item.type === "income"
         ? "Cobro"
@@ -7585,6 +7588,8 @@ function renderPaymentDayDetails(day) {
         : `${formatCurrency(item.amount)} (${amountLabel})`;
     const editContainer = document.createElement("div");
     editContainer.className = "payment-edit";
+    const actionsGroup = document.createElement("div");
+    actionsGroup.className = "payment-day-actions";
     let editBtn = null;
     if (item.type !== "tax_obligation") {
       editBtn = document.createElement("button");
@@ -7638,10 +7643,13 @@ function renderPaymentDayDetails(day) {
     row.appendChild(dateLabel);
     row.appendChild(amount);
     if (paidBtn) {
-      row.appendChild(paidBtn);
+      actionsGroup.appendChild(paidBtn);
     }
     if (editBtn) {
-      row.appendChild(editBtn);
+      actionsGroup.appendChild(editBtn);
+    }
+    if (actionsGroup.childElementCount) {
+      row.appendChild(actionsGroup);
     }
     row.appendChild(editContainer);
     paymentDayList.appendChild(row);

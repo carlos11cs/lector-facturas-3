@@ -582,12 +582,29 @@ h1 {
 
 .payment-day-item {
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.2fr) minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(180px, 1.2fr) minmax(280px, 1.6fr) auto auto auto;
   gap: 12px;
   padding: 10px 12px;
   border-radius: 12px;
   background: #f7faf7;
   border: 1px solid var(--border);
+  align-items: start;
+}
+
+.payment-day-item > span,
+.payment-day-item > div {
+  min-width: 0;
+}
+
+.payment-day-supplier,
+.payment-day-concept,
+.payment-day-amount {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.payment-day-concept {
+  color: var(--muted);
 }
 
 .payment-day-item.is-due_today {
@@ -609,10 +626,19 @@ h1 {
   display: inline-flex;
   align-items: center;
   width: fit-content;
+  max-width: 100%;
   padding: 4px 8px;
   border-radius: 999px;
   font-size: 0.8rem;
   font-weight: 600;
+}
+
+.payment-day-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  align-items: flex-start;
 }
 
 .payment-status-overdue {
@@ -1150,8 +1176,14 @@ h1 {
 .payment-edit {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
-  margin-top: 6px;
+  margin-top: 0;
+  grid-column: 1 / -1;
+}
+
+.payment-edit:empty {
+  display: none;
 }
 
 .payment-edit input[type="date"] {
