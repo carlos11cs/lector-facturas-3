@@ -10654,11 +10654,15 @@ function initNavigation() {
     balance: "statements",
     "document-center": "expenses",
   };
+  const querySection = legacySectionMap[new URLSearchParams(window.location.search).get("section")] ||
+    new URLSearchParams(window.location.search).get("section");
   const storedSection = legacySectionMap[localStorage.getItem("activeSection")] || localStorage.getItem("activeSection");
   const availableSections = Array.from(sections || []).map(
     (section) => section.dataset.section
   );
-  const defaultSection = availableSections.includes(storedSection)
+  const defaultSection = availableSections.includes(querySection)
+    ? querySection
+    : availableSections.includes(storedSection)
     ? storedSection
     : availableSections[0] || "dashboard";
   setActiveSection(defaultSection);

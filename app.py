@@ -466,6 +466,17 @@ def build_public_url(path: str = ""):
     return f"{base_url}{path}"
 
 
+def app_home_billing_redirect_url(*, billing=None, billing_error=None, section="account"):
+    params = {}
+    if billing:
+        params["billing"] = billing
+    if billing_error:
+        params["billing_error"] = billing_error
+    if section:
+        params["section"] = section
+    return url_for("app_home", **params)
+
+
 @app.after_request
 def add_security_headers(response):
     csp = (
@@ -564,6 +575,44 @@ def get_default_stripe_discounts():
     if STRIPE_PROMO_COUPON_3M_50:
         return [{"coupon": STRIPE_PROMO_COUPON_3M_50}]
     return []
+
+
+def create_stripe_checkout_session_with_fallback(*, customer_id, agency_id, price_id, plan, billing_period):
+    checkout_kwargs = {
+        "mode": "subscription",
+        "customer": customer_id,
+        "client_reference_id": str(agency_id),
+        "line_items": [{"price": price_id, "quantity": 1}],
+        "metadata": {
+            "agency_id": str(agency_id),
+            "plan": plan,
+            "billing_period": billing_period,
+        },
+        "subscription_data": {
+            "metadata": {
+                "agency_id": str(agency_id),
+                "plan": plan,
+                "billing_period": billing_period,
+            }
+        },
+        "success_url": f"{get_app_base_url()}{url_for('app_home')}?billing=success&section=account",
+        "cancel_url": f"{get_app_base_url()}{url_for('app_home')}?billing=cancelled&section=account",
+    }
+    discounts = get_default_stripe_discounts() if billing_period == "monthly" else []
+    if discounts:
+        try:
+            return stripe.checkout.Session.create(
+                **checkout_kwargs,
+                discounts=discounts,
+            )
+        except Exception:
+            app.logger.exception(
+                "Stripe checkout creation failed with launch promo. Retrying without discount."
+            )
+    return stripe.checkout.Session.create(
+        **checkout_kwargs,
+        allow_promotion_codes=True,
+    )
 
 
 def count_pending_staff_invitations(conn, agency_id):
@@ -5307,18 +5356,17 @@ def start_stripe_checkout():
     if user.get("role") != "agency":
         return redirect(url_for("app_home"))
     if not stripe_is_configured():
-        return redirect(url_for("app_home", billing_error="not_configured"))
+        return redirect(app_home_billing_redirect_url(billing_error="not_configured"))
     plan = (request.form.get("plan") or "").strip().lower()
     billing_period = (request.form.get("billing_period") or "monthly").strip().lower()
     if plan not in {"starter", "pro", "advanced"}:
-        return redirect(url_for("app_home", billing_error="checkout_failed"))
+        return redirect(app_home_billing_redirect_url(billing_error="checkout_failed"))
     if billing_period not in {"monthly", "annual"}:
-        return redirect(url_for("app_home", billing_error="checkout_failed"))
+        return redirect(app_home_billing_redirect_url(billing_error="checkout_failed"))
     price_id = get_stripe_price_id(plan, billing_period)
     if not price_id:
         return redirect(
-            url_for(
-                "app_home",
+            app_home_billing_redirect_url(
                 billing_error="annual_not_configured"
                 if billing_period == "annual"
                 else "checkout_failed",
@@ -5326,7 +5374,7 @@ def start_stripe_checkout():
         )
     agency = get_agency_row_for_user(user)
     if not agency:
-        return redirect(url_for("app_home", billing_error="checkout_failed"))
+        return redirect(app_home_billing_redirect_url(billing_error="checkout_failed"))
     try:
         with engine.begin() as conn:
             agency = sync_agency_stripe_state_from_remote(conn, agency)
@@ -5351,35 +5399,16 @@ def start_stripe_checkout():
                     agency["id"],
                     stripe_customer_id=customer_id,
                 )
-        checkout_kwargs = {
-            "mode": "subscription",
-            "customer": customer_id,
-            "client_reference_id": str(agency["id"]),
-            "line_items": [{"price": price_id, "quantity": 1}],
-            "metadata": {
-                "agency_id": str(agency["id"]),
-                "plan": plan,
-                "billing_period": billing_period,
-            },
-            "subscription_data": {
-                "metadata": {
-                    "agency_id": str(agency["id"]),
-                    "plan": plan,
-                    "billing_period": billing_period,
-                }
-            },
-            "success_url": f"{get_app_base_url()}{url_for('app_home')}?billing=success",
-            "cancel_url": f"{get_app_base_url()}{url_for('app_home')}?billing=cancelled",
-        }
-        discounts = get_default_stripe_discounts() if billing_period == "monthly" else []
-        if discounts:
-            checkout_kwargs["discounts"] = discounts
-        else:
-            checkout_kwargs["allow_promotion_codes"] = True
-        checkout_session = stripe.checkout.Session.create(**checkout_kwargs)
+        checkout_session = create_stripe_checkout_session_with_fallback(
+            customer_id=customer_id,
+            agency_id=agency["id"],
+            price_id=price_id,
+            plan=plan,
+            billing_period=billing_period,
+        )
     except Exception:
         app.logger.exception("Stripe checkout creation failed")
-        return redirect(url_for("app_home", billing_error="checkout_failed"))
+        return redirect(app_home_billing_redirect_url(billing_error="checkout_failed"))
     return redirect(checkout_session.get("url"), code=303)
 
 
@@ -5389,26 +5418,26 @@ def open_stripe_portal():
     if user.get("role") != "agency":
         return redirect(url_for("app_home"))
     if not stripe_is_configured():
-        return redirect(url_for("app_home", billing_error="not_configured"))
+        return redirect(app_home_billing_redirect_url(billing_error="not_configured"))
     agency = get_agency_row_for_user(user)
     if not agency:
-        return redirect(url_for("app_home", billing_error="not_available"))
+        return redirect(app_home_billing_redirect_url(billing_error="not_available"))
     try:
         with engine.begin() as conn:
             agency = sync_agency_stripe_state_from_remote(conn, agency)
         if not agency or not agency.get("stripe_customer_id"):
-            return redirect(url_for("app_home", billing_error="not_available"))
+            return redirect(app_home_billing_redirect_url(billing_error="not_available"))
         if not stripe_customer_exists(agency["stripe_customer_id"]):
             with engine.begin() as conn:
                 clear_agency_stripe_state(conn, agency["id"])
-            return redirect(url_for("app_home", billing_error="not_available"))
+            return redirect(app_home_billing_redirect_url(billing_error="not_available"))
         portal_session = stripe.billing_portal.Session.create(
             customer=agency["stripe_customer_id"],
-            return_url=f"{get_app_base_url()}{url_for('app_home')}",
+            return_url=f"{get_app_base_url()}{app_home_billing_redirect_url()}",
         )
     except Exception:
         app.logger.exception("Stripe billing portal creation failed")
-        return redirect(url_for("app_home", billing_error="portal_failed"))
+        return redirect(app_home_billing_redirect_url(billing_error="portal_failed"))
     return redirect(portal_session.get("url"), code=303)
 
 
