@@ -9,10 +9,12 @@ import multiprocessing as mp
 import os
 import re
 import secrets
+import sys
 import tempfile
 import zipfile
 from datetime import date, datetime, timedelta
 from functools import wraps
+from urllib.parse import quote_plus
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -475,6 +477,15 @@ def app_home_billing_redirect_url(*, billing=None, billing_error=None, section="
     if section:
         params["section"] = section
     return url_for("app_home", **params)
+
+
+def sanitize_billing_debug_message(message):
+    if not message:
+        return None
+    normalized = " ".join(str(message).strip().split())
+    if not normalized:
+        return None
+    return normalized[:220]
 
 
 @app.after_request
@@ -1019,6 +1030,7 @@ def get_account_context_for_user(user):
 def get_billing_message():
     billing_state = (request.args.get("billing") or "").strip().lower()
     billing_error = (request.args.get("billing_error") or "").strip().lower()
+    billing_debug = sanitize_billing_debug_message(request.args.get("billing_debug"))
     if billing_state == "success":
         return {"type": "success", "text": "Suscripción activada. Stripe ha confirmado el alta."}
     if billing_state == "cancelled":
@@ -1036,7 +1048,11 @@ def get_billing_message():
     if billing_error == "checkout_failed":
         return {
             "type": "warning",
-            "text": "No se pudo iniciar el checkout de Stripe. Revisa la configuración de precios y claves.",
+            "text": (
+                f"No se pudo iniciar el checkout de Stripe. {billing_debug}"
+                if billing_debug
+                else "No se pudo iniciar el checkout de Stripe. Revisa la configuración de precios y claves."
+            ),
         }
     if billing_error == "annual_not_configured":
         return {
@@ -1046,7 +1062,11 @@ def get_billing_message():
     if billing_error == "portal_failed":
         return {
             "type": "warning",
-            "text": "No se pudo abrir el portal de facturación de Stripe.",
+            "text": (
+                f"No se pudo abrir el portal de facturación de Stripe. {billing_debug}"
+                if billing_debug
+                else "No se pudo abrir el portal de facturación de Stripe."
+            ),
         }
     return None
 
@@ -5436,7 +5456,14 @@ def start_stripe_checkout():
             return redirect(app_home_billing_redirect_url(billing_error="checkout_failed"))
     except Exception:
         app.logger.exception("Stripe checkout creation failed")
-        return redirect(app_home_billing_redirect_url(billing_error="checkout_failed"))
+        return redirect(
+            app_home_billing_redirect_url(
+                billing_error="checkout_failed",
+                section="account",
+            )
+            + "&billing_debug="
+            + quote_plus(sanitize_billing_debug_message(str(sys.exc_info()[1])) or "Error inesperado en Stripe.")
+        )
     return redirect(checkout_url, code=303)
 
 
@@ -5474,7 +5501,14 @@ def open_stripe_portal():
             return redirect(app_home_billing_redirect_url(billing_error="portal_failed"))
     except Exception:
         app.logger.exception("Stripe billing portal creation failed")
-        return redirect(app_home_billing_redirect_url(billing_error="portal_failed"))
+        return redirect(
+            app_home_billing_redirect_url(
+                billing_error="portal_failed",
+                section="account",
+            )
+            + "&billing_debug="
+            + quote_plus(sanitize_billing_debug_message(str(sys.exc_info()[1])) or "Error inesperado en Stripe.")
+        )
     return redirect(portal_url, code=303)
 
 
