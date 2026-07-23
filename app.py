@@ -747,10 +747,152 @@ def stripe_customer_exists(customer_id):
         return False
 
 
+def _normalize_stripe_period_end(period_end_value):
+    if not period_end_value:
+        return None
+    try:
+        return datetime.utcfromtimestamp(int(period_end_value)).date().isoformat()
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _extract_active_subscription_from_customer(customer_id):
+    if not stripe or not customer_id:
+        return None
+    try:
+        subscriptions = stripe.Subscription.list(
+            customer=customer_id,
+            status="all",
+            limit=10,
+        )
+    except Exception:
+        app.logger.exception(
+            "No se pudo consultar las suscripciones de Stripe para el cliente %s",
+            customer_id,
+        )
+        return None
+    selected = None
+    for subscription in subscriptions.auto_paging_iter():
+        status = (subscription.get("status") or "").strip().lower()
+        if status in {"trialing", "active", "past_due", "incomplete"}:
+            selected = subscription
+            break
+        if selected is None:
+            selected = subscription
+    return selected
+
+
+def sync_agency_stripe_state_from_remote(conn, agency):
+    if not stripe_is_configured() or not agency:
+        return agency
+
+    agency_id = agency["id"]
+    customer_id = (agency.get("stripe_customer_id") or "").strip()
+    email = (agency.get("email") or "").strip().lower()
+
+    customer = None
+    if customer_id:
+        try:
+            customer = stripe.Customer.retrieve(customer_id)
+            if getattr(customer, "deleted", False):
+                customer = None
+                customer_id = ""
+        except Exception:
+            app.logger.warning(
+                "No se pudo recuperar el cliente Stripe %s para la gestoría %s",
+                customer_id,
+                agency_id,
+            )
+            customer = None
+            customer_id = ""
+
+    if not customer and email:
+        try:
+            candidates = stripe.Customer.list(email=email, limit=10)
+            for candidate in candidates.auto_paging_iter():
+                metadata = candidate.get("metadata") or {}
+                candidate_agency_id = str(metadata.get("agency_id") or "").strip()
+                if candidate_agency_id == str(agency_id) or not customer:
+                    customer = candidate
+                    customer_id = candidate.get("id") or ""
+                    if candidate_agency_id == str(agency_id):
+                        break
+        except Exception:
+            app.logger.exception(
+                "No se pudo buscar cliente Stripe por email para la gestoría %s",
+                agency_id,
+            )
+
+    if not customer_id:
+        if agency.get("stripe_customer_id") or agency.get("stripe_subscription_id"):
+            clear_agency_stripe_state(conn, agency_id)
+            agency = dict(agency)
+            agency["stripe_customer_id"] = None
+            agency["stripe_subscription_id"] = None
+            agency["stripe_price_id"] = None
+            agency["stripe_subscription_status"] = None
+            agency["stripe_current_period_end"] = None
+        return agency
+
+    subscription = _extract_active_subscription_from_customer(customer_id)
+    price_id = ""
+    subscription_id = None
+    subscription_status = None
+    period_end = None
+    resolved_plan = agency.get("plan") or "starter"
+    app_status = agency.get("status") or "trial"
+
+    if subscription:
+        subscription_id = subscription.get("id")
+        subscription_status = subscription.get("status")
+        period_end = _normalize_stripe_period_end(subscription.get("current_period_end"))
+        items = ((subscription.get("items") or {}).get("data") or [])
+        if items:
+            price_id = ((items[0].get("price") or {}).get("id") or "").strip()
+        plan_info = get_plan_from_price_id(price_id)
+        if plan_info.get("plan"):
+            resolved_plan = plan_info["plan"]
+        mapped_status = map_stripe_subscription_status(subscription_status)
+        if mapped_status:
+            app_status = mapped_status
+    elif agency.get("stripe_subscription_id") or agency.get("stripe_subscription_status"):
+        app_status = "trial"
+
+    if subscription_id is None:
+        conn.execute(
+            agencies_table.update()
+            .where(agencies_table.c.id == agency_id)
+            .values(
+                stripe_subscription_id=None,
+                stripe_price_id=None,
+                stripe_subscription_status=None,
+                stripe_current_period_end=None,
+            )
+        )
+
+    sync_agency_billing_state(
+        conn,
+        agency_id,
+        plan=resolved_plan,
+        app_status=app_status,
+        stripe_customer_id=customer_id,
+        stripe_subscription_id=subscription_id,
+        stripe_price_id=price_id or None,
+        stripe_subscription_status=subscription_status,
+        stripe_current_period_end=period_end,
+    )
+    return conn.execute(
+        select(agencies_table).where(agencies_table.c.id == agency_id)
+    ).mappings().first()
+
+
 def get_billing_context_for_user(user):
     agency = get_agency_row_for_user(user)
     if not agency or user.get("role") != "agency":
         return None
+    if stripe_is_configured():
+        with engine.begin() as conn:
+            agency = sync_agency_stripe_state_from_remote(conn, agency)
     subscription_status = agency.get("stripe_subscription_status")
     status = agency.get("status") or "trial"
     with engine.connect() as conn:
@@ -5185,8 +5327,10 @@ def start_stripe_checkout():
     agency = get_agency_row_for_user(user)
     if not agency:
         return redirect(url_for("app_home", billing_error="checkout_failed"))
-    customer_id = agency.get("stripe_customer_id")
     try:
+        with engine.begin() as conn:
+            agency = sync_agency_stripe_state_from_remote(conn, agency)
+        customer_id = agency.get("stripe_customer_id")
         if agency.get("stripe_subscription_id") and customer_id and stripe_customer_exists(customer_id):
             return redirect(url_for("open_stripe_portal"))
         if customer_id and not stripe_customer_exists(customer_id):
@@ -5247,9 +5391,13 @@ def open_stripe_portal():
     if not stripe_is_configured():
         return redirect(url_for("app_home", billing_error="not_configured"))
     agency = get_agency_row_for_user(user)
-    if not agency or not agency.get("stripe_customer_id"):
+    if not agency:
         return redirect(url_for("app_home", billing_error="not_available"))
     try:
+        with engine.begin() as conn:
+            agency = sync_agency_stripe_state_from_remote(conn, agency)
+        if not agency or not agency.get("stripe_customer_id"):
+            return redirect(url_for("app_home", billing_error="not_available"))
         if not stripe_customer_exists(agency["stripe_customer_id"]):
             with engine.begin() as conn:
                 clear_agency_stripe_state(conn, agency["id"])
