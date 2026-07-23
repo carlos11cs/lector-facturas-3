@@ -1,6 +1,7 @@
 import calendar
 import csv
 import hashlib
+from html import escape
 import io
 import json
 import logging
@@ -418,6 +419,7 @@ app.config["SECRET_KEY"] = os.getenv("SECRET_KEY") or secrets.token_urlsafe(32)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = os.getenv("ENV", "").lower() == "production"
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 if stripe and STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
@@ -436,13 +438,62 @@ def static_asset_url(filename: str) -> str:
 
 @app.context_processor
 def inject_static_asset_url():
-    return {"static_asset_url": static_asset_url}
+    return {
+        "static_asset_url": static_asset_url,
+        "get_app_base_url": get_app_base_url,
+    }
 
 
 def get_app_base_url():
     if APP_BASE_URL:
-        return APP_BASE_URL
+        return APP_BASE_URL.rstrip("/")
     return request.url_root.rstrip("/")
+
+
+def is_request_secure():
+    if request.is_secure:
+        return True
+    forwarded_proto = (request.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip()
+    return forwarded_proto == "https"
+
+
+def build_public_url(path: str = ""):
+    base_url = get_app_base_url().rstrip("/")
+    if not path:
+        return base_url
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{base_url}{path}"
+
+
+@app.after_request
+def add_security_headers(response):
+    csp = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; "
+        "font-src 'self' data:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'; "
+        "object-src 'none'"
+    )
+    response.headers["Content-Security-Policy"] = csp
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = (
+        "camera=(), microphone=(), geolocation=(), browsing-topics=(), interest-cohort=()"
+    )
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    if is_request_secure():
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=31536000; includeSubDomains; preload"
+        )
+    return response
 
 
 def stripe_is_configured():
@@ -5048,6 +5099,53 @@ def landing_alias():
     if g.current_user:
         return redirect(url_for("app_home"))
     return render_template("landing.html")
+
+
+@app.route("/robots.txt")
+def robots_txt():
+    body = "\n".join(
+        [
+            "User-agent: *",
+            "Allow: /",
+            "Disallow: /app",
+            "Disallow: /api/",
+            "Disallow: /admin",
+            "Disallow: /login",
+            "Disallow: /register",
+            "Disallow: /reset",
+            f"Sitemap: {build_public_url('/sitemap.xml')}",
+            "",
+        ]
+    )
+    return app.response_class(body, mimetype="text/plain")
+
+
+@app.route("/sitemap.xml")
+def sitemap_xml():
+    public_pages = [
+        {"loc": build_public_url("/"), "priority": "1.0", "changefreq": "weekly"},
+        {"loc": build_public_url("/landing"), "priority": "0.8", "changefreq": "weekly"},
+        {"loc": build_public_url("/aviso-legal"), "priority": "0.2", "changefreq": "yearly"},
+        {"loc": build_public_url("/privacidad"), "priority": "0.2", "changefreq": "yearly"},
+        {"loc": build_public_url("/cookies"), "priority": "0.2", "changefreq": "yearly"},
+        {"loc": build_public_url("/terminos"), "priority": "0.2", "changefreq": "yearly"},
+    ]
+    xml_parts = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    ]
+    for page in public_pages:
+        xml_parts.extend(
+            [
+                "  <url>",
+                f"    <loc>{escape(page['loc'])}</loc>",
+                f"    <changefreq>{page['changefreq']}</changefreq>",
+                f"    <priority>{page['priority']}</priority>",
+                "  </url>",
+            ]
+        )
+    xml_parts.append("</urlset>")
+    return app.response_class("\n".join(xml_parts), mimetype="application/xml")
 
 
 @app.route("/app")
