@@ -1246,6 +1246,10 @@ const accountPhone = document.getElementById("accountPhone");
 const accountCurrentPassword = document.getElementById("accountCurrentPassword");
 const accountNewPassword = document.getElementById("accountNewPassword");
 const accountSaveBtn = document.getElementById("accountSaveBtn");
+const stripeCheckoutForm = document.getElementById("stripeCheckoutForm");
+const stripeCheckoutBtn = document.getElementById("stripeCheckoutBtn");
+const stripePortalForm = document.getElementById("stripePortalForm");
+const stripePortalBtn = document.getElementById("stripePortalBtn");
 const staffEmail = document.getElementById("staffEmail");
 const staffSaveBtn = document.getElementById("staffSaveBtn");
 const staffTableBody = document.querySelector("#staffTable tbody");
@@ -10918,6 +10922,21 @@ function bindEvents() {
   }
   if (accountSaveBtn) {
     accountSaveBtn.addEventListener("click", saveAccount);
+  }
+  if (stripeCheckoutBtn && stripeCheckoutForm) {
+    stripeCheckoutBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      if (stripeCheckoutBtn.disabled) {
+        return;
+      }
+      stripeCheckoutForm.requestSubmit();
+    });
+  }
+  if (stripePortalBtn && stripePortalForm) {
+    stripePortalBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      stripePortalForm.requestSubmit();
+    });
   }
   if (documentCenterUploadBtn) {
     documentCenterUploadBtn.addEventListener("click", uploadDocumentCenterBatch);

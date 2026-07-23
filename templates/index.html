@@ -281,11 +281,11 @@
             </div>
             <div class="billing-access-actions">
               {% if billing_context.has_subscription %}
-              <form method="post" action="{{ url_for('open_stripe_portal') }}">
-                <button type="submit" class="button primary">Gestionar suscripción</button>
+              <form method="post" action="{{ url_for('open_stripe_portal') }}" id="stripePortalForm">
+                <button id="stripePortalBtn" type="submit" class="button primary">Gestionar suscripción</button>
               </form>
               {% else %}
-              <form method="post" action="{{ url_for('start_stripe_checkout') }}" class="billing-plan-form">
+              <form method="post" action="{{ url_for('start_stripe_checkout') }}" class="billing-plan-form" id="stripeCheckoutForm">
                 <select name="plan" {% if not billing_context.stripe_ready %}disabled{% endif %}>
                   <option value="starter" {% if billing_context.plan == 'starter' %}selected{% endif %}>Starter</option>
                   <option value="pro" {% if billing_context.plan == 'pro' %}selected{% endif %}>Pro</option>
@@ -295,7 +295,7 @@
                   <option value="monthly">Mensual</option>
                   <option value="annual" {% if not billing_context.annual_billing_available %}disabled{% endif %}>Anual</option>
                 </select>
-                <button type="submit" class="button primary" {% if not billing_context.stripe_ready %}disabled{% endif %}>Activar suscripción</button>
+                <button id="stripeCheckoutBtn" type="submit" class="button primary" {% if not billing_context.stripe_ready %}disabled{% endif %}>Activar suscripción</button>
               </form>
               {% if billing_context.launch_promo_enabled %}
               <span class="billing-promo-note">Mensual: 50% durante los 3 primeros meses.</span>
