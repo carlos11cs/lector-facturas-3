@@ -10460,6 +10460,52 @@ function loadAccountingIntegrationSummary() {
     });
 }
 
+function redirectToBillingError(errorMessage) {
+  const params = new URLSearchParams(window.location.search);
+  params.set("section", "account");
+  params.set("billing_error", "checkout_failed");
+  if (errorMessage) {
+    params.set("billing_debug", errorMessage);
+  }
+  window.location.href = `/app?${params.toString()}`;
+}
+
+function submitBillingRedirectForm(form, button, fallbackErrorCode = "checkout_failed") {
+  if (!form || !button || button.disabled) {
+    return;
+  }
+  button.disabled = true;
+  const formData = new FormData(form);
+  fetch(form.action, {
+    method: "POST",
+    body: formData,
+    headers: {
+      Accept: "application/json",
+      "X-Requested-With": "XMLHttpRequest",
+    },
+    credentials: "same-origin",
+  })
+    .then(async (response) => {
+      let data = null;
+      try {
+        data = await response.json();
+      } catch (error) {
+        data = null;
+      }
+      if (!response.ok || !data?.ok || !data?.redirect_url) {
+        const detail = data?.detail || data?.error || fallbackErrorCode;
+        throw new Error(detail);
+      }
+      window.location.href = data.redirect_url;
+    })
+    .catch((error) => {
+      redirectToBillingError(error?.message || fallbackErrorCode);
+    })
+    .finally(() => {
+      button.disabled = false;
+    });
+}
+
 function triggerAccountingExport(kind) {
   if (!getSelectedCompanyId()) {
     alert("Selecciona una empresa antes de exportar.");
@@ -10926,16 +10972,13 @@ function bindEvents() {
   if (stripeCheckoutBtn && stripeCheckoutForm) {
     stripeCheckoutBtn.addEventListener("click", (event) => {
       event.preventDefault();
-      if (stripeCheckoutBtn.disabled) {
-        return;
-      }
-      stripeCheckoutForm.requestSubmit();
+      submitBillingRedirectForm(stripeCheckoutForm, stripeCheckoutBtn, "checkout_failed");
     });
   }
   if (stripePortalBtn && stripePortalForm) {
     stripePortalBtn.addEventListener("click", (event) => {
       event.preventDefault();
-      stripePortalForm.requestSubmit();
+      submitBillingRedirectForm(stripePortalForm, stripePortalBtn, "portal_failed");
     });
   }
   if (documentCenterUploadBtn) {

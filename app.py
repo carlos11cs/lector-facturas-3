@@ -488,6 +488,12 @@ def sanitize_billing_debug_message(message):
     return normalized[:220]
 
 
+def billing_request_prefers_json():
+    requested_with = (request.headers.get("X-Requested-With") or "").strip().lower()
+    accept_header = (request.headers.get("Accept") or "").strip().lower()
+    return requested_with == "xmlhttprequest" or "application/json" in accept_header
+
+
 @app.after_request
 def add_security_headers(response):
     csp = (
@@ -5393,17 +5399,34 @@ def app_home():
 def start_stripe_checkout():
     user = g.current_user or {}
     if user.get("role") != "agency":
+        if billing_request_prefers_json():
+            return jsonify({"ok": False, "error": "not_agency"}), 403
         return redirect(url_for("app_home"))
     if not stripe_is_configured():
+        if billing_request_prefers_json():
+            return jsonify({"ok": False, "error": "not_configured"}), 503
         return redirect(app_home_billing_redirect_url(billing_error="not_configured"))
     plan = (request.form.get("plan") or "").strip().lower()
     billing_period = (request.form.get("billing_period") or "monthly").strip().lower()
     if plan not in {"starter", "pro", "advanced"}:
+        if billing_request_prefers_json():
+            return jsonify({"ok": False, "error": "invalid_plan"}), 400
         return redirect(app_home_billing_redirect_url(billing_error="checkout_failed"))
     if billing_period not in {"monthly", "annual"}:
+        if billing_request_prefers_json():
+            return jsonify({"ok": False, "error": "invalid_billing_period"}), 400
         return redirect(app_home_billing_redirect_url(billing_error="checkout_failed"))
     price_id = get_stripe_price_id(plan, billing_period)
     if not price_id:
+        if billing_request_prefers_json():
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": (
+                        "annual_not_configured" if billing_period == "annual" else "checkout_failed"
+                    ),
+                }
+            ), 400
         return redirect(
             app_home_billing_redirect_url(
                 billing_error="annual_not_configured"
@@ -5413,12 +5436,22 @@ def start_stripe_checkout():
         )
     agency = get_agency_row_for_user(user)
     if not agency:
+        if billing_request_prefers_json():
+            return jsonify({"ok": False, "error": "agency_not_found"}), 404
         return redirect(app_home_billing_redirect_url(billing_error="checkout_failed"))
     try:
         with engine.begin() as conn:
             agency = sync_agency_stripe_state_from_remote(conn, agency)
         customer_id = agency.get("stripe_customer_id")
         if agency.get("stripe_subscription_id") and customer_id and stripe_customer_exists(customer_id):
+            if billing_request_prefers_json():
+                return jsonify(
+                    {
+                        "ok": True,
+                        "redirect_url": url_for("open_stripe_portal"),
+                        "redirect_kind": "internal",
+                    }
+                )
             return redirect(url_for("open_stripe_portal"))
         if customer_id and not stripe_customer_exists(customer_id):
             with engine.begin() as conn:
@@ -5453,17 +5486,24 @@ def start_stripe_checkout():
                 customer_id,
                 getattr(checkout_session, "id", None) or (checkout_session.get("id") if hasattr(checkout_session, "get") else None),
             )
+            if billing_request_prefers_json():
+                return jsonify({"ok": False, "error": "checkout_url_missing"}), 502
             return redirect(app_home_billing_redirect_url(billing_error="checkout_failed"))
     except Exception:
         app.logger.exception("Stripe checkout creation failed")
+        debug_message = sanitize_billing_debug_message(str(sys.exc_info()[1])) or "Error inesperado en Stripe."
+        if billing_request_prefers_json():
+            return jsonify({"ok": False, "error": "checkout_failed", "detail": debug_message}), 500
         return redirect(
             app_home_billing_redirect_url(
                 billing_error="checkout_failed",
                 section="account",
             )
             + "&billing_debug="
-            + quote_plus(sanitize_billing_debug_message(str(sys.exc_info()[1])) or "Error inesperado en Stripe.")
+            + quote_plus(debug_message)
         )
+    if billing_request_prefers_json():
+        return jsonify({"ok": True, "redirect_url": checkout_url, "redirect_kind": "external"})
     return redirect(checkout_url, code=303)
 
 
@@ -5471,20 +5511,30 @@ def start_stripe_checkout():
 def open_stripe_portal():
     user = g.current_user or {}
     if user.get("role") != "agency":
+        if billing_request_prefers_json():
+            return jsonify({"ok": False, "error": "not_agency"}), 403
         return redirect(url_for("app_home"))
     if not stripe_is_configured():
+        if billing_request_prefers_json():
+            return jsonify({"ok": False, "error": "not_configured"}), 503
         return redirect(app_home_billing_redirect_url(billing_error="not_configured"))
     agency = get_agency_row_for_user(user)
     if not agency:
+        if billing_request_prefers_json():
+            return jsonify({"ok": False, "error": "not_available"}), 404
         return redirect(app_home_billing_redirect_url(billing_error="not_available"))
     try:
         with engine.begin() as conn:
             agency = sync_agency_stripe_state_from_remote(conn, agency)
         if not agency or not agency.get("stripe_customer_id"):
+            if billing_request_prefers_json():
+                return jsonify({"ok": False, "error": "not_available"}), 404
             return redirect(app_home_billing_redirect_url(billing_error="not_available"))
         if not stripe_customer_exists(agency["stripe_customer_id"]):
             with engine.begin() as conn:
                 clear_agency_stripe_state(conn, agency["id"])
+            if billing_request_prefers_json():
+                return jsonify({"ok": False, "error": "not_available"}), 404
             return redirect(app_home_billing_redirect_url(billing_error="not_available"))
         portal_session = stripe.billing_portal.Session.create(
             customer=agency["stripe_customer_id"],
@@ -5498,17 +5548,24 @@ def open_stripe_portal():
                 agency["stripe_customer_id"],
                 getattr(portal_session, "id", None) or (portal_session.get("id") if hasattr(portal_session, "get") else None),
             )
+            if billing_request_prefers_json():
+                return jsonify({"ok": False, "error": "portal_url_missing"}), 502
             return redirect(app_home_billing_redirect_url(billing_error="portal_failed"))
     except Exception:
         app.logger.exception("Stripe billing portal creation failed")
+        debug_message = sanitize_billing_debug_message(str(sys.exc_info()[1])) or "Error inesperado en Stripe."
+        if billing_request_prefers_json():
+            return jsonify({"ok": False, "error": "portal_failed", "detail": debug_message}), 500
         return redirect(
             app_home_billing_redirect_url(
                 billing_error="portal_failed",
                 section="account",
             )
             + "&billing_debug="
-            + quote_plus(sanitize_billing_debug_message(str(sys.exc_info()[1])) or "Error inesperado en Stripe.")
+            + quote_plus(debug_message)
         )
+    if billing_request_prefers_json():
+        return jsonify({"ok": True, "redirect_url": portal_url, "redirect_kind": "external"})
     return redirect(portal_url, code=303)
 
 
