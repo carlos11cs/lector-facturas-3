@@ -257,7 +257,7 @@
           <div class="panel-header">
             <div>
               <h2>Suscripción y facturación</h2>
-              <p>Controla tu plan, el periodo de cobro y el acceso al portal de facturación.</p>
+              <p>Consulta el estado actual y entra en un único flujo para elegir plan o gestionar la baja.</p>
             </div>
           </div>
           <div class="billing-access-box">
@@ -280,36 +280,115 @@
               {% endif %}
             </div>
             <div class="billing-access-actions">
-              {% if billing_context.has_subscription %}
-              <form method="post" action="{{ url_for('open_stripe_portal') }}" id="stripePortalForm">
-                <button id="stripePortalBtn" type="submit" class="button primary">Gestionar suscripción</button>
-              </form>
-              {% else %}
-              <form method="post" action="{{ url_for('start_stripe_checkout') }}" class="billing-plan-form" id="stripeCheckoutForm">
-                <select name="plan" {% if not billing_context.stripe_ready %}disabled{% endif %}>
-                  <option value="starter" {% if billing_context.plan == 'starter' %}selected{% endif %}>Starter</option>
-                  <option value="pro" {% if billing_context.plan == 'pro' %}selected{% endif %}>Pro</option>
-                  <option value="advanced" {% if billing_context.plan == 'advanced' %}selected{% endif %}>Business</option>
-                </select>
-                <select name="billing_period" {% if not billing_context.stripe_ready %}disabled{% endif %}>
-                  <option value="monthly">Mensual</option>
-                  <option value="annual" {% if not billing_context.annual_billing_available %}disabled{% endif %}>Anual</option>
-                </select>
-                <button id="stripeCheckoutBtn" type="submit" class="button primary" {% if not billing_context.stripe_ready %}disabled{% endif %}>Activar suscripción</button>
-              </form>
-              {% if billing_context.launch_promo_enabled %}
-              <span class="billing-promo-note">Mensual: 50% durante los 3 primeros meses.</span>
-              {% endif %}
-              {% if billing_context.annual_billing_available %}
-              <span class="billing-promo-note">Anual: ahorro frente al precio mensual.</span>
-              {% endif %}
-              {% endif %}
+              <button id="openSubscriptionManagerBtn" type="button" class="button primary">Gestionar mi suscripción</button>
             </div>
           </div>
-          <p class="panel-helper">Las facturas de la suscripción se emiten en Stripe. La gestoría puede verlas y descargarlas directamente desde el portal de facturación.</p>
+          <p class="panel-helper">Las facturas de la suscripción se emiten en Stripe. Desde la pantalla de suscripción podrás elegir plan y, si ya estás suscrito, abrir el portal para cambiarlo o darte de baja.</p>
         </section>
         {% endif %}
       </section>
+
+      {% if billing_context %}
+      <section class="page-section" data-section="subscription">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <h2>Gestionar mi suscripción</h2>
+              <p>Elige el plan que quieras activar si sigues en trial o abre Stripe para cambiar la suscripción actual, descargar facturas o cancelarla.</p>
+            </div>
+            <button id="subscriptionBackBtn" type="button" class="button ghost">Volver a mi cuenta</button>
+          </div>
+          <div class="billing-access-box">
+            <div class="billing-access-copy">
+              <strong>Plan actual: {{ billing_context.plan_label }}</strong>
+              <span>Estado: {{ billing_context.status_label }}</span>
+              <span>Empresas: {{ billing_context.companies_used }} / {{ billing_context.companies_limit }}</span>
+              <span>Equipo: {{ billing_context.staff_used }} / {{ billing_context.staff_limit }}</span>
+              {% if billing_context.trial_ends_label %}
+              <span>Trial hasta {{ billing_context.trial_ends_label }}</span>
+              {% endif %}
+              {% if billing_context.current_period_end_label %}
+              <span>Periodo actual hasta {{ billing_context.current_period_end_label }}</span>
+              {% endif %}
+            </div>
+            {% if billing_context.has_subscription %}
+            <div class="billing-access-actions">
+              <form method="post" action="{{ url_for('open_stripe_portal') }}" id="stripePortalForm">
+                <button id="stripePortalBtn" type="submit" class="button primary">Abrir portal de Stripe</button>
+              </form>
+            </div>
+            {% endif %}
+          </div>
+          {% if billing_context.has_subscription %}
+          <p class="panel-helper">Si ya tienes una suscripción activa, el cambio de plan, la cancelación y la descarga de facturas se gestionan directamente desde el portal seguro de Stripe.</p>
+          {% else %}
+          <p class="panel-helper">Selecciona el plan que quieras contratar. El alta mensual aplica la promoción de lanzamiento cuando esté configurada y el plan anual mantiene su ahorro propio.</p>
+          {% endif %}
+        </section>
+
+        {% if not billing_context.has_subscription %}
+        <section class="billing-plan-grid">
+          {% for plan_key, plan_info in billing_context.plan_catalog.items() %}
+          <article class="panel billing-plan-card {% if billing_context.plan == plan_key %}billing-plan-card-current{% endif %}">
+            <div class="billing-plan-card-head">
+              <div>
+                <p class="billing-plan-tag">{{ plan_info.highlight }}</p>
+                <h3>{{ plan_info.label }}</h3>
+                <p>{{ plan_info.description }}</p>
+              </div>
+              {% if billing_context.plan == plan_key %}
+              <span class="billing-plan-current-pill">Plan actual</span>
+              {% endif %}
+            </div>
+
+            <div class="billing-plan-price-block">
+              <div>
+                <span class="billing-plan-price">{{ plan_info.monthly_price }}</span>
+                <span class="billing-plan-period">/ mes</span>
+              </div>
+              {% if billing_context.launch_promo_enabled %}
+              <span class="billing-promo-note">50% durante los 3 primeros meses</span>
+              {% endif %}
+            </div>
+
+            <div class="billing-plan-price-block secondary">
+              <div>
+                <span class="billing-plan-price annual">{{ plan_info.annual_price }}</span>
+                <span class="billing-plan-period">/ año</span>
+              </div>
+              {% if billing_context.annual_billing_available %}
+              <span class="billing-promo-note">Ahorro frente al precio mensual</span>
+              {% endif %}
+            </div>
+
+            <ul class="billing-feature-list">
+              {% for feature in plan_info.features %}
+              <li>{{ feature }}</li>
+              {% endfor %}
+            </ul>
+
+            <div class="billing-plan-card-actions">
+              <form method="post" action="{{ url_for('start_stripe_checkout') }}" id="stripeCheckoutForm-{{ plan_key }}-monthly">
+                <input type="hidden" name="plan" value="{{ plan_key }}" />
+                <input type="hidden" name="billing_period" value="monthly" />
+                <button type="submit" class="button primary subscription-checkout-btn" data-form-id="stripeCheckoutForm-{{ plan_key }}-monthly" {% if not billing_context.stripe_ready %}disabled{% endif %}>
+                  Elegir mensual
+                </button>
+              </form>
+              <form method="post" action="{{ url_for('start_stripe_checkout') }}" id="stripeCheckoutForm-{{ plan_key }}-annual">
+                <input type="hidden" name="plan" value="{{ plan_key }}" />
+                <input type="hidden" name="billing_period" value="annual" />
+                <button type="submit" class="button ghost subscription-checkout-btn" data-form-id="stripeCheckoutForm-{{ plan_key }}-annual" {% if not billing_context.annual_billing_available or not billing_context.stripe_ready %}disabled{% endif %}>
+                  Elegir anual
+                </button>
+              </form>
+            </div>
+          </article>
+          {% endfor %}
+        </section>
+        {% endif %}
+      </section>
+      {% endif %}
 
       <section class="page-section" data-section="integrations">
         <section class="panel">

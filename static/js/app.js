@@ -1246,10 +1246,13 @@ const accountPhone = document.getElementById("accountPhone");
 const accountCurrentPassword = document.getElementById("accountCurrentPassword");
 const accountNewPassword = document.getElementById("accountNewPassword");
 const accountSaveBtn = document.getElementById("accountSaveBtn");
+const openSubscriptionManagerBtn = document.getElementById("openSubscriptionManagerBtn");
+const subscriptionBackBtn = document.getElementById("subscriptionBackBtn");
 const stripeCheckoutForm = document.getElementById("stripeCheckoutForm");
 const stripeCheckoutBtn = document.getElementById("stripeCheckoutBtn");
 const stripePortalForm = document.getElementById("stripePortalForm");
 const stripePortalBtn = document.getElementById("stripePortalBtn");
+const subscriptionCheckoutBtns = document.querySelectorAll(".subscription-checkout-btn");
 const staffEmail = document.getElementById("staffEmail");
 const staffSaveBtn = document.getElementById("staffSaveBtn");
 const staffTableBody = document.querySelector("#staffTable tbody");
@@ -10969,6 +10972,16 @@ function bindEvents() {
   if (accountSaveBtn) {
     accountSaveBtn.addEventListener("click", saveAccount);
   }
+  if (openSubscriptionManagerBtn) {
+    openSubscriptionManagerBtn.addEventListener("click", () => {
+      setActiveSection("subscription");
+    });
+  }
+  if (subscriptionBackBtn) {
+    subscriptionBackBtn.addEventListener("click", () => {
+      setActiveSection("account");
+    });
+  }
   if (stripeCheckoutBtn && stripeCheckoutForm) {
     stripeCheckoutBtn.addEventListener("click", (event) => {
       event.preventDefault();
@@ -10981,6 +10994,14 @@ function bindEvents() {
       submitBillingRedirectForm(stripePortalForm, stripePortalBtn, "portal_failed");
     });
   }
+  subscriptionCheckoutBtns.forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      const formId = button.dataset.formId;
+      const form = formId ? document.getElementById(formId) : button.closest("form");
+      submitBillingRedirectForm(form, button, "checkout_failed");
+    });
+  });
   if (documentCenterUploadBtn) {
     documentCenterUploadBtn.addEventListener("click", uploadDocumentCenterBatch);
   }

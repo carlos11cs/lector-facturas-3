@@ -135,6 +135,48 @@ PLAN_LIMITS = {
     "advanced": {"companies": 75, "staff": 20},
 }
 
+PLAN_CATALOG = {
+    "starter": {
+        "label": "Starter",
+        "description": "Para gestorías pequeñas que necesitan control fiscal y operativo sin complejidad.",
+        "monthly_price": "49 €",
+        "annual_price": "380 €",
+        "highlight": "Arranque rápido",
+        "features": [
+            "Hasta 5 empresas",
+            "Hasta 2 usuarios",
+            "OCR de facturas y gastos",
+            "Calendario fiscal y de pagos",
+        ],
+    },
+    "pro": {
+        "label": "Pro",
+        "description": "Para despachos en crecimiento que ya operan con más volumen y equipo.",
+        "monthly_price": "119 €",
+        "annual_price": "1.100 €",
+        "highlight": "Más capacidad",
+        "features": [
+            "Hasta 25 empresas",
+            "Hasta 8 usuarios",
+            "Informes y estados más robustos",
+            "Mayor capacidad operativa",
+        ],
+    },
+    "advanced": {
+        "label": "Business",
+        "description": "Para gestorías con gran volumen de empresas y trabajo coordinado por equipos.",
+        "monthly_price": "200 €",
+        "annual_price": "1.800 €",
+        "highlight": "Operativa avanzada",
+        "features": [
+            "Hasta 75 empresas",
+            "Hasta 20 usuarios",
+            "Mayor escalado interno",
+            "Preparado para operativa intensiva",
+        ],
+    },
+}
+
 _raw_db_url = os.getenv("DATABASE_URL")
 DATABASE_URL = _raw_db_url.strip() if _raw_db_url else ""
 if not DATABASE_URL:
@@ -987,6 +1029,7 @@ def get_billing_context_for_user(user):
     return {
         "plan": agency.get("plan") or "starter",
         "plan_label": get_plan_label(agency.get("plan")),
+        "plan_catalog": PLAN_CATALOG,
         "status": status,
         "status_label": {
             "active": "Activa",
