@@ -615,6 +615,25 @@ def create_stripe_checkout_session_with_fallback(*, customer_id, agency_id, pric
     )
 
 
+def get_stripe_redirect_url(stripe_object):
+    if not stripe_object:
+        return None
+    url_value = getattr(stripe_object, "url", None)
+    if not url_value and hasattr(stripe_object, "get"):
+        url_value = stripe_object.get("url")
+    if not url_value and hasattr(stripe_object, "__getitem__"):
+        try:
+            url_value = stripe_object["url"]
+        except Exception:
+            url_value = None
+    if not url_value:
+        return None
+    url_value = str(url_value).strip()
+    if not url_value.startswith("http"):
+        return None
+    return url_value
+
+
 def count_pending_staff_invitations(conn, agency_id):
     if not agency_id:
         return 0
@@ -5406,10 +5425,19 @@ def start_stripe_checkout():
             plan=plan,
             billing_period=billing_period,
         )
+        checkout_url = get_stripe_redirect_url(checkout_session)
+        if not checkout_url:
+            app.logger.error(
+                "Stripe checkout session creada sin URL utilizable. agency_id=%s customer_id=%s session_id=%s",
+                agency["id"],
+                customer_id,
+                getattr(checkout_session, "id", None) or (checkout_session.get("id") if hasattr(checkout_session, "get") else None),
+            )
+            return redirect(app_home_billing_redirect_url(billing_error="checkout_failed"))
     except Exception:
         app.logger.exception("Stripe checkout creation failed")
         return redirect(app_home_billing_redirect_url(billing_error="checkout_failed"))
-    return redirect(checkout_session.get("url"), code=303)
+    return redirect(checkout_url, code=303)
 
 
 @app.route("/billing/portal", methods=["POST", "GET"])
@@ -5435,10 +5463,19 @@ def open_stripe_portal():
             customer=agency["stripe_customer_id"],
             return_url=f"{get_app_base_url()}{app_home_billing_redirect_url()}",
         )
+        portal_url = get_stripe_redirect_url(portal_session)
+        if not portal_url:
+            app.logger.error(
+                "Stripe portal session creada sin URL utilizable. agency_id=%s customer_id=%s session_id=%s",
+                agency["id"],
+                agency["stripe_customer_id"],
+                getattr(portal_session, "id", None) or (portal_session.get("id") if hasattr(portal_session, "get") else None),
+            )
+            return redirect(app_home_billing_redirect_url(billing_error="portal_failed"))
     except Exception:
         app.logger.exception("Stripe billing portal creation failed")
         return redirect(app_home_billing_redirect_url(billing_error="portal_failed"))
-    return redirect(portal_session.get("url"), code=303)
+    return redirect(portal_url, code=303)
 
 
 @app.route("/api/document-center/batches")
