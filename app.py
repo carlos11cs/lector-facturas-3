@@ -5380,6 +5380,210 @@ def landing_alias():
     return render_template("landing.html")
 
 
+PUBLIC_SEO_PAGES = [
+    {
+        "slug": "/software-para-gestorias",
+        "endpoint": "software_gestorias_page",
+        "title": "Software para gestorías | Ledged",
+        "description": "Software para gestorías con control fiscal, lectura de facturas, IVA, tesorería por vencimientos y reporting contable en una sola plataforma.",
+        "kicker": "Software para gestorías",
+        "hero_title": "Software para gestorías que reduce carga operativa y mejora el control fiscal",
+        "hero_copy": "Ledged está diseñado para despachos profesionales que necesitan centralizar facturas, IVA, pagos y reporting sin depender de hojas sueltas, procesos manuales o revisiones de última hora.",
+        "panel_title": "Qué resuelve en una gestoría",
+        "panel_points": [
+            "Multiempresa con cambio rápido entre clientes.",
+            "Control de IVA soportado y repercutido con validación matemática.",
+            "Calendario de pagos, préstamos y vencimientos conectado a la operativa diaria.",
+            "Cuenta de pérdidas y ganancias y balance con estructura orientada al PGC.",
+        ],
+        "intent_title": "Por qué una gestoría necesita una herramienta específica y no un software genérico",
+        "intent_copy": "Una gestoría trabaja con múltiples sociedades, varios usuarios y cierres fiscales recurrentes. Por eso no basta con un sistema bonito: hace falta estructura, trazabilidad y una lógica orientada a la revisión profesional.",
+        "feature_blocks": [
+            {
+                "title": "Operativa multiempresa",
+                "copy": "Gestiona varias sociedades desde una sola cuenta de gestoría con filtros claros y contexto separado por empresa y periodo.",
+            },
+            {
+                "title": "Fiscalidad visible",
+                "copy": "El IVA, las retenciones, los pagos previstos y el impacto en P&G quedan reflejados de forma comprensible para revisión interna.",
+            },
+            {
+                "title": "Menos trabajo repetitivo",
+                "copy": "La lectura documental y la validación previa reducen el tiempo de introducción manual y dejan al equipo centrado en revisar criterios.",
+            },
+        ],
+        "workflow_title": "Cómo encaja Ledged en el trabajo real del despacho",
+        "workflow_copy": "La herramienta no pretende sustituir de golpe todo el ecosistema de la gestoría. Su objetivo es ordenar, validar y acelerar el trabajo previo a la contabilidad y al cierre.",
+        "workflow_points": [
+            "Carga facturas y gastos con lectura automática.",
+            "Revisa importes, tipos de IVA, retenciones y fechas de pago.",
+            "Consolida calendario de vencimientos y tesorería prevista.",
+            "Prepara reporting trimestral con una visión clara por empresa.",
+        ],
+        "note_title": "Enfoque complementario.",
+        "note_copy": "Ledged está planteado como capa de control fiscal y documental para gestorías, compatible con la realidad operativa de despachos que ya usan otros programas contables.",
+        "cta_title": "Si buscas software para gestorías con foco fiscal, esta es la parte crítica del flujo",
+        "cta_copy": "Solicita una demo y te enseñamos cómo encaja Ledged en la operativa de tu despacho.",
+    },
+    {
+        "slug": "/lector-de-facturas",
+        "endpoint": "invoice_reader_page",
+        "title": "Lector de facturas para gestorías | Ledged",
+        "description": "Lector de facturas para gestorías con extracción automática de proveedor, base imponible, IVA, total, fechas y validación manual posterior.",
+        "kicker": "Lector de facturas",
+        "hero_title": "Un lector de facturas pensado para gestorías, no solo para escanear PDFs",
+        "hero_copy": "Ledged extrae la información clave de facturas emitidas y recibidas para que el equipo valide, corrija y registre con más rapidez y menos error manual.",
+        "panel_title": "Datos que prioriza el lector",
+        "panel_points": [
+            "Proveedor o cliente detectado con lógica documental.",
+            "Base imponible, IVA, total y varias líneas cuando procede.",
+            "Fechas de factura y de vencimiento para tesorería.",
+            "Identificación de retención cuando existe en el documento.",
+        ],
+        "intent_title": "No basta con leer una factura: hay que entender cómo se registra",
+        "intent_copy": "En una gestoría, el verdadero valor no está en convertir un PDF a texto, sino en extraer campos útiles para contabilidad, IVA, pagos pendientes y revisión fiscal.",
+        "feature_blocks": [
+            {
+                "title": "Extracción documental útil",
+                "copy": "La lectura prioriza proveedor, importes, IVA, fechas y señales fiscales para que el documento entre en el flujo correcto.",
+            },
+            {
+                "title": "Validación antes de guardar",
+                "copy": "El equipo puede corregir lo detectado antes de registrar el gasto o ingreso, evitando automatizaciones ciegas.",
+            },
+            {
+                "title": "Conexión con calendario",
+                "copy": "La información leída puede trasladarse a fechas de pago y seguimiento de vencimientos, no se queda en un simple OCR aislado.",
+            },
+        ],
+        "workflow_title": "Cómo debería funcionar un buen lector de facturas en un despacho",
+        "workflow_copy": "El flujo correcto no termina al extraer texto. Tiene que dejar el documento listo para revisión contable y fiscal.",
+        "workflow_points": [
+            "Subida del documento en PDF o imagen.",
+            "Extracción de campos clave con validación matemática básica.",
+            "Revisión manual de proveedor, IVA, retención y fechas.",
+            "Registro con impacto en impuestos, tesorería e informes.",
+        ],
+        "note_title": "Automatización supervisada.",
+        "note_copy": "La lectura de facturas acelera el trabajo, pero siempre deja el control final a la gestoría.",
+        "cta_title": "Si buscas un lector de facturas útil para gestorías, lo importante es el flujo completo",
+        "cta_copy": "Te enseñamos cómo pasar de documento a dato revisable y registro coherente.",
+    },
+    {
+        "slug": "/control-iva-gestorias",
+        "endpoint": "vat_control_page",
+        "title": "Control de IVA para gestorías | Ledged",
+        "description": "Control de IVA para gestorías con desglose por tipo, cálculo de repercutido y soportado, detección de modelos y visibilidad del IVA a pagar o compensar.",
+        "kicker": "Control de IVA",
+        "hero_title": "Control de IVA para gestorías con más visibilidad y menos sorpresas al cierre",
+        "hero_copy": "Ledged concentra el IVA soportado y repercutido por tipo, conecta documentos y modelos fiscales y deja clara la posición estimada del periodo.",
+        "panel_title": "Qué muestra el módulo fiscal",
+        "panel_points": [
+            "Desglose por tipos de IVA y total por periodo.",
+            "Separación entre IVA soportado y repercutido.",
+            "Estimación de IVA a pagar, a compensar o sin actividad.",
+            "Vinculación entre modelos y calendario fiscal.",
+        ],
+        "intent_title": "El problema no es solo calcular el IVA, sino tener una visión fiscal consistente",
+        "intent_copy": "Una gestoría necesita revisar si la información que entra en el periodo tiene sentido, si el modelo fiscal está bien clasificado y si el resultado es coherente antes de presentar.",
+        "feature_blocks": [
+            {
+                "title": "Resumen claro por periodo",
+                "copy": "El periodo fiscal seleccionado agrupa bases, cuotas y posición neta para revisión rápida.",
+            },
+            {
+                "title": "Modelos con contexto",
+                "copy": "Los modelos fiscales no quedan como documentos sueltos: se clasifican y se conectan con pago, compensación o expediente sin cuota.",
+            },
+            {
+                "title": "Menos cierres a ciegas",
+                "copy": "La gestoría ve antes si algo descuadra y puede revisar facturas, retenciones o importes antes del envío.",
+            },
+        ],
+        "workflow_title": "Cómo encaja el control de IVA dentro del trimestre",
+        "workflow_copy": "El sistema debe acompañar el flujo fiscal, no solo enseñar una cifra final.",
+        "workflow_points": [
+            "Registrar o revisar documentos con impacto fiscal.",
+            "Agrupar por periodo y tipo de IVA.",
+            "Clasificar modelos como a ingresar, a compensar o sin actividad.",
+            "Reflejar el resultado en calendario fiscal y tesorería.",
+        ],
+        "note_title": "Criterio antes que maquillaje.",
+        "note_copy": "El objetivo es que la cifra de IVA sea defendible y trazable, no solo visualmente bonita.",
+        "cta_title": "Si tu gestoría quiere un control de IVA más fiable, empieza por la consistencia del dato",
+        "cta_copy": "Solicita una demo y revisamos contigo el flujo fiscal completo.",
+    },
+    {
+        "slug": "/software-contabilidad-gestorias",
+        "endpoint": "accounting_software_page",
+        "title": "Software de contabilidad para gestorías | Ledged",
+        "description": "Software de contabilidad para gestorías con visión de pérdidas y ganancias, balance, tesorería, préstamos, gastos y reporting conectado a la operativa fiscal.",
+        "kicker": "Contabilidad para gestorías",
+        "hero_title": "Software de contabilidad para gestorías con foco en coherencia y seguimiento",
+        "hero_copy": "Ledged reúne la parte documental, fiscal y económica para que el despacho tenga una visión contable clara de cada empresa sin trabajar a ciegas hasta el cierre.",
+        "panel_title": "Qué aporta en la visión contable",
+        "panel_points": [
+            "Pérdidas y ganancias estructurada según PGC.",
+            "Balance con partidas alimentadas por la operativa registrada.",
+            "Préstamos, cuotas e intereses con impacto económico visible.",
+            "Seguimiento de gastos, ingresos y vencimientos por empresa.",
+        ],
+        "intent_title": "La contabilidad útil para una gestoría necesita trazabilidad entre documento, pago e informe",
+        "intent_copy": "Cuando el dato se rompe entre módulos, el balance deja de ser fiable. La herramienta tiene que conectar factura, gasto, pago, préstamo y estado contable con lógica consistente.",
+        "feature_blocks": [
+            {
+                "title": "Estados contables entendibles",
+                "copy": "P&G y balance muestran una visión operativa clara para revisar resultado, tesorería prevista y posiciones pendientes.",
+            },
+            {
+                "title": "Préstamos y financiación",
+                "copy": "Las cuotas pueden separarse entre principal e interés para impactar correctamente en tesorería y gastos financieros.",
+            },
+            {
+                "title": "Base para reporting al cliente",
+                "copy": "El despacho puede preparar informes más claros porque la información económica ya está ordenada y revisada.",
+            },
+        ],
+        "workflow_title": "Qué debe hacer una herramienta contable complementaria para gestorías",
+        "workflow_copy": "No hace falta reemplazar de inmediato todos los programas del despacho. Sí hace falta una capa fiable que ordene, revise y explique el dato contable.",
+        "workflow_points": [
+            "Capturar datos desde facturas, gastos y financiación.",
+            "Mantener coherencia entre vencimientos, pagos y estados.",
+            "Consolidar P&G y balance por empresa y periodo.",
+            "Facilitar informes entendibles para gestoría y cliente final.",
+        ],
+        "note_title": "Herramienta complementaria.",
+        "note_copy": "Ledged está orientado a convivir con la operativa real de despachos y futuras integraciones con software contable especializado.",
+        "cta_title": "Si buscas software de contabilidad para gestorías, prioriza consistencia y trazabilidad",
+        "cta_copy": "Te enseñamos cómo ordenar la capa documental y fiscal para obtener mejores estados contables.",
+    },
+]
+
+
+def _public_seo_page_by_slug(slug):
+    return next((page for page in PUBLIC_SEO_PAGES if page["slug"] == slug), None)
+
+
+@app.route("/software-para-gestorias")
+def software_gestorias_page():
+    return render_template("seo_page.html", page=_public_seo_page_by_slug("/software-para-gestorias"))
+
+
+@app.route("/lector-de-facturas")
+def invoice_reader_page():
+    return render_template("seo_page.html", page=_public_seo_page_by_slug("/lector-de-facturas"))
+
+
+@app.route("/control-iva-gestorias")
+def vat_control_page():
+    return render_template("seo_page.html", page=_public_seo_page_by_slug("/control-iva-gestorias"))
+
+
+@app.route("/software-contabilidad-gestorias")
+def accounting_software_page():
+    return render_template("seo_page.html", page=_public_seo_page_by_slug("/software-contabilidad-gestorias"))
+
+
 @app.route("/robots.txt")
 def robots_txt():
     body = "\n".join(
@@ -5404,6 +5608,10 @@ def sitemap_xml():
     public_pages = [
         {"loc": build_public_url("/"), "priority": "1.0", "changefreq": "weekly"},
         {"loc": build_public_url("/landing"), "priority": "0.8", "changefreq": "weekly"},
+        {"loc": build_public_url("/software-para-gestorias"), "priority": "0.9", "changefreq": "weekly"},
+        {"loc": build_public_url("/lector-de-facturas"), "priority": "0.9", "changefreq": "weekly"},
+        {"loc": build_public_url("/control-iva-gestorias"), "priority": "0.9", "changefreq": "weekly"},
+        {"loc": build_public_url("/software-contabilidad-gestorias"), "priority": "0.9", "changefreq": "weekly"},
         {"loc": build_public_url("/aviso-legal"), "priority": "0.2", "changefreq": "yearly"},
         {"loc": build_public_url("/privacidad"), "priority": "0.2", "changefreq": "yearly"},
         {"loc": build_public_url("/cookies"), "priority": "0.2", "changefreq": "yearly"},

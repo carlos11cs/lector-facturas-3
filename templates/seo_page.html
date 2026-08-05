@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>{{ page.title }}</title>
+  <meta name="description" content="{{ page.description }}" />
+  <meta name="robots" content="index,follow" />
+  <link rel="canonical" href="{{ get_app_base_url() }}{{ page.slug }}" />
+  <meta property="og:type" content="article" />
+  <meta property="og:site_name" content="Ledged" />
+  <meta property="og:title" content="{{ page.title }}" />
+  <meta property="og:description" content="{{ page.description }}" />
+  <meta property="og:url" content="{{ get_app_base_url() }}{{ page.slug }}" />
+  <meta property="og:locale" content="es_ES" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="{{ page.title }}" />
+  <meta name="twitter:description" content="{{ page.description }}" />
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "WebPage",
+      "name": {{ page.title | tojson }},
+      "description": {{ page.description | tojson }},
+      "url": {{ (get_app_base_url() ~ page.slug) | tojson }},
+      "about": {{ page.hero_title | tojson }},
+      "isPartOf": {
+        "@type": "WebSite",
+        "name": "Ledged",
+        "url": {{ get_app_base_url() | tojson }}
+      }
+    }
+  </script>
+  <style>
+    :root{
+      --bg:#f6faf8;
+      --panel:#ffffff;
+      --muted:#5b6b66;
+      --text:#0f1f1b;
+      --brand:#0f766e;
+      --brand-2:#16a34a;
+      --line:rgba(15,31,27,.10);
+      --shadow:0 16px 40px rgba(15,31,27,.08);
+      --radius:18px;
+      --max:1100px;
+      --font:"Avenir Next","Segoe UI","Helvetica Neue",system-ui,-apple-system,BlinkMacSystemFont,sans-serif;
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;padding:0;font-family:var(--font);color:var(--text);background:radial-gradient(1200px 600px at 70% -10%, rgba(15,118,110,.14), transparent 60%), var(--bg);}
+    a{color:inherit}
+    .container{max-width:var(--max);margin:0 auto;padding:0 20px}
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:.55rem;border-radius:999px;padding:.85rem 1.05rem;font-weight:650;border:1px solid transparent;cursor:pointer;text-decoration:none}
+    .btn.primary{background:var(--brand);color:#fff}
+    .btn.ghost{background:transparent;border-color:var(--line);color:var(--text)}
+    .pill{display:inline-flex;align-items:center;gap:.5rem;border:1px solid var(--line);background:rgba(255,255,255,.70);padding:.35rem .65rem;border-radius:999px;color:var(--muted);font-size:.85rem}
+    header{position:sticky;top:0;z-index:10;background:rgba(246,250,248,.82);backdrop-filter:blur(10px);border-bottom:1px solid rgba(15,31,27,.06)}
+    .nav{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 0}
+    .brand{display:flex;align-items:center;gap:10px;font-weight:800;text-decoration:none}
+    .logo{width:34px;height:34px;border-radius:10px;background:#0f766e;box-shadow:0 12px 28px rgba(15,118,110,.25);position:relative}
+    .logo::before,.logo::after{content:"";position:absolute;width:7px;height:7px;border-radius:2px;background:#fff;top:8px;box-shadow:0 12px 0 #fff}
+    .logo::before{left:9px}
+    .logo::after{left:18px}
+    .nav-links{display:flex;align-items:center;gap:18px;color:var(--muted);font-weight:600}
+    .nav-links a{text-decoration:none}
+    main{padding:42px 0 60px}
+    .hero{display:grid;grid-template-columns:1.1fr .9fr;gap:24px;align-items:start;padding:8px 0 28px}
+    h1{font-size:42px;line-height:1.04;margin:14px 0 12px;letter-spacing:-.02em}
+    .lead{color:var(--muted);font-size:1.08rem;line-height:1.55;margin:0 0 18px}
+    .hero-panel,.card{background:var(--panel);border:1px solid rgba(15,31,27,.10);border-radius:var(--radius);box-shadow:var(--shadow)}
+    .hero-panel{padding:18px}
+    .hero-panel h2{margin:0 0 12px;font-size:1.08rem}
+    .hero-panel ul,.bullets{list-style:none;padding:0;margin:0}
+    .hero-panel li,.bullets li{display:flex;gap:10px;align-items:flex-start;margin:12px 0;color:var(--muted)}
+    .check{width:18px;height:18px;border-radius:6px;background:rgba(22,163,74,.12);border:1px solid rgba(22,163,74,.25);display:grid;place-items:center;flex:0 0 auto;margin-top:2px;color:var(--brand-2);font-weight:800}
+    section{padding:18px 0}
+    .section-title{margin:0 0 10px;font-size:28px;letter-spacing:-.01em}
+    .section-copy{margin:0 0 16px;color:var(--muted);line-height:1.6;max-width:78ch}
+    .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+    .card{padding:16px}
+    .card h3{margin:0 0 8px;font-size:1.02rem}
+    .card p{margin:0;color:var(--muted);line-height:1.5}
+    .note{padding:14px 16px;border-radius:14px;background:rgba(15,118,110,.08);border:1px solid rgba(15,118,110,.15);color:#185b55}
+    .cta{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:20px}
+    footer{padding:32px 0;border-top:1px solid rgba(15,31,27,.08);color:var(--muted)}
+    .footer-grid{display:flex;justify-content:space-between;gap:18px;flex-wrap:wrap}
+    .small{font-size:.92rem}
+    @media (max-width: 920px){
+      .hero{grid-template-columns:1fr}
+      .grid{grid-template-columns:1fr}
+      h1{font-size:34px}
+      .nav-links{display:none}
+    }
+  </style>
+</head>
+<body>
+<header>
+  <div class="container">
+    <div class="nav">
+      <a class="brand" href="/" aria-label="Ledged">
+        <span class="logo" aria-hidden="true"></span>
+        <span>Ledged</span>
+      </a>
+      <nav class="nav-links" aria-label="Navegación pública">
+        <a href="/">Inicio</a>
+        <a href="/software-para-gestorias">Software para gestorías</a>
+        <a href="/lector-de-facturas">Lector de facturas</a>
+        <a href="/control-iva-gestorias">Control de IVA</a>
+        <a href="/software-contabilidad-gestorias">Contabilidad para gestorías</a>
+      </nav>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <a class="btn ghost" href="/login">Acceder</a>
+        <a class="btn primary" href="mailto:soporte@ledged.app?subject=Solicitud%20de%20demo%20de%20Ledged">Solicitar demo</a>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="container">
+    <section class="hero">
+      <div>
+        <span class="pill">{{ page.kicker }}</span>
+        <h1>{{ page.hero_title }}</h1>
+        <p class="lead">{{ page.hero_copy }}</p>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <a class="btn primary" href="mailto:soporte@ledged.app?subject=Solicitud%20de%20demo%20de%20Ledged">Solicitar acceso</a>
+          <a class="btn ghost" href="/#pricing">Ver precios</a>
+        </div>
+      </div>
+      <aside class="hero-panel" aria-label="Resumen del producto">
+        <h2>{{ page.panel_title }}</h2>
+        <ul>
+          {% for item in page.panel_points %}
+          <li><span class="check">✓</span><span>{{ item }}</span></li>
+          {% endfor %}
+        </ul>
+      </aside>
+    </section>
+
+    <section>
+      <h2 class="section-title">{{ page.intent_title }}</h2>
+      <p class="section-copy">{{ page.intent_copy }}</p>
+      <div class="grid">
+        {% for block in page.feature_blocks %}
+        <article class="card">
+          <h3>{{ block.title }}</h3>
+          <p>{{ block.copy }}</p>
+        </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section>
+      <h2 class="section-title">{{ page.workflow_title }}</h2>
+      <p class="section-copy">{{ page.workflow_copy }}</p>
+      <ul class="bullets">
+        {% for item in page.workflow_points %}
+        <li><span class="check">✓</span><span>{{ item }}</span></li>
+        {% endfor %}
+      </ul>
+    </section>
+
+    <section>
+      <div class="note">
+        <strong>{{ page.note_title }}</strong> {{ page.note_copy }}
+      </div>
+    </section>
+
+    <section>
+      <div class="card cta">
+        <div>
+          <h2 style="margin:0 0 6px;font-size:26px">{{ page.cta_title }}</h2>
+          <p style="margin:0;color:var(--muted)">{{ page.cta_copy }}</p>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <a class="btn primary" href="mailto:soporte@ledged.app?subject=Solicitud%20de%20demo%20de%20Ledged">Solicitar demo</a>
+          <a class="btn ghost" href="/">Volver al inicio</a>
+        </div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="footer-grid">
+      <div>
+        <div class="brand"><span class="logo" aria-hidden="true"></span><span>Ledged</span></div>
+        <p class="small" style="margin:10px 0 0">Software B2B para gestorías.</p>
+      </div>
+      <div class="small">
+        <div style="font-weight:800;color:var(--text);margin-bottom:8px">Páginas</div>
+        <div><a href="/software-para-gestorias">Software para gestorías</a></div>
+        <div><a href="/lector-de-facturas">Lector de facturas</a></div>
+        <div><a href="/control-iva-gestorias">Control de IVA</a></div>
+        <div><a href="/software-contabilidad-gestorias">Contabilidad para gestorías</a></div>
+      </div>
+      <div class="small">
+        <div style="font-weight:800;color:var(--text);margin-bottom:8px">Legal</div>
+        <div><a href="/aviso-legal">Aviso legal</a></div>
+        <div><a href="/privacidad">Política de privacidad</a></div>
+        <div><a href="/cookies">Cookies</a></div>
+        <div><a href="/terminos">Términos del servicio</a></div>
+      </div>
+    </div>
+  </div>
+</footer>
+</body>
+</html>
