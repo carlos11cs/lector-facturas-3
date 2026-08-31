@@ -788,12 +788,27 @@ def _extract_explicit_withholding_amount_from_text(text: str) -> Optional[float]
     normalized_text = _normalize_ocr_amount_text(text)
     lines = [line.strip() for line in normalized_text.splitlines() if line.strip()]
     amount_pattern = re.compile(r"\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+[.,]\d{2}")
-    keywords = ("retención", "retencion", "withholding", "irpf")
     stop_tokens = ("portes", "subtotal", "base", "iva", "impuesto", "factura", "pendiente")
 
     for idx, line in enumerate(lines):
         lowered = line.lower()
-        if not any(keyword in lowered for keyword in keywords):
+        # Documents from landlords frequently print the tax label as
+        # "I.R.P.F." instead of the compact "IRPF" spelling.
+        compact_label = re.sub(r"[^a-z0-9áéíóúüñ]", "", lowered)
+        is_irpf_label = "irpf" in compact_label
+        is_withholding_label = any(
+            keyword in lowered for keyword in ("retención", "retencion", "withholding")
+        ) or is_irpf_label
+        if not is_withholding_label:
+            continue
+
+        # Ignore the base and percentage column headers when the PDF emits
+        # each table column on a separate line. The bare IRPF column is the
+        # actual withheld amount.
+        is_base_header = is_irpf_label and "base" in compact_label
+        is_rate_header = is_irpf_label and ("%" in line or "porcentaje" in compact_label)
+        repeated_irpf_labels = compact_label.count("irpf") > 1
+        if (is_base_header or is_rate_header) and not repeated_irpf_labels:
             continue
 
         line_amounts = [_normalize_amount(raw) for raw in amount_pattern.findall(line)]

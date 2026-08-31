@@ -659,6 +659,15 @@ Total EUR
 MEDIDERMA, S.L.U. · N.I.F. ESB96188164 · Domicilio fiscal: C/ GRABADOR ESTEVE 3-1-1, 46004  VALENCIA (España)
 """
 
+RENT_INVOICE_IRPF_COLUMNS_FIXTURE = """FACTURA 350
+Alquiler mes actual finca urbana del local
+BASE IMPONIBLE       % I.V.A.       I.V.A.
+300,00               21,00          63,00
+BASE I.R.P.F.        % I.R.P.F.     I.R.P.F.
+300,00               19,00          57,00
+TOTAL FACTURA: 306,00
+"""
+
 
 class TestAiInvoiceService(unittest.TestCase):
     def test_parse_eu_amount(self):
@@ -1056,6 +1065,12 @@ class TestAiInvoiceService(unittest.TestCase):
     def test_installment_lines_do_not_count_as_withholding(self):
         withholding_amount = svc._extract_explicit_withholding_amount_from_text(VERISURE_FIXTURE)
         self.assertIsNone(withholding_amount)
+
+    def test_extracts_withholding_from_dotted_irpf_rent_columns(self):
+        withholding_amount = svc._extract_explicit_withholding_amount_from_text(
+            RENT_INVOICE_IRPF_COLUMNS_FIXTURE
+        )
+        self.assertEqual(withholding_amount, 57.0)
 
     def test_autonomo_name_with_nearby_tax_id_is_valid_supplier(self):
         self.assertTrue(
