@@ -5,6 +5,7 @@ try:
         build_journal_export_rows,
         build_purchase_export_rows,
         build_sales_export_rows,
+        normalize_purchase_invoice_amounts,
         parse_iso_date,
         suggest_expense_account,
     )
@@ -117,6 +118,44 @@ class TestAccountingExportHelpers(unittest.TestCase):
         credit_total = round(sum(row["haber"] for row in rows), 2)
         self.assertEqual(debit_total, credit_total)
         self.assertTrue(any(row["cuenta"] == "642" for row in rows))
+
+    def test_supplier_invoice_withholding_uses_net_payable_total(self):
+        base_amount, vat_amount, payable_total = normalize_purchase_invoice_amounts(
+            2264.15,
+            21,
+            475.47,
+            2400.0,
+            339.62,
+        )
+        self.assertEqual((base_amount, vat_amount, payable_total), (2264.15, 475.47, 2400.0))
+
+        rows = build_journal_export_rows(
+            {
+                "purchase_invoices": [
+                    {
+                        "id": 12,
+                        "invoice_date": "2026-08-31",
+                        "supplier": "Profesional sanitario",
+                        "base_amount": base_amount,
+                        "vat_amount": vat_amount,
+                        "total_amount": payable_total,
+                        "withholding_amount": 339.62,
+                        "vat_deductible": True,
+                        "expense_family": "supplier",
+                        "expense_subtype": "professional_invoice",
+                        "pnl_bucket": "operating_expense",
+                    }
+                ],
+                "income_invoices": [],
+                "manual_sales": [],
+                "loan_installments": [],
+                "no_invoice_expenses": [],
+            }
+        )
+        self.assertEqual(round(sum(row["debe"] for row in rows), 2), 2739.62)
+        self.assertEqual(round(sum(row["haber"] for row in rows), 2), 2739.62)
+        self.assertTrue(any(row["cuenta"] == "4751" and row["haber"] == 339.62 for row in rows))
+        self.assertTrue(any(row["cuenta"] == "410" and row["haber"] == 2400.0 for row in rows))
 
 
 if __name__ == "__main__":

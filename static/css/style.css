@@ -1647,6 +1647,41 @@ h1 {
   margin-top: 6px;
 }
 
+.invoice-calculation-row td {
+  padding-top: 0;
+  padding-bottom: 12px;
+  background: #fbfcfb;
+}
+
+.invoice-calculation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border: 1px solid #dce9e1;
+  border-radius: 10px;
+  background: #f3f8f5;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.invoice-calculation-label {
+  color: var(--text);
+  font-weight: 700;
+  margin-right: 4px;
+}
+
+.invoice-calculation-operator {
+  color: #8aa194;
+  font-weight: 700;
+}
+
+.invoice-calculation-total {
+  color: var(--primary-dark);
+  font-weight: 700;
+}
+
 .vat-mixed-badge {
   display: inline-flex;
   align-items: center;

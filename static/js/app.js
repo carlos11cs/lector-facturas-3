@@ -474,10 +474,7 @@ function getInvoiceCashAmount(invoice) {
   if (!invoice) {
     return 0;
   }
-  return Math.max(
-    (Number(invoice.total_amount) || 0) - (Number(invoice.withholding_amount) || 0),
-    0
-  );
+  return Math.max(Number(invoice.total_amount) || 0, 0);
 }
 
 function getNoInvoicePaymentDates(expense) {
@@ -883,8 +880,9 @@ function isSupplierSameAsCompany(supplier) {
   );
 }
 
-function calculateVatFields({ baseValue, totalValue, vatRateValue, source }) {
+function calculateVatFields({ baseValue, totalValue, vatRateValue, withholdingValue = 0, source }) {
   const vatRate = parseNumberInput(vatRateValue);
+  const withholding = Math.max(parseNumberInput(withholdingValue) || 0, 0);
   if (vatRate === null) {
     return {
       base: baseValue,
@@ -895,10 +893,11 @@ function calculateVatFields({ baseValue, totalValue, vatRateValue, source }) {
   const factor = 1 + vatRate / 100;
 
   if (source === "total" && totalValue !== null) {
-    const base = roundAmount(totalValue / factor);
+    const grossTotal = roundAmount(totalValue + withholding);
+    const base = roundAmount(grossTotal / factor);
     return {
       base,
-      vatAmount: roundAmount(totalValue - base),
+      vatAmount: roundAmount(grossTotal - base),
       total: roundAmount(totalValue),
     };
   }
@@ -908,15 +907,16 @@ function calculateVatFields({ baseValue, totalValue, vatRateValue, source }) {
     return {
       base: baseValue,
       vatAmount,
-      total: roundAmount(baseValue + vatAmount),
+      total: roundAmount(baseValue + vatAmount - withholding),
     };
   }
 
   if (totalValue !== null) {
-    const base = roundAmount(totalValue / factor);
+    const grossTotal = roundAmount(totalValue + withholding);
+    const base = roundAmount(grossTotal / factor);
     return {
       base,
-      vatAmount: roundAmount(totalValue - base),
+      vatAmount: roundAmount(grossTotal - base),
       total: roundAmount(totalValue),
     };
   }
@@ -932,6 +932,7 @@ function applyVatCalculation(item, inputs, source) {
     baseValue,
     totalValue,
     vatRateValue,
+    withholdingValue: inputs.withholding?.value,
     source,
   });
 
@@ -994,11 +995,13 @@ function normalizeInvoiceAmounts(item) {
   const baseValue = parseNumberInput(item.base);
   const totalValue = parseNumberInput(item.total);
   const vatRateValue = normalizeVatRateValue(item.vat);
+  const withholdingValue = parseNumberInput(item.withholdingAmount) || 0;
   const source = baseValue !== null ? "base" : "total";
   const result = calculateVatFields({
     baseValue,
     totalValue,
     vatRateValue,
+    withholdingValue,
     source,
   });
 
@@ -3931,7 +3934,17 @@ function updateExpenseUploadTableHeaders(kind = getExpenseUploadKind()) {
           "Periodo",
           "",
         ]
-      : ["Archivo", "Fecha", "Proveedor", "Base imponible", "IVA", "IVA (€)", "Total (€)", ""];
+      : [
+          "Archivo",
+          "Fecha",
+          "Proveedor",
+          "Base imponible",
+          "IVA",
+          "IVA (€)",
+          "Retención IRPF (-)",
+          "Total a pagar (€)",
+          "",
+        ];
   uploadTableHeadCells.forEach((cell, index) => {
     cell.textContent = labels[index] || "";
   });
@@ -4627,17 +4640,21 @@ function renderTable() {
     baseInput.placeholder = "0,00";
     baseInput.value = item.base;
     const breakdownActive =
-      Array.isArray(item.vatBreakdown) && item.vatBreakdown.length > 0;
+      item.vatBreakdownOpen && Array.isArray(item.vatBreakdown) && item.vatBreakdown.length > 0;
     baseInput.disabled = item.analysisPending;
     baseInput.readOnly = breakdownActive;
     attachAmountInputBehavior(baseInput);
     baseInput.addEventListener("input", () => {
+      if (!item.vatBreakdownOpen) {
+        item.vatBreakdown = [];
+      }
       item.base = baseInput.value;
       item.touched.base = true;
       applyVatCalculation(item, {
         base: baseInput,
         vat: vatSelect,
         vatAmount: vatAmountInput,
+        withholding: withholdingInput,
         total: totalInput,
       }, "base");
     });
@@ -4658,12 +4675,16 @@ function renderTable() {
     applyOptionalVatSelection(vatSelect, item.vat);
     vatSelect.disabled = item.analysisPending || breakdownActive;
     vatSelect.addEventListener("change", () => {
+      if (!item.vatBreakdownOpen) {
+        item.vatBreakdown = [];
+      }
       item.vat = vatSelect.value;
       item.touched.vat = true;
       applyVatCalculation(item, {
         base: baseInput,
         vat: vatSelect,
         vatAmount: vatAmountInput,
+        withholding: withholdingInput,
         total: totalInput,
       }, "vat");
     });
@@ -4677,13 +4698,22 @@ function renderTable() {
     const addBreakdownBtn = document.createElement("button");
     addBreakdownBtn.type = "button";
     addBreakdownBtn.className = "link-button vat-breakdown-toggle";
-    addBreakdownBtn.textContent = breakdownActive
-      ? "Añadir línea IVA"
-      : "Añadir línea IVA";
+    addBreakdownBtn.textContent = item.vatBreakdownOpen
+      ? "Añadir tipo de IVA"
+      : "Desglosar varios IVAs";
     addBreakdownBtn.disabled = item.analysisPending;
     addBreakdownBtn.addEventListener("click", () => {
       item.vatBreakdown = item.vatBreakdown || [];
-      item.vatBreakdown.push({ rate: item.vat || "21", base: "", vat_amount: "", total: "" });
+      if (item.vatBreakdownOpen) {
+        item.vatBreakdown.push({ rate: item.vat || "", base: "", vat_amount: "", total: "" });
+      } else if (!item.vatBreakdown.length) {
+        item.vatBreakdown.push({
+          rate: item.vat || "",
+          base: item.base || "",
+          vat_amount: item.vatAmount || "",
+          total: item.total || "",
+        });
+      }
       item.vatBreakdownOpen = true;
       renderTable();
     });
@@ -4699,12 +4729,16 @@ function renderTable() {
     vatAmountInput.readOnly = breakdownActive;
     attachAmountInputBehavior(vatAmountInput);
     vatAmountInput.addEventListener("input", () => {
+      if (!item.vatBreakdownOpen) {
+        item.vatBreakdown = [];
+      }
       item.vatAmount = vatAmountInput.value;
       item.touched.vatAmount = true;
       applyVatCalculation(item, {
         base: baseInput,
         vat: vatSelect,
         vatAmount: vatAmountInput,
+        withholding: withholdingInput,
         total: totalInput,
       }, "vatAmount");
     });
@@ -4721,6 +4755,13 @@ function renderTable() {
     withholdingInput.addEventListener("input", () => {
       item.withholdingAmount = withholdingInput.value;
       item.touched.withholdingAmount = true;
+      applyVatCalculation(item, {
+        base: baseInput,
+        vat: vatSelect,
+        vatAmount: vatAmountInput,
+        withholding: withholdingInput,
+        total: totalInput,
+      }, "withholding");
     });
     withholdingTd.appendChild(withholdingInput);
 
@@ -4734,12 +4775,16 @@ function renderTable() {
     totalInput.readOnly = breakdownActive;
     attachAmountInputBehavior(totalInput);
     totalInput.addEventListener("input", () => {
+      if (!item.vatBreakdownOpen) {
+        item.vatBreakdown = [];
+      }
       item.total = totalInput.value;
       item.touched.total = true;
       applyVatCalculation(item, {
         base: baseInput,
         vat: vatSelect,
         vatAmount: vatAmountInput,
+        withholding: withholdingInput,
         total: totalInput,
       }, "total");
     });
@@ -4773,7 +4818,41 @@ function renderTable() {
     tr.appendChild(actionsTd);
     uploadTableBody.appendChild(tr);
 
-    if (item.vatBreakdown && item.vatBreakdown.length) {
+    const calculationRow = document.createElement("tr");
+    calculationRow.className = "invoice-calculation-row";
+    const calculationCell = document.createElement("td");
+    calculationCell.colSpan = 9;
+    const calculation = document.createElement("div");
+    calculation.className = "invoice-calculation";
+    const calculationLabel = document.createElement("span");
+    calculationLabel.className = "invoice-calculation-label";
+    calculationLabel.textContent = "Resumen de cálculo";
+    calculation.appendChild(calculationLabel);
+    const calculationParts = [
+      ["Base", item.base],
+      ["IVA", item.vatAmount],
+      ["Retención IRPF", item.withholdingAmount || "0"],
+      ["Total a pagar", item.total],
+    ];
+    calculationParts.forEach(([label, value], index) => {
+      if (index > 0) {
+        const operator = document.createElement("span");
+        operator.className = "invoice-calculation-operator";
+        operator.textContent = index === 1 ? "+" : index === 2 ? "−" : "=";
+        calculation.appendChild(operator);
+      }
+      const part = document.createElement("span");
+      part.className = index === calculationParts.length - 1
+        ? "invoice-calculation-total"
+        : "invoice-calculation-part";
+      part.textContent = `${label}: ${formatAmountInput(value) || "Pendiente"} EUR`;
+      calculation.appendChild(part);
+    });
+    calculationCell.appendChild(calculation);
+    calculationRow.appendChild(calculationCell);
+    uploadTableBody.appendChild(calculationRow);
+
+    if (item.vatBreakdownOpen && item.vatBreakdown && item.vatBreakdown.length) {
       item.vatBreakdown.forEach((line, lineIndex) => {
         const row = document.createElement("tr");
         row.className = "vat-breakdown-inline-row";
@@ -4875,7 +4954,9 @@ function renderTable() {
           if (totals) {
             item.base = formatAmountInput(totals.base);
             item.vatAmount = formatAmountInput(totals.vatAmount);
-            item.total = formatAmountInput(totals.total);
+            item.total = formatAmountInput(
+              roundAmount(totals.total - (parseNumberInput(item.withholdingAmount) || 0))
+            );
             baseInput.value = item.base;
             vatAmountInput.value = item.vatAmount;
             totalInput.value = item.total;
@@ -5485,7 +5566,7 @@ function renderIncomeTable() {
         statusRow.classList.add("error");
       }
       const statusTd = document.createElement("td");
-      statusTd.colSpan = 8;
+  statusTd.colSpan = 9;
       const statusWrapper = document.createElement("div");
       statusWrapper.className = "processing-status";
       if (item.analysisPending) {
@@ -5945,6 +6026,7 @@ function getExpenseOperationPayload(item) {
   const breakdownTotals = breakdownPayload.length
     ? summarizeVatBreakdown(item.vatBreakdown || [])
     : null;
+  const withholdingAmount = parseNumberInput(item.withholdingAmount) || 0;
   const baseValue = parseNumberInput(
     breakdownTotals ? breakdownTotals.base : normalized.base || item.base
   );
@@ -5952,7 +6034,9 @@ function getExpenseOperationPayload(item) {
     breakdownTotals ? breakdownTotals.vatAmount : normalized.vatAmount || item.vatAmount
   );
   const totalValue = parseNumberInput(
-    breakdownTotals ? breakdownTotals.total : normalized.total || item.total
+    breakdownTotals
+      ? roundAmount(breakdownTotals.total - withholdingAmount)
+      : normalized.total || item.total
   );
   const vatRateValue = breakdownPayload.length
     ? getPrimaryVatRateFromBreakdown(breakdownPayload)
@@ -5986,7 +6070,7 @@ function getExpenseOperationPayload(item) {
     vat_rate: vatDeductible ? vatRateValue : null,
     vat_amount: vatDeductible ? vatAmountValue : null,
     base_amount: baseValue,
-    withholding_amount: parseNumberInput(item.withholdingAmount) || 0,
+    withholding_amount: withholdingAmount,
     deductible: expenseType !== "prestamo",
   };
 }
@@ -6254,6 +6338,7 @@ function uploadPending() {
       const breakdownTotals = breakdownPayload.length
         ? summarizeVatBreakdown(item.vatBreakdown || [])
         : null;
+      const withholdingAmount = parseNumberInput(item.withholdingAmount) || 0;
       return {
         originalFilename: item.originalFilename,
         date: item.date,
@@ -6268,8 +6353,10 @@ function uploadPending() {
           ? getPrimaryVatRateFromBreakdown(breakdownPayload)
           : normalizeVatRateValue(item.vat),
         vatAmount: breakdownTotals ? breakdownTotals.vatAmount : normalized.vatAmount || item.vatAmount,
-        total: breakdownTotals ? breakdownTotals.total : normalized.total || item.total,
-        withholding_amount: parseNumberInput(item.withholdingAmount) || 0,
+        total: breakdownTotals
+          ? roundAmount(breakdownTotals.total - withholdingAmount)
+          : normalized.total || item.total,
+        withholding_amount: withholdingAmount,
         vatBreakdown: breakdownPayload,
       };
     }),
@@ -7921,7 +8008,7 @@ function renderInvoices(invoices) {
     const withholdingTd = document.createElement("td");
     const withholdingValue = Number(invoice.withholding_amount || 0);
     withholdingTd.textContent =
-      withholdingValue > 0 ? formatCurrency(withholdingValue) : "-";
+      withholdingValue > 0 ? `- ${formatCurrency(withholdingValue)}` : "-";
 
     const totalTd = document.createElement("td");
     totalTd.textContent = formatCurrency(invoice.total_amount);
@@ -8154,7 +8241,6 @@ function enterIncomeInvoiceEditMode(row, invoice) {
   totalInput.addEventListener("input", () => {
     applyVatCalculation(invoice, calcInputs, "total");
   });
-
   dateTd.textContent = "";
   dateTd.appendChild(dateInput);
   clientTd.textContent = "";
@@ -8324,6 +8410,7 @@ function enterInvoiceEditMode(row, invoice) {
     base: baseInput,
     vat: vatSelect,
     vatAmount: vatAmountInput,
+    withholding: withholdingInput,
     total: totalInput,
   };
   attachAmountInputBehavior(baseInput);
@@ -8338,6 +8425,9 @@ function enterInvoiceEditMode(row, invoice) {
   });
   totalInput.addEventListener("input", () => {
     applyVatCalculation(invoice, calcInputs, "total");
+  });
+  withholdingInput.addEventListener("input", () => {
+    applyVatCalculation(invoice, calcInputs, "withholding");
   });
 
   const categorySelect = createExpenseCategorySelect(invoice.expense_category);

@@ -1280,7 +1280,9 @@ def init_db():
                     invoices_table.c.id,
                     invoices_table.c.expense_category,
                     invoices_table.c.vat_deductible,
+                    invoices_table.c.base_amount,
                     invoices_table.c.vat_amount,
+                    invoices_table.c.total_amount,
                     invoices_table.c.withholding_amount,
                     invoices_table.c.expense_family,
                     invoices_table.c.expense_subtype,
@@ -1289,6 +1291,20 @@ def init_db():
                 )
             ).mappings().all()
             for row in invoice_rows:
+                base_amount = round(float(row.get("base_amount") or 0), 2)
+                vat_amount = round(float(row.get("vat_amount") or 0), 2)
+                total_amount = round(float(row.get("total_amount") or 0), 2)
+                withholding_amount = round(float(row.get("withholding_amount") or 0), 2)
+                gross_total = round(base_amount + vat_amount, 2)
+                # Older versions persisted the gross amount even when the
+                # invoice had an IRPF withholding. The canonical total is the
+                # amount payable to the supplier, net of that withholding.
+                if withholding_amount > 0 and abs(total_amount - gross_total) <= 0.02:
+                    conn.execute(
+                        invoices_table.update()
+                        .where(invoices_table.c.id == row["id"])
+                        .values(total_amount=round(gross_total - withholding_amount, 2))
+                    )
                 existing_targets = parse_tax_model_targets(row.get("tax_model_targets"))
                 inferred_targets = parse_tax_model_targets(
                     derive_invoice_profile(
@@ -1697,6 +1713,30 @@ def normalize_vat_amounts(base_amount, vat_rate, vat_amount, total_amount):
     if base_amount is not None:
         vat_amount = round(base_amount * rate, 2)
         total_amount = round(base_amount + vat_amount, 2)
+    return base_amount, vat_amount, total_amount
+
+
+def normalize_purchase_invoice_amounts(
+    base_amount, vat_rate, vat_amount, total_amount, withholding_amount=0.0
+):
+    """Normalize a supplier invoice using its payable total, net of withholding."""
+    withholding = max(float(withholding_amount or 0), 0.0)
+    if vat_rate is None:
+        return base_amount, vat_amount, total_amount
+    if base_amount is None and total_amount is None:
+        return base_amount, vat_amount, total_amount
+
+    rate = vat_rate / 100
+    if base_amount is None and total_amount is not None:
+        gross_total = round(total_amount + withholding, 2)
+        base_amount = round(gross_total / (1 + rate), 2)
+        vat_amount = round(gross_total - base_amount, 2)
+        return base_amount, vat_amount, round(total_amount, 2)
+
+    if base_amount is not None:
+        vat_amount = round(base_amount * rate, 2)
+        payable_total = round(base_amount + vat_amount - withholding, 2)
+        return base_amount, vat_amount, payable_total
     return base_amount, vat_amount, total_amount
 
 
@@ -3838,7 +3878,7 @@ def build_purchase_export_rows(source_data):
                 "concepto": row.get("original_filename"),
                 "base": float(row.get("base_amount") or 0),
                 "iva": float(row.get("vat_amount") or 0),
-                "retencion": 0.0,
+                "retencion": float(row.get("withholding_amount") or 0),
                 "total": float(row.get("total_amount") or 0),
                 "iva_deducible": "Sí" if row.get("vat_deductible") else "No",
                 "cuenta_sugerida": format_export_account(account_code, account_label),
@@ -3953,8 +3993,9 @@ def build_journal_export_rows(source_data):
         entry_key = f"PUR-{row.get('id')}"
         base_amount = round(float(row.get("base_amount") or 0), 2)
         vat_amount = round(float(row.get("vat_amount") or 0), 2)
-        total_amount = round(float(row.get("total_amount") or 0), 2)
+        payable_total = round(float(row.get("total_amount") or 0), 2)
         withholding_amount = round(float(row.get("withholding_amount") or 0), 2)
+        gross_total = round(base_amount + vat_amount, 2)
         expense_account, expense_label = suggest_expense_account(
             expense_family=row.get("expense_family"),
             expense_subtype=row.get("expense_subtype"),
@@ -3965,12 +4006,11 @@ def build_journal_export_rows(source_data):
             lines.append({"cuenta": expense_account, "descripcion_cuenta": expense_label, "debe": base_amount})
             lines.append({"cuenta": "472", "descripcion_cuenta": "Hacienda Pública, IVA soportado", "debe": vat_amount})
         else:
-            lines.append({"cuenta": expense_account, "descripcion_cuenta": expense_label, "debe": total_amount})
+            lines.append({"cuenta": expense_account, "descripcion_cuenta": expense_label, "debe": gross_total})
         if withholding_amount > 0:
             lines.append({"cuenta": "4751", "descripcion_cuenta": "Hacienda Pública acreedora por retenciones practicadas", "haber": withholding_amount})
-        creditor_amount = round(total_amount - withholding_amount, 2)
-        if creditor_amount > 0:
-            lines.append({"cuenta": "410", "descripcion_cuenta": "Acreedores por prestaciones de servicios", "haber": creditor_amount})
+        if payable_total > 0:
+            lines.append({"cuenta": "410", "descripcion_cuenta": "Acreedores por prestaciones de servicios", "haber": payable_total})
         append_journal_lines(
             rows,
             entry_key,
@@ -7265,9 +7305,6 @@ def upload_invoices():
         inserted = 0
         with engine.begin() as conn:
             for idx, entry in enumerate(entries):
-                is_manual = any(
-                    key in entry for key in ("supplier", "base", "vat", "total", "vatAmount")
-                )
                 original_name = entry.get("originalFilename") or ""
                 invoice_date = entry.get("date") or date.today().isoformat()
                 entry_company_id = entry.get("company_id") or entry.get("companyId")
@@ -7319,11 +7356,18 @@ def upload_invoices():
                         original_name,
                     )
 
+                if withholding_amount is None:
+                    withholding_amount = 0.0
+                if withholding_amount < 0:
+                    errors.append(f"Retención inválida para {original_name}.")
+                    continue
+
                 if vat_breakdown:
                     vat_rate_int = infer_vat_rate_from_breakdown(vat_breakdown)
                     summary = summarize_vat_breakdown(vat_breakdown)
                     if summary:
-                        base_amount, vat_amount, total_amount = summary
+                        base_amount, vat_amount, gross_total = summary
+                        total_amount = round(gross_total - withholding_amount, 2)
                 else:
                     try:
                         vat_rate_int = int(vat_rate_raw)
@@ -7342,11 +7386,6 @@ def upload_invoices():
                 if total_amount is None:
                     errors.append(f"Total inválido para {original_name}.")
                     continue
-                if withholding_amount is None:
-                    withholding_amount = 0.0
-                if withholding_amount < 0:
-                    errors.append(f"Retención inválida para {original_name}.")
-                    continue
                 if withholding_amount > total_amount:
                     errors.append(
                         f"La retención no puede superar el total en {original_name}."
@@ -7361,9 +7400,13 @@ def upload_invoices():
                     )
                     continue
 
-                if not is_manual and vat_rate_int is not None and vat_rate_int >= 0:
-                    base_amount, vat_amount, total_amount = normalize_vat_amounts(
-                        base_amount, vat_rate_int, vat_amount, total_amount
+                if vat_rate_int is not None and vat_rate_int >= 0:
+                    base_amount, vat_amount, total_amount = normalize_purchase_invoice_amounts(
+                        base_amount,
+                        vat_rate_int,
+                        vat_amount,
+                        total_amount,
+                        withholding_amount,
                     )
                 vat_deductible = entry.get("vatDeductible")
                 if vat_deductible is None:
@@ -8702,7 +8745,8 @@ def update_invoice(invoice_id):
         vat_rate = infer_vat_rate_from_breakdown(vat_breakdown)
         summary = summarize_vat_breakdown(vat_breakdown)
         if summary:
-            base_amount, vat_amount, total_amount = summary
+            base_amount, vat_amount, gross_total = summary
+            total_amount = round(gross_total - (withholding_amount or 0), 2)
     else:
         try:
             vat_rate = int(vat_rate_raw)
@@ -8729,8 +8773,12 @@ def update_invoice(invoice_id):
         return jsonify({"ok": False, "errors": errors}), 400
 
     if vat_rate is not None and vat_rate >= 0:
-        base_amount, vat_amount, total_amount = normalize_vat_amounts(
-            base_amount, vat_rate, vat_amount, total_amount
+        base_amount, vat_amount, total_amount = normalize_purchase_invoice_amounts(
+            base_amount,
+            vat_rate,
+            vat_amount,
+            total_amount,
+            withholding_amount,
         )
     expense_profile = derive_invoice_profile(
         expense_category, vat_deductible, vat_amount, withholding_amount
