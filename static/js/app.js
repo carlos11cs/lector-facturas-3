@@ -4765,6 +4765,15 @@ function renderTable() {
     });
     withholdingTd.appendChild(withholdingInput);
 
+    // Keep the visible payable total aligned with base + VAT - withholding.
+    // A user-entered total remains authoritative and is never overwritten here.
+    if (!item.touched.total) {
+      const normalizedAmounts = normalizeInvoiceAmounts(item);
+      if (normalizedAmounts.total) {
+        item.total = normalizedAmounts.total;
+      }
+    }
+
     const totalTd = document.createElement("td");
     const totalInput = document.createElement("input");
     totalInput.type = "text";
