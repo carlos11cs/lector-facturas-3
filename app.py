@@ -470,12 +470,15 @@ if stripe and STRIPE_SECRET_KEY:
 
 def static_asset_url(filename: str) -> str:
     static_path = os.path.join(app.static_folder or "", filename)
-    version = None
     try:
-        version = int(os.path.getmtime(static_path))
+        # A content fingerprint prevents browsers and CDNs from reusing an
+        # older JavaScript bundle whose mtime happens to match a new deploy.
+        digest = hashlib.sha256()
+        with open(static_path, "rb") as asset_file:
+            for chunk in iter(lambda: asset_file.read(64 * 1024), b""):
+                digest.update(chunk)
+        version = digest.hexdigest()[:16]
     except OSError:
-        version = None
-    if version is None:
         return url_for("static", filename=filename)
     return url_for("static", filename=filename, v=version)
 
