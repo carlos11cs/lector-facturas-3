@@ -817,7 +817,9 @@ def _extract_explicit_withholding_amount_from_text(text: str) -> Optional[float]
             and not line_amounts
         )
         repeated_irpf_labels = compact_label.count("irpf") > 1
-        if (is_base_header or is_rate_header) and not repeated_irpf_labels:
+        # A rate label can be followed by the withheld amount on the next OCR
+        # line ("IRPF (15%)" then "-339,62"). Keep scanning in that case.
+        if is_base_header and not repeated_irpf_labels:
             continue
 
         if line_amounts:
@@ -840,6 +842,26 @@ def _extract_explicit_withholding_amount_from_text(text: str) -> Optional[float]
                 return _round_amount(parsed)
             break
     return None
+
+
+def _apply_withholding_to_payable_total(
+    base_amount: Optional[float],
+    vat_amount: Optional[float],
+    total_amount: Optional[float],
+    withholding_amount: Optional[float],
+) -> Optional[float]:
+    """Keep supplier invoice totals net when a later tax summary supplied gross."""
+    if (
+        base_amount is None
+        or vat_amount is None
+        or total_amount is None
+        or not withholding_amount
+    ):
+        return total_amount
+    gross_total = round(base_amount + vat_amount, 2)
+    if abs(total_amount - gross_total) <= 0.02:
+        return round(gross_total - withholding_amount, 2)
+    return total_amount
 
 
 def _extract_explicit_vat_exemption_amount_from_text(text: str) -> Optional[float]:
@@ -4046,6 +4068,13 @@ def analyze_invoice(
     amount_source = forced_summary.get("amount_source") or amount_source
     if forced_summary.get("breakdown_warning") is not None:
         breakdown_warning = forced_summary.get("breakdown_warning")
+
+    total_amount = _apply_withholding_to_payable_total(
+        base_amount,
+        vat_amount,
+        total_amount,
+        withholding_amount,
+    )
 
     explicit_exempt_base = _extract_explicit_vat_exemption_amount_from_text(extracted_text)
     if explicit_exempt_base is not None:

@@ -683,7 +683,8 @@ Fecha: 31 de agosto de 2026
 Actividad médica Agosto.
 Base imponible 2264,15
 IVA (21%) 475,47
-IRPF (15%) -339,62
+IRPF (15%)
+-339,62
 TOTAL A PERCIBIR 2400,00
 Importe sujeto a retención del 15% de IRPF.
 """
@@ -1123,6 +1124,12 @@ class TestAiInvoiceService(unittest.TestCase):
         self.assertEqual(withholding_amount, 339.62)
         self.assertTrue(
             svc._validate_math(2264.15, 475.47, 2400.0, withholding_amount)["is_consistent"]
+        )
+
+    def test_withholding_converts_forced_gross_summary_to_payable_total(self):
+        self.assertEqual(
+            svc._apply_withholding_to_payable_total(2264.15, 475.47, 2739.62, 339.62),
+            2400.0,
         )
 
     def test_autonomo_name_with_nearby_tax_id_is_valid_supplier(self):
