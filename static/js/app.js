@@ -958,6 +958,28 @@ function applyVatCalculation(item, inputs, source) {
   item.vat = vatRateValue === null ? "" : String(vatRateValue);
   item.vatAmount = inputs.vatAmount.value;
   item.total = inputs.total.value;
+  updateInvoiceCalculationSummary(item);
+}
+
+function updateInvoiceCalculationSummary(item) {
+  if (!item?.id) {
+    return;
+  }
+  const values = {
+    base: item.base,
+    vatAmount: item.vatAmount,
+    withholdingAmount: item.withholdingAmount || "0",
+    total: item.total,
+  };
+  document.querySelectorAll(".invoice-calculation").forEach((summary) => {
+    if (summary.dataset.invoiceItemId !== String(item.id)) {
+      return;
+    }
+    summary.querySelectorAll("[data-calculation-field]").forEach((field) => {
+      const value = values[field.dataset.calculationField];
+      field.textContent = `${field.dataset.calculationLabel}: ${formatAmountInput(value) || "Pendiente"} EUR`;
+    });
+  });
 }
 
 function syncBillingCalculation(source) {
@@ -4833,17 +4855,18 @@ function renderTable() {
     calculationCell.colSpan = 9;
     const calculation = document.createElement("div");
     calculation.className = "invoice-calculation";
+    calculation.dataset.invoiceItemId = String(item.id);
     const calculationLabel = document.createElement("span");
     calculationLabel.className = "invoice-calculation-label";
     calculationLabel.textContent = "Resumen de cálculo";
     calculation.appendChild(calculationLabel);
     const calculationParts = [
-      ["Base", item.base],
-      ["IVA", item.vatAmount],
-      ["Retención IRPF", item.withholdingAmount || "0"],
-      ["Total a pagar", item.total],
+      ["base", "Base", item.base],
+      ["vatAmount", "IVA", item.vatAmount],
+      ["withholdingAmount", "Retención IRPF", item.withholdingAmount || "0"],
+      ["total", "Total a pagar", item.total],
     ];
-    calculationParts.forEach(([label, value], index) => {
+    calculationParts.forEach(([fieldName, label, value], index) => {
       if (index > 0) {
         const operator = document.createElement("span");
         operator.className = "invoice-calculation-operator";
@@ -4854,6 +4877,8 @@ function renderTable() {
       part.className = index === calculationParts.length - 1
         ? "invoice-calculation-total"
         : "invoice-calculation-part";
+      part.dataset.calculationField = fieldName;
+      part.dataset.calculationLabel = label;
       part.textContent = `${label}: ${formatAmountInput(value) || "Pendiente"} EUR`;
       calculation.appendChild(part);
     });
