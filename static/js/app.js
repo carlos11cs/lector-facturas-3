@@ -882,7 +882,7 @@ function isSupplierSameAsCompany(supplier) {
 
 function calculateVatFields({ baseValue, totalValue, vatRateValue, withholdingValue = 0, source }) {
   const vatRate = parseNumberInput(vatRateValue);
-  const withholding = Math.max(parseNumberInput(withholdingValue) || 0, 0);
+  const withholding = getWithholdingAmount(withholdingValue);
   if (vatRate === null) {
     return {
       base: baseValue,
@@ -922,6 +922,20 @@ function calculateVatFields({ baseValue, totalValue, vatRateValue, withholdingVa
   }
 
   return { base: null, vatAmount: null, total: null };
+}
+
+function getWithholdingAmount(value) {
+  const parsed = parseNumberInput(value);
+  return parsed === null ? 0 : Math.abs(parsed);
+}
+
+function calculateInvoicePayableTotal(baseValue, vatAmountValue, withholdingValue) {
+  const base = parseNumberInput(baseValue);
+  const vatAmount = parseNumberInput(vatAmountValue);
+  if (base === null || vatAmount === null) {
+    return null;
+  }
+  return roundAmount(base + vatAmount - getWithholdingAmount(withholdingValue));
 }
 
 function applyVatCalculation(item, inputs, source) {
@@ -968,7 +982,7 @@ function updateInvoiceCalculationSummary(item) {
   const values = {
     base: item.base,
     vatAmount: item.vatAmount,
-    withholdingAmount: item.withholdingAmount || "0",
+    withholdingAmount: getWithholdingAmount(item.withholdingAmount),
     total: item.total,
   };
   document.querySelectorAll(".invoice-calculation").forEach((summary) => {
@@ -1017,7 +1031,7 @@ function normalizeInvoiceAmounts(item) {
   const baseValue = parseNumberInput(item.base);
   const totalValue = parseNumberInput(item.total);
   const vatRateValue = normalizeVatRateValue(item.vat);
-  const withholdingValue = parseNumberInput(item.withholdingAmount) || 0;
+  const withholdingValue = getWithholdingAmount(item.withholdingAmount);
   const source = baseValue !== null ? "base" : "total";
   const result = calculateVatFields({
     baseValue,
@@ -4785,13 +4799,29 @@ function renderTable() {
         total: totalInput,
       }, "withholding");
     });
+    withholdingInput.addEventListener("blur", () => {
+      const withholdingAmount = getWithholdingAmount(withholdingInput.value);
+      item.withholdingAmount = formatAmountInput(withholdingAmount);
+      withholdingInput.value = item.withholdingAmount;
+      applyVatCalculation(item, {
+        base: baseInput,
+        vat: vatSelect,
+        vatAmount: vatAmountInput,
+        withholding: withholdingInput,
+        total: totalInput,
+      }, "withholding");
+    });
     withholdingTd.appendChild(withholdingInput);
 
     // The payable amount is never an independent value when base and VAT are
     // known: it must always be base + VAT - withholding.
-    const normalizedAmounts = normalizeInvoiceAmounts(item);
-    if (normalizedAmounts.total) {
-      item.total = normalizedAmounts.total;
+    const payableTotal = calculateInvoicePayableTotal(
+      item.base,
+      item.vatAmount,
+      item.withholdingAmount
+    );
+    if (payableTotal !== null) {
+      item.total = formatAmountInput(payableTotal);
     }
 
     const totalTd = document.createElement("td");
@@ -4987,7 +5017,7 @@ function renderTable() {
             item.base = formatAmountInput(totals.base);
             item.vatAmount = formatAmountInput(totals.vatAmount);
             item.total = formatAmountInput(
-              roundAmount(totals.total - (parseNumberInput(item.withholdingAmount) || 0))
+              roundAmount(totals.total - getWithholdingAmount(item.withholdingAmount))
             );
             baseInput.value = item.base;
             vatAmountInput.value = item.vatAmount;
@@ -5103,7 +5133,9 @@ function renderTable() {
       if (totals) {
         item.base = formatAmountInput(totals.base);
         item.vatAmount = formatAmountInput(totals.vatAmount);
-        item.total = formatAmountInput(totals.total);
+        item.total = formatAmountInput(
+          roundAmount(totals.total - getWithholdingAmount(item.withholdingAmount))
+        );
         baseInput.value = item.base;
         vatAmountInput.value = item.vatAmount;
         totalInput.value = item.total;
@@ -5115,6 +5147,7 @@ function renderTable() {
           base: baseInput,
           vat: vatSelect,
           vatAmount: vatAmountInput,
+          withholding: withholdingInput,
           total: totalInput,
         },
         initialSource
@@ -5904,7 +5937,7 @@ function validatePending() {
     }
     const baseValue = parseNumberInput(item.base);
     const totalValue = parseNumberInput(item.total);
-    const withholdingValue = parseNumberInput(item.withholdingAmount);
+    const withholdingValue = getWithholdingAmount(item.withholdingAmount);
     if (baseValue === null && totalValue === null) {
       errors.push(`Base imponible o total obligatorio: ${item.file.name}`);
     }
@@ -5914,10 +5947,7 @@ function validatePending() {
     ) {
       errors.push(`IVA pendiente de confirmar: ${item.file.name}`);
     }
-    if (withholdingValue !== null && withholdingValue < 0) {
-      errors.push(`Retención inválida: ${item.file.name}`);
-    }
-    if (withholdingValue !== null && totalValue !== null && withholdingValue > totalValue) {
+    if (totalValue !== null && withholdingValue > totalValue) {
       errors.push(`La retención no puede superar el total: ${item.file.name}`);
     }
     const isRectificativa =
@@ -6043,7 +6073,7 @@ function getExpenseOperationPayload(item) {
       vat_rate: null,
       vat_amount: null,
       base_amount: grossAmount,
-      withholding_amount: parseNumberInput(item.withholdingAmount) || 0,
+      withholding_amount: getWithholdingAmount(item.withholdingAmount),
       payroll_employee_name: (item.supplier || "").trim(),
       payroll_period: (item.payrollPeriod || "").trim(),
       payroll_net_amount: netAmount,
@@ -6058,7 +6088,7 @@ function getExpenseOperationPayload(item) {
   const breakdownTotals = breakdownPayload.length
     ? summarizeVatBreakdown(item.vatBreakdown || [])
     : null;
-  const withholdingAmount = parseNumberInput(item.withholdingAmount) || 0;
+  const withholdingAmount = getWithholdingAmount(item.withholdingAmount);
   const baseValue = parseNumberInput(
     breakdownTotals ? breakdownTotals.base : normalized.base || item.base
   );
@@ -6370,7 +6400,7 @@ function uploadPending() {
       const breakdownTotals = breakdownPayload.length
         ? summarizeVatBreakdown(item.vatBreakdown || [])
         : null;
-      const withholdingAmount = parseNumberInput(item.withholdingAmount) || 0;
+      const withholdingAmount = getWithholdingAmount(item.withholdingAmount);
       return {
         originalFilename: item.originalFilename,
         date: item.date,

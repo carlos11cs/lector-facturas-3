@@ -1297,16 +1297,21 @@ def init_db():
                 base_amount = round(float(row.get("base_amount") or 0), 2)
                 vat_amount = round(float(row.get("vat_amount") or 0), 2)
                 total_amount = round(float(row.get("total_amount") or 0), 2)
-                withholding_amount = round(float(row.get("withholding_amount") or 0), 2)
+                withholding_amount = round(abs(float(row.get("withholding_amount") or 0)), 2)
                 gross_total = round(base_amount + vat_amount, 2)
                 # Older versions persisted the gross amount even when the
                 # invoice had an IRPF withholding. The canonical total is the
                 # amount payable to the supplier, net of that withholding.
+                updates = {}
+                if withholding_amount != round(float(row.get("withholding_amount") or 0), 2):
+                    updates["withholding_amount"] = withholding_amount
                 if withholding_amount > 0 and abs(total_amount - gross_total) <= 0.02:
+                    updates["total_amount"] = round(gross_total - withholding_amount, 2)
+                if updates:
                     conn.execute(
                         invoices_table.update()
                         .where(invoices_table.c.id == row["id"])
-                        .values(total_amount=round(gross_total - withholding_amount, 2))
+                        .values(**updates)
                     )
                 existing_targets = parse_tax_model_targets(row.get("tax_model_targets"))
                 inferred_targets = parse_tax_model_targets(
@@ -1723,7 +1728,7 @@ def normalize_purchase_invoice_amounts(
     base_amount, vat_rate, vat_amount, total_amount, withholding_amount=0.0
 ):
     """Normalize a supplier invoice using its payable total, net of withholding."""
-    withholding = max(float(withholding_amount or 0), 0.0)
+    withholding = abs(float(withholding_amount or 0))
     if vat_rate is None:
         return base_amount, vat_amount, total_amount
     if base_amount is None and total_amount is None:
@@ -3161,7 +3166,7 @@ def derive_invoice_profile(
     withholding_amount=0.0,
 ):
     category = (expense_category or "with_invoice").strip()
-    withholding_amount = float(withholding_amount or 0)
+    withholding_amount = abs(float(withholding_amount or 0))
     if category == "non_deductible":
         targets = []
         subtype = "non_deductible_invoice"
@@ -3193,7 +3198,7 @@ def get_invoice_deductible_amount(row):
 def derive_no_invoice_profile(expense_type, vat_deductible=False, withholding_amount=0.0):
     targets = []
     vat_deductible = bool(vat_deductible)
-    withholding_amount = float(withholding_amount or 0)
+    withholding_amount = abs(float(withholding_amount or 0))
 
     if expense_type == "nomina":
         targets = ["111", "190"]
@@ -4546,7 +4551,7 @@ def _build_financial_metrics(user_id, company_id, periods, conn):
         for row in invoice_rows:
             gross_total = float(row.get("total_amount") or 0)
             deductible_amount = get_invoice_deductible_amount(row)
-            withholding_amount = float(row.get("withholding_amount") or 0)
+            withholding_amount = abs(float(row.get("withholding_amount") or 0))
             tax_targets = get_effective_invoice_tax_targets(row)
             payment_dates = parse_payment_dates(row.get("payment_dates"))
             if not payment_dates:
@@ -4608,7 +4613,7 @@ def _build_financial_metrics(user_id, company_id, periods, conn):
             deductible_amount = get_no_invoice_deductible_amount(row)
             expense_type = row.get("expense_type")
             tax_targets = get_effective_no_invoice_tax_targets(row)
-            withholding_amount = float(row.get("withholding_amount") or 0)
+            withholding_amount = abs(float(row.get("withholding_amount") or 0))
             payment_dates = parse_payment_dates(row.get("payment_dates"))
             if not payment_dates:
                 fallback_date = normalize_date(row.get("payment_date")) or normalize_date(row.get("expense_date"))
@@ -7359,11 +7364,7 @@ def upload_invoices():
                         original_name,
                     )
 
-                if withholding_amount is None:
-                    withholding_amount = 0.0
-                if withholding_amount < 0:
-                    errors.append(f"Retención inválida para {original_name}.")
-                    continue
+                withholding_amount = abs(withholding_amount or 0.0)
 
                 if vat_breakdown:
                     vat_rate_int = infer_vat_rate_from_breakdown(vat_breakdown)
@@ -8014,8 +8015,10 @@ def list_payments():
         if not payment_dates:
             continue
         total_amount = float(row["total_amount"] or 0)
-        withholding_amount = float(row.get("withholding_amount") or 0)
-        payable_amount = max(round(total_amount - withholding_amount, 2), 0.0)
+        withholding_amount = abs(float(row.get("withholding_amount") or 0))
+        # Purchase-invoice totals are stored as the supplier cash payment:
+        # base + VAT - withholding. Never subtract the withholding twice.
+        payable_amount = max(round(total_amount, 2), 0.0)
         split_count = len(payment_dates)
         base_amount = round(payable_amount / split_count, 2) if split_count else payable_amount
         amounts = [base_amount] * split_count
@@ -8721,6 +8724,7 @@ def update_invoice(invoice_id):
     withholding_amount = parse_amount(
         str(payload.get("withholding_amount") or payload.get("withholdingAmount") or "")
     )
+    withholding_amount = abs(withholding_amount or 0.0)
     is_rectificativa = bool(payload.get("is_rectificativa") or payload.get("isRectificativa"))
     is_rectificativa = bool(payload.get("is_rectificativa") or payload.get("isRectificativa"))
     vat_breakdown = parse_vat_breakdown(
@@ -8765,11 +8769,7 @@ def update_invoice(invoice_id):
         vat_deductible = vat_deductible in (True, "true", "True", 1, "1")
     if expense_category == "non_deductible":
         vat_deductible = False
-    if withholding_amount is None:
-        withholding_amount = 0.0
-    if withholding_amount < 0:
-        errors.append("Retención inválida.")
-    elif total_amount is not None and withholding_amount > total_amount:
+    if total_amount is not None and withholding_amount > total_amount:
         errors.append("La retención no puede superar el total.")
 
     if errors:

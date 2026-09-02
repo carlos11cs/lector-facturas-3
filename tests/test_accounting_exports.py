@@ -157,6 +157,16 @@ class TestAccountingExportHelpers(unittest.TestCase):
         self.assertTrue(any(row["cuenta"] == "4751" and row["haber"] == 339.62 for row in rows))
         self.assertTrue(any(row["cuenta"] == "410" and row["haber"] == 2400.0 for row in rows))
 
+    def test_supplier_invoice_treats_negative_withholding_as_absolute_value(self):
+        base_amount, vat_amount, payable_total = normalize_purchase_invoice_amounts(
+            8018.87,
+            21,
+            1683.96,
+            9702.83,
+            -1202.83,
+        )
+        self.assertEqual((base_amount, vat_amount, payable_total), (8018.87, 1683.96, 8500.0))
+
 
 if __name__ == "__main__":
     unittest.main()
