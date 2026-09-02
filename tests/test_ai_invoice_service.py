@@ -668,6 +668,26 @@ BASE I.R.P.F.        % I.R.P.F.     I.R.P.F.
 TOTAL FACTURA: 306,00
 """
 
+VAT_EXEMPT_CONFIRMING_FIXTURE = """FACTURA
+LIQUID. COM./INT. DE FINANCIACION 16,95 EUR
+Base Sujeta y Exenta 16,95 EUR
+Total Importe 16,95 EUR
+"""
+
+PROFESSIONAL_INVOICE_WITHHOLDING_FIXTURE = """FACTURA N° NOMINA AGOSTO CHELO
+DATOS DEL EMISOR
+Mª Consuelo Sebastián Pastor · DNI: 25414619X
+DATOS DEL CLIENTE
+KALOS HEALTH AND BEAUTY SL · ID: B05410667
+Fecha: 31 de agosto de 2026
+Actividad médica Agosto.
+Base imponible 2264,15
+IVA (21%) 475,47
+IRPF (15%) -339,62
+TOTAL A PERCIBIR 2400,00
+Importe sujeto a retención del 15% de IRPF.
+"""
+
 
 class TestAiInvoiceService(unittest.TestCase):
     def test_parse_eu_amount(self):
@@ -1071,6 +1091,39 @@ class TestAiInvoiceService(unittest.TestCase):
             RENT_INVOICE_IRPF_COLUMNS_FIXTURE
         )
         self.assertEqual(withholding_amount, 57.0)
+
+    def test_rent_totals_remain_valid_after_withholding(self):
+        normalized = svc.normalize_and_validate_amounts(
+            {
+                "analysis_status": "ok",
+                "base_amount": 300.0,
+                "vat_amount": 63.0,
+                "total_amount": 306.0,
+                "withholding_amount": 57.0,
+                "vat_breakdown": [{"base": 300.0, "vat_amount": 63.0, "rate": 21}],
+            }
+        )
+        self.assertEqual(normalized["analysis_status"], "ok")
+        self.assertEqual(normalized["base_amount"], 300.0)
+        self.assertEqual(normalized["vat_amount"], 63.0)
+        self.assertEqual(normalized["withholding_amount"], 57.0)
+        self.assertEqual(normalized["total_amount"], 306.0)
+
+    def test_detects_explicit_vat_exemption_without_assuming_standard_rate(self):
+        exempt_base = svc._extract_explicit_vat_exemption_amount_from_text(
+            VAT_EXEMPT_CONFIRMING_FIXTURE
+        )
+        self.assertEqual(exempt_base, 16.95)
+        self.assertTrue(svc._validate_math(exempt_base, 0.0, 16.95)["is_consistent"])
+
+    def test_extracts_irpf_withholding_from_professional_supplier_invoice(self):
+        withholding_amount = svc._extract_explicit_withholding_amount_from_text(
+            PROFESSIONAL_INVOICE_WITHHOLDING_FIXTURE
+        )
+        self.assertEqual(withholding_amount, 339.62)
+        self.assertTrue(
+            svc._validate_math(2264.15, 475.47, 2400.0, withholding_amount)["is_consistent"]
+        )
 
     def test_autonomo_name_with_nearby_tax_id_is_valid_supplier(self):
         self.assertTrue(

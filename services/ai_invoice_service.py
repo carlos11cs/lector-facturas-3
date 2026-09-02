@@ -805,14 +805,21 @@ def _extract_explicit_withholding_amount_from_text(text: str) -> Optional[float]
         # Ignore the base and percentage column headers when the PDF emits
         # each table column on a separate line. The bare IRPF column is the
         # actual withheld amount.
+        line_amounts = [_normalize_amount(raw) for raw in amount_pattern.findall(line)]
+        line_amounts = [value for value in line_amounts if value is not None]
         is_base_header = is_irpf_label and "base" in compact_label
-        is_rate_header = is_irpf_label and ("%" in line or "porcentaje" in compact_label)
+        # An invoice can state both the rate and amount in one line, e.g.
+        # "IRPF (15%) -339,62". Only discard a percentage label when it
+        # contains no monetary value, as happens in column headers.
+        is_rate_header = (
+            is_irpf_label
+            and ("%" in line or "porcentaje" in compact_label)
+            and not line_amounts
+        )
         repeated_irpf_labels = compact_label.count("irpf") > 1
         if (is_base_header or is_rate_header) and not repeated_irpf_labels:
             continue
 
-        line_amounts = [_normalize_amount(raw) for raw in amount_pattern.findall(line)]
-        line_amounts = [value for value in line_amounts if value is not None]
         if line_amounts:
             return _round_amount(line_amounts[-1])
 
@@ -832,6 +839,41 @@ def _extract_explicit_withholding_amount_from_text(text: str) -> Optional[float]
             if parsed is not None:
                 return _round_amount(parsed)
             break
+    return None
+
+
+def _extract_explicit_vat_exemption_amount_from_text(text: str) -> Optional[float]:
+    """Return the taxable base when a document explicitly states it is VAT exempt."""
+    if not text:
+        return None
+    normalized_text = _normalize_ocr_amount_text(text)
+    lowered = normalized_text.lower()
+    exemption_markers = ("exento", "exenta", "exentos", "exentas", "sin iva", "no sujeto")
+    if not any(marker in lowered for marker in exemption_markers):
+        return None
+
+    # Do not treat a mixed invoice as fully exempt when it also declares a
+    # standard positive VAT rate elsewhere in the document.
+    positive_vat_rate = re.compile(
+        r"(?:i\s*\.?\s*v\s*\.?\s*a\.?|iva)[^\d]{0,16}(?:4|10|21)(?:[.,]0+)?\s*%",
+        flags=re.IGNORECASE,
+    )
+    if positive_vat_rate.search(normalized_text):
+        return None
+
+    amount_pattern = re.compile(r"\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})|\d+[.,]\d{2}")
+    lines = [line.strip() for line in normalized_text.splitlines() if line.strip()]
+    for idx, line in enumerate(lines):
+        line_lower = line.lower()
+        if not any(marker in line_lower for marker in exemption_markers):
+            continue
+        for offset in range(0, 3):
+            if idx + offset >= len(lines):
+                break
+            amounts = [_normalize_amount(raw) for raw in amount_pattern.findall(lines[idx + offset])]
+            amounts = [amount for amount in amounts if amount is not None]
+            if amounts:
+                return _round_amount(amounts[-1])
     return None
 
 
@@ -2672,10 +2714,12 @@ def _validate_math(
     base_amount: Optional[float],
     vat_amount: Optional[float],
     total_amount: Optional[float],
+    withholding_amount: Optional[float] = None,
 ) -> Dict[str, Any]:
     if base_amount is None or vat_amount is None or total_amount is None:
         return {"is_consistent": None, "difference": None}
-    difference = round((base_amount + vat_amount) - total_amount, 2)
+    withholding = max(float(withholding_amount or 0), 0)
+    difference = round((base_amount + vat_amount - withholding) - total_amount, 2)
     tolerance = max(0.05, total_amount * 0.01)
     return {
         "is_consistent": abs(difference) <= tolerance,
@@ -2795,6 +2839,7 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
         )
     )
     vat_rate = _normalize_rate(result.get("vat_rate"))
+    withholding_amount = _normalize_amount(result.get("withholding_amount")) or 0.0
 
     raw_breakdown = result.get("vat_breakdown") or []
     if isinstance(raw_breakdown, str):
@@ -2847,19 +2892,21 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
 
         llm_has_totals = base_amount is not None and vat_amount is not None and total_amount is not None
         llm_consistent = (
-            llm_has_totals and abs((base_amount + vat_amount) - total_amount) <= 0.02
+            llm_has_totals
+            and abs((base_amount + vat_amount - withholding_amount) - total_amount) <= 0.02
         )
         breakdown_consistent = abs((base_sum + vat_sum) - total_sum) <= 0.02
 
         # If totals come from text/summary, do NOT let breakdown override a lower explicit total.
         if incoming_source in {"regex_tax_summary", "text_total"} and total_amount is not None:
-            if total_sum > total_amount + 0.02:
+            gross_total = total_amount + withholding_amount
+            if total_sum > gross_total + 0.02:
                 if len(normalized_breakdown) > 1 and breakdown_consistent:
                     # Multi-line VAT summaries are more reliable than a partial explicit
                     # summary that only captured the first tax band.
                     base_amount = base_sum
                     vat_amount = vat_sum
-                    total_amount = total_sum
+                    total_amount = round(total_sum - withholding_amount, 2)
                     amount_source = "breakdown"
                 else:
                     # Keep explicit total, adjust breakdown to match it (likely OCR noise).
@@ -2868,7 +2915,7 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
                         normalized_breakdown,
                         base_amount,
                         vat_amount,
-                        total_amount,
+                        total_amount + withholding_amount,
                     )
                     base_amount = round(sum(line["base"] or 0 for line in normalized_breakdown), 2)
                     vat_amount = round(sum(line["vat_amount"] or 0 for line in normalized_breakdown), 2)
@@ -2881,12 +2928,12 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
                 # whole extraction as inconsistent.
                 if (
                     breakdown_consistent
-                    and abs(total_sum - total_amount) <= 0.02
+                    and abs(total_sum - gross_total) <= 0.02
                     and (base_amount is None or vat_amount is None or not llm_consistent)
                 ):
                     base_amount = base_sum
                     vat_amount = vat_sum
-                    total_amount = total_sum
+                    total_amount = round(total_sum - withholding_amount, 2)
                     amount_source = "breakdown"
                 else:
                     # Keep explicit total even if base/vat are incomplete.
@@ -2895,13 +2942,16 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
             llm_matches_breakdown = (
                 totals_match(base_amount, base_sum)
                 and totals_match(vat_amount, vat_sum)
-                and totals_match(total_amount, total_sum)
+                and totals_match(total_amount + withholding_amount, total_sum)
             )
             breakdown_looks_partial_or_non_tax = (
                 llm_consistent
                 and (
                     not breakdown_has_supported_rates
-                    or (total_amount is not None and total_sum < total_amount - 0.02)
+                    or (
+                        total_amount is not None
+                        and total_sum < (total_amount + withholding_amount) - 0.02
+                    )
                 )
             )
             # Prefer the line-level breakdown whenever it is coherent and the
@@ -2913,7 +2963,7 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
             elif not llm_matches_breakdown:
                 base_amount = base_sum
                 vat_amount = vat_sum
-                total_amount = total_sum
+                total_amount = round(total_sum - withholding_amount, 2)
                 amount_source = "breakdown"
             elif llm_consistent:
                 amount_source = amount_source or "llm"
@@ -2928,7 +2978,7 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
         base_amount is not None
         and vat_amount is not None
         and total_amount is not None
-        and abs((base_amount + vat_amount) - total_amount) > 0.02
+        and abs((base_amount + vat_amount - withholding_amount) - total_amount) > 0.02
     )
     if total_amount is None or mismatch or base_amount is None or vat_amount is None:
         analysis_status = "partial"
@@ -2959,6 +3009,7 @@ def normalize_and_validate_amounts(extracted: Dict[str, Any]) -> Dict[str, Any]:
             "total_amount": _round_amount(total_amount),
             "vat_rate": vat_rate,
             "vat_breakdown": normalized_breakdown,
+            "withholding_amount": _round_amount(withholding_amount),
             "analysis_status": analysis_status,
             "amount_source": amount_source,
             "breakdown_warning": breakdown_warning,
@@ -3565,7 +3616,8 @@ def analyze_invoice(
             "supplier, invoice_date, payment_terms_days, payment_dates, withholding_amount, totals, vat_breakdown. "
             "totals es un objeto con {base, vat, total} (pueden ser null). "
             "vat_breakdown es una lista de lineas IVA con {base, vat_amount} y opcional {rate}. "
-            "withholding_amount es la retencion a Hacienda si aparece. "
+            "withholding_amount es la retencion a Hacienda si aparece; devuelve siempre su importe "
+            "en positivo, aunque la linea IRPF lo muestre con signo menos, y nunca devuelvas el porcentaje. "
             "El supplier debe ser la razon social del arrendador o emisor, nunca el cliente/receptor. "
             "Prioriza base imponible, IVA, total, retencion y fecha de pago si aparecen. "
             "payment_terms_days es el numero de dias si aparece una condicion tipo "
@@ -3584,7 +3636,8 @@ def analyze_invoice(
             "employee_name es el trabajador de la nomina. employer_name es la empresa pagadora si aparece. "
             "gross_amount es el total devengado. payroll_total_deductions_amount es el total a deducir. "
             "payroll_net_amount es el liquido a percibir. payroll_employer_cost_amount es el coste empresa si aparece. "
-            "withholding_amount es la retencion IRPF si aparece de forma explicita; si no aparece, usa 0 o null. "
+            "withholding_amount es la retencion IRPF si aparece de forma explicita; devuelve el importe "
+            "en positivo aunque el documento lo muestre con signo menos, nunca el porcentaje. Si no aparece, usa 0 o null. "
             "No uses claves de IVA salvo que el documento realmente las tenga; en nominas normales no hay IVA. "
             "Prioriza trabajador, periodo, fecha, bruto, deducciones, liquido y retencion. "
             "payment_dates debe ser una lista de fechas (YYYY-MM-DD) y puede estar vacia. "
@@ -3599,7 +3652,8 @@ def analyze_invoice(
             "supplier, invoice_date, payment_terms_days, payment_dates, withholding_amount, totals, vat_breakdown. "
             "totals es un objeto con {base, vat, total} (pueden ser null). "
             "vat_breakdown es una lista de lineas IVA con {base, vat_amount} y opcional {rate}. "
-            "withholding_amount es la retencion a Hacienda si aparece. "
+            "withholding_amount es la retencion a Hacienda si aparece; devuelve siempre su importe "
+            "en positivo, aunque la linea IRPF lo muestre con signo menos, y nunca devuelvas el porcentaje. "
             "El supplier debe ser la razon social del emisor si aparece y no debe ser el cliente/receptor. "
             "Prioriza fecha, base, IVA, total y retencion. "
             "payment_dates debe ser una lista de fechas (YYYY-MM-DD) y puede estar vacia. "
@@ -3614,7 +3668,8 @@ def analyze_invoice(
             "supplier, invoice_date, payment_terms_days, payment_dates, withholding_amount, totals, vat_breakdown. "
             "totals es un objeto con {base, vat, total} (pueden ser null). "
             "vat_breakdown es una lista de lineas IVA con {base, vat_amount} y opcional {rate}. "
-            "withholding_amount es la retencion a Hacienda si aparece. "
+            "withholding_amount es la retencion a Hacienda si aparece; devuelve siempre su importe "
+            "en positivo, aunque la linea IRPF lo muestre con signo menos, y nunca devuelvas el porcentaje. "
             "Si hay varias lineas IVA, NO rellenes un vat_rate unico (deja rate en cada linea o null). "
             "El supplier debe ser la razon social del emisor (forma juridica si aparece) "
             "y no debe ser el cliente/receptor. "
@@ -3936,6 +3991,7 @@ def analyze_invoice(
             "total_amount": total_amount,
             "vat_rate": vat_rate,
             "vat_breakdown": vat_breakdown,
+            "withholding_amount": withholding_amount,
             "totals": totals_payload,
             "amount_source": amount_source,
         }
@@ -3991,7 +4047,28 @@ def analyze_invoice(
     if forced_summary.get("breakdown_warning") is not None:
         breakdown_warning = forced_summary.get("breakdown_warning")
 
-    validation = _validate_math(base_amount, vat_amount, total_amount)
+    explicit_exempt_base = _extract_explicit_vat_exemption_amount_from_text(extracted_text)
+    if explicit_exempt_base is not None:
+        # A stated exemption is stronger evidence than a model guess or the
+        # default UI rate. Keep the payable amount separate from any possible
+        # withholding and never manufacture a VAT quota for this document.
+        base_amount = explicit_exempt_base
+        total_amount = round(explicit_exempt_base - (withholding_amount or 0), 2)
+        vat_rate = 0
+        vat_amount = 0.0
+        vat_breakdown = [
+            {
+                "base": _round_amount(base_amount),
+                "vat_amount": 0.0,
+                "rate": 0.0,
+                "total": _round_amount(base_amount),
+            }
+        ]
+        amount_source = "explicit_vat_exemption"
+        analysis_status = "ok"
+        breakdown_warning = False
+
+    validation = _validate_math(base_amount, vat_amount, total_amount, withholding_amount)
     is_rectificativa = bool((base_amount is not None and base_amount < 0) or (total_amount is not None and total_amount < 0))
 
     confidence_score = _confidence_score_for_source(amount_source)

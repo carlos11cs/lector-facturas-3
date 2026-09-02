@@ -927,7 +927,7 @@ function calculateVatFields({ baseValue, totalValue, vatRateValue, source }) {
 function applyVatCalculation(item, inputs, source) {
   const baseValue = parseNumberInput(inputs.base.value);
   const totalValue = parseNumberInput(inputs.total.value);
-  const vatRateValue = resolveVatRateValue(inputs.vat.value);
+  const vatRateValue = normalizeVatRateValue(inputs.vat.value);
   const result = calculateVatFields({
     baseValue,
     totalValue,
@@ -954,7 +954,7 @@ function applyVatCalculation(item, inputs, source) {
   }
 
   item.base = inputs.base.value;
-  item.vat = resolveVatRateValue(inputs.vat.value);
+  item.vat = vatRateValue === null ? "" : String(vatRateValue);
   item.vatAmount = inputs.vatAmount.value;
   item.total = inputs.total.value;
 }
@@ -993,7 +993,7 @@ function syncBillingCalculation(source) {
 function normalizeInvoiceAmounts(item) {
   const baseValue = parseNumberInput(item.base);
   const totalValue = parseNumberInput(item.total);
-  const vatRateValue = resolveVatRateValue(item.vat);
+  const vatRateValue = normalizeVatRateValue(item.vat);
   const source = baseValue !== null ? "base" : "total";
   const result = calculateVatFields({
     baseValue,
@@ -1503,6 +1503,11 @@ function applyVatSelection(select, value, fallback = "21") {
     select.appendChild(option);
   }
   select.value = normalized;
+}
+
+function applyOptionalVatSelection(select, value) {
+  const normalized = normalizeVatRateValue(value);
+  select.value = normalized === null ? "" : normalized;
 }
 
 function parseVatBreakdown(value) {
@@ -4194,7 +4199,7 @@ function addFiles(fileList) {
       paymentDates: [],
       supplier: "",
       base: "",
-      vat: "21",
+      vat: "",
       vatAmount: "",
       total: "",
       vatBreakdown: [],
@@ -4240,7 +4245,7 @@ function addIncomeFiles(fileList) {
       paymentDates: [],
       client: "",
       base: "",
-      vat: "21",
+      vat: "",
       vatAmount: "",
       total: "",
       vatBreakdown: [],
@@ -4640,16 +4645,20 @@ function renderTable() {
 
     const vatTd = document.createElement("td");
     const vatSelect = document.createElement("select");
+    const pendingVatOption = document.createElement("option");
+    pendingVatOption.value = "";
+    pendingVatOption.textContent = "Pendiente";
+    vatSelect.appendChild(pendingVatOption);
     ["0", "4", "10", "21"].forEach((rate) => {
       const option = document.createElement("option");
       option.value = rate;
       option.textContent = `${rate}%`;
       vatSelect.appendChild(option);
     });
-    applyVatSelection(vatSelect, item.vat);
+    applyOptionalVatSelection(vatSelect, item.vat);
     vatSelect.disabled = item.analysisPending || breakdownActive;
     vatSelect.addEventListener("change", () => {
-      item.vat = resolveVatRateValue(vatSelect.value);
+      item.vat = vatSelect.value;
       item.touched.vat = true;
       applyVatCalculation(item, {
         base: baseInput,
@@ -5126,16 +5135,20 @@ function renderIncomeTable() {
 
     const vatTd = document.createElement("td");
     const vatSelect = document.createElement("select");
+    const pendingVatOption = document.createElement("option");
+    pendingVatOption.value = "";
+    pendingVatOption.textContent = "Pendiente";
+    vatSelect.appendChild(pendingVatOption);
     ["0", "4", "10", "21"].forEach((rate) => {
       const option = document.createElement("option");
       option.value = rate;
       option.textContent = `${rate}%`;
       vatSelect.appendChild(option);
     });
-    applyVatSelection(vatSelect, item.vat);
+    applyOptionalVatSelection(vatSelect, item.vat);
     vatSelect.disabled = item.analysisPending || breakdownActive;
     vatSelect.addEventListener("change", () => {
-      item.vat = resolveVatRateValue(vatSelect.value);
+      item.vat = vatSelect.value;
       item.touched.vat = true;
       applyVatCalculation(item, {
         base: baseInput,
@@ -5588,8 +5601,6 @@ function analyzeIncomeForItem(item) {
         const detectedVat = normalizeVatRateValue(extracted.vat_rate);
         if (detectedVat !== null) {
           item.vat = detectedVat;
-        } else if (!item.vat) {
-          item.vat = "21";
         }
       }
       if (
@@ -5669,6 +5680,12 @@ function validateIncomePending() {
     if (baseValue === null && totalValue === null) {
       errors.push(`Base imponible o total obligatorio: ${item.file.name}`);
     }
+    if (
+      !(item.vatBreakdown && item.vatBreakdown.length) &&
+      normalizeVatRateValue(item.vat) === null
+    ) {
+      errors.push(`IVA pendiente de confirmar: ${item.file.name}`);
+    }
     const isRectificativa =
       item.isRectificativa ||
       (baseValue !== null && baseValue < 0) ||
@@ -5723,7 +5740,7 @@ function uploadIncomePending() {
         base: breakdownTotals ? breakdownTotals.base : normalized.base || item.base,
         vat: breakdownPayload.length
           ? getPrimaryVatRateFromBreakdown(breakdownPayload)
-          : resolveVatRateValue(item.vat),
+          : normalizeVatRateValue(item.vat),
         vatAmount: breakdownTotals ? breakdownTotals.vatAmount : normalized.vatAmount || item.vatAmount,
         total: breakdownTotals ? breakdownTotals.total : normalized.total || item.total,
         vatBreakdown: breakdownPayload,
@@ -5777,6 +5794,12 @@ function validatePending() {
     const withholdingValue = parseNumberInput(item.withholdingAmount);
     if (baseValue === null && totalValue === null) {
       errors.push(`Base imponible o total obligatorio: ${item.file.name}`);
+    }
+    if (
+      !(item.vatBreakdown && item.vatBreakdown.length) &&
+      normalizeVatRateValue(item.vat) === null
+    ) {
+      errors.push(`IVA pendiente de confirmar: ${item.file.name}`);
     }
     if (withholdingValue !== null && withholdingValue < 0) {
       errors.push(`Retención inválida: ${item.file.name}`);
@@ -5933,7 +5956,7 @@ function getExpenseOperationPayload(item) {
   );
   const vatRateValue = breakdownPayload.length
     ? getPrimaryVatRateFromBreakdown(breakdownPayload)
-    : resolveVatRateValue(item.vat);
+    : normalizeVatRateValue(item.vat);
   const kind = item.expenseUploadKind || getExpenseUploadKind();
   const expenseType = getNoInvoiceTypeForUploadKind(kind);
   const vatDeductible =
@@ -6114,8 +6137,6 @@ function analyzeInvoiceForItem(item) {
         const detectedVat = normalizeVatRateValue(extracted.vat_rate);
         if (detectedVat !== null) {
           item.vat = detectedVat;
-        } else if (!item.vat) {
-          item.vat = "21";
         }
       }
       if (
@@ -6245,7 +6266,7 @@ function uploadPending() {
         base: breakdownTotals ? breakdownTotals.base : normalized.base || item.base,
         vat: breakdownPayload.length
           ? getPrimaryVatRateFromBreakdown(breakdownPayload)
-          : resolveVatRateValue(item.vat),
+          : normalizeVatRateValue(item.vat),
         vatAmount: breakdownTotals ? breakdownTotals.vatAmount : normalized.vatAmount || item.vatAmount,
         total: breakdownTotals ? breakdownTotals.total : normalized.total || item.total,
         withholding_amount: parseNumberInput(item.withholdingAmount) || 0,
