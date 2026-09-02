@@ -1898,6 +1898,10 @@ def looks_like_person(name: Optional[str]) -> bool:
     if not cleaned:
         return False
     tokens = [token for token in cleaned.split() if token.isalpha()]
+    # Spanish invoices often prefix an autonomous professional's name with
+    # abbreviations such as "Mª". They are honorifics, not name components.
+    honorific_tokens = {"m", "mª", "ma", "d", "dona", "don", "sr", "sra", "srta"}
+    tokens = [token for token in tokens if token.lower() not in honorific_tokens]
     if not tokens:
         return False
     if has_legal_form(name):
@@ -1963,7 +1967,7 @@ def _trim_company_name(value: Optional[str]) -> str:
     if not value:
         return ""
     value = _strip_inline_tax_id(value)
-    value = re.sub(r"\s{2,}", " ", value).strip(" -–—|,;:")
+    value = re.sub(r"\s{2,}", " ", value).strip(" -–—|,;:·")
     legal_form_pattern = (
         r"(?:"
         r"S\.?\s*L\.?\s*U\.?|"
@@ -1982,7 +1986,7 @@ def _trim_company_name(value: Optional[str]) -> str:
         match = re.search(rf"(.+?\b{legal_form_pattern}\b)", segment, flags=re.IGNORECASE)
         if not match:
             continue
-        candidate = re.sub(r"\s{2,}", " ", match.group(1)).strip(" -–—|,;:")
+        candidate = re.sub(r"\s{2,}", " ", match.group(1)).strip(" -–—|,;:·")
         if candidate:
             segment_candidates.append(candidate)
     if segment_candidates:
@@ -1990,7 +1994,7 @@ def _trim_company_name(value: Optional[str]) -> str:
             candidate for candidate in segment_candidates if not _looks_like_legal_or_footer_text(candidate)
         ]
         value = min(preferred or segment_candidates, key=len)
-    value = re.sub(r"\s{2,}", " ", value).strip(" -–—|,;:")
+    value = re.sub(r"\s{2,}", " ", value).strip(" -–—|,;:·")
     return value
 
 
@@ -2044,6 +2048,11 @@ def contains_forbidden_keyword(name: Optional[str]) -> bool:
         "logistica",
         "shipping",
         "impreso por",
+        "datos del emisor",
+        "datos de emisor",
+        "datos del proveedor",
+        "datos del cliente",
+        "datos de cliente",
     ]
     return any(keyword in lowered for keyword in forbidden)
 
@@ -4103,7 +4112,7 @@ def analyze_invoice(
     confidence_score = _confidence_score_for_source(amount_source)
     logger.info("Fuente importes (%s): %s", filename, amount_source)
     logger.info(
-        "Valores detectados (%s): proveedor=%s cliente=%s fecha=%s pago=%s base=%s iva_rate=%s iva_importe=%s total=%s",
+        "Valores detectados (%s): proveedor=%s cliente=%s fecha=%s pago=%s base=%s iva_rate=%s iva_importe=%s retencion=%s total=%s",
         filename,
         provider_name,
         client_name,
@@ -4112,6 +4121,7 @@ def analyze_invoice(
         base_amount,
         vat_rate,
         vat_amount,
+        withholding_amount,
         total_amount,
     )
 

@@ -573,6 +573,15 @@ TOTAL FACTURA:
 704,94 €
 """
 
+AUTONOMO_HONORIFIC_FIXTURE = """FACTURA Nº NOMINA JULIO CHELO rectificada
+DATOS DEL EMISOR
+Mª Consuelo Sebastián Pastor · DNI: 25414619X
+C/ Guillem de Castro 8-20 · 46001 Valencia, España
+IBAN: ES89 1583 0001 1990 0397 6575
+DATOS DEL CLIENTE
+KALOS HEALTH AND BEAUTY SL · ID: B05410667
+"""
+
 MIXED_SUPPLIER_PRIORITY_FIXTURE = """JUAN PÉREZ GARCÍA
 N.I.F. 12345678Z
 KALOS HEALTH AND BEAUTY SL
@@ -1139,6 +1148,21 @@ class TestAiInvoiceService(unittest.TestCase):
                 ["KALOS HEALTH AND BEAUTY SL"],
                 AUTONOMO_PHARMACY_FIXTURE,
                 require_tax_id=True,
+            )
+        )
+
+    def test_extract_supplier_accepts_honorific_autonomo_and_rejects_section_header(self):
+        supplier = svc._extract_supplier_from_text(
+            AUTONOMO_HONORIFIC_FIXTURE,
+            ["KALOS HEALTH AND BEAUTY SL"],
+        )
+        self.assertEqual(supplier, "Mª Consuelo Sebastián Pastor")
+        self.assertFalse(
+            svc._is_valid_supplier(
+                "DATOS DEL EMISOR",
+                ["KALOS HEALTH AND BEAUTY SL"],
+                AUTONOMO_HONORIFIC_FIXTURE,
+                require_tax_id=False,
             )
         )
 
