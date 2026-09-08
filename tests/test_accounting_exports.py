@@ -1,4 +1,6 @@
 import unittest
+from datetime import date
+from io import BytesIO
 
 try:
     from app import (
@@ -6,6 +8,7 @@ try:
         build_purchase_export_rows,
         build_sales_export_rows,
         normalize_purchase_invoice_amounts,
+        parse_loan_installments_from_excel,
         parse_iso_date,
         suggest_expense_account,
     )
@@ -166,6 +169,46 @@ class TestAccountingExportHelpers(unittest.TestCase):
             -1202.83,
         )
         self.assertEqual((base_amount, vat_amount, payable_total), (8018.87, 1683.96, 8500.0))
+
+    def test_parse_loan_excel_finds_bbva_schedule_after_metadata_rows(self):
+        from openpyxl import Workbook
+
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["PRÓXIMAS CUOTAS"])
+        sheet.append(["Razón social", "Clínica Demo"])
+        sheet.append(["Contrato", "123456"])
+        for _ in range(15):
+            sheet.append([])
+        sheet.append(
+            [
+                "FECHA DE VENCIMIENTO",
+                "IMPORTE DE CUOTA",
+                "IMPORTE PRINCIPAL",
+                "IMPORTE DE INTERESES",
+                "ESTADO",
+                "CAPITAL PENDIENTE",
+                "CAPITAL AMORTIZADO",
+            ]
+        )
+        sheet.append([date(2026, 9, 6), 117.20, 108.89, 8.31, "Pendiente", 2500.00, 500.00])
+        sheet.append([date(2026, 10, 6), 117.20, 109.62, 7.58, "Pendiente", 2390.38, 609.62])
+        buffer = BytesIO()
+        workbook.save(buffer)
+
+        installments = parse_loan_installments_from_excel(buffer.getvalue())
+
+        self.assertEqual(len(installments), 2)
+        self.assertEqual(
+            installments[0],
+            {
+                "payment_date": "2026-09-06",
+                "bank_name": None,
+                "total_amount": 117.20,
+                "interest_amount": 8.31,
+                "principal_amount": 108.89,
+            },
+        )
 
 
 if __name__ == "__main__":

@@ -3401,72 +3401,130 @@ def parse_loan_installments_from_text(text):
 
 
 def parse_loan_installments_from_excel(file_bytes):
+    """Read a loan schedule without assuming that the first row is the table header.
+
+    Bank exports usually include a title and contract metadata before the actual
+    schedule.  In particular, BBVA labels the amount columns as ``IMPORTE DE``
+    CUOTA/PRINCIPAL/INTERESES and adds balance columns that must not be confused
+    with the principal paid in each instalment.
+    """
     installments = []
+    seen_installments = set()
     workbook = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
-    sheet = workbook.active
-    rows = list(sheet.iter_rows(values_only=True))
-    if not rows:
-        return installments
-    headers = [str(value).strip().lower() if value else "" for value in rows[0]]
-    date_idx = None
-    total_idx = None
-    interest_idx = None
-    principal_idx = None
-    bank_idx = None
-    for idx, header in enumerate(headers):
-        if "fecha" in header:
-            date_idx = idx
-        if "interes" in header or "interés" in header:
-            interest_idx = idx
-        if "cuota" in header or "total" in header or "importe" in header:
-            total_idx = idx
-        if "principal" in header or "amort" in header:
-            principal_idx = idx
-        if "banco" in header or "entidad" in header or "bank" in header:
-            bank_idx = idx
 
-    data_rows = rows[1:] if any(headers) else rows
-    for row in data_rows:
-        if date_idx is None or date_idx >= len(row):
-            continue
-        payment_date = parse_loan_date(row[date_idx])
-        if not payment_date:
-            continue
-        total_amount = None
-        interest_amount = None
-        principal_amount = None
-        if total_idx is not None and total_idx < len(row):
-            total_amount = parse_amount(row[total_idx])
-        if interest_idx is not None and interest_idx < len(row):
-            interest_amount = parse_amount(row[interest_idx])
-        if principal_idx is not None and principal_idx < len(row):
-            principal_amount = parse_amount(row[principal_idx])
+    def normalized_header(value):
+        return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
-        if total_amount is None and principal_amount is not None and interest_amount is not None:
-            total_amount = principal_amount + interest_amount
-        if interest_amount is None and total_amount is not None and principal_amount is not None:
-            interest_amount = total_amount - principal_amount
-        if principal_amount is None and total_amount is not None and interest_amount is not None:
-            principal_amount = total_amount - interest_amount
+    def find_columns(headers):
+        columns = {
+            "date": None,
+            "total": None,
+            "interest": None,
+            "principal": None,
+            "bank": None,
+        }
+        fallback_date = None
+        fallback_total = None
+        fallback_principal = None
 
-        if total_amount is None or interest_amount is None or principal_amount is None:
-            continue
-        if interest_amount < 0 or total_amount < 0:
-            continue
-        bank_name = None
-        if bank_idx is not None and bank_idx < len(row):
-            raw_bank = row[bank_idx]
-            if raw_bank:
-                bank_name = str(raw_bank).strip()
-        installments.append(
-            {
-                "payment_date": payment_date,
-                "bank_name": bank_name,
-                "total_amount": round(total_amount, 2),
-                "interest_amount": round(interest_amount, 2),
-                "principal_amount": round(principal_amount, 2),
-            }
+        for idx, raw_header in enumerate(headers):
+            header = normalized_header(raw_header)
+            if not header:
+                continue
+
+            if "fecha" in header:
+                if "venc" in header or "pago" in header or "cuota" in header:
+                    columns["date"] = idx
+                elif fallback_date is None:
+                    fallback_date = idx
+            if "interes" in header or "interés" in header:
+                columns["interest"] = idx
+            if "principal" in header and columns["principal"] is None:
+                columns["principal"] = idx
+            elif ("amort" in header and "capital" not in header) and fallback_principal is None:
+                fallback_principal = idx
+            if "cuota" in header and "capital" not in header:
+                columns["total"] = idx
+            elif (
+                ("total" in header or "importe" in header)
+                and not any(token in header for token in ("capital", "interes", "interés", "principal"))
+                and fallback_total is None
+            ):
+                fallback_total = idx
+            if any(token in header for token in ("banco", "entidad", "bank")):
+                columns["bank"] = idx
+
+        columns["date"] = columns["date"] if columns["date"] is not None else fallback_date
+        columns["total"] = columns["total"] if columns["total"] is not None else fallback_total
+        columns["principal"] = (
+            columns["principal"] if columns["principal"] is not None else fallback_principal
         )
+        if columns["date"] is None:
+            return None
+        # A schedule must expose at least two of the three monetary components.
+        if sum(columns[key] is not None for key in ("total", "interest", "principal")) < 2:
+            return None
+        return columns
+
+    for sheet in workbook.worksheets:
+        rows = list(sheet.iter_rows(values_only=True))
+        for header_row_index, header_row in enumerate(rows):
+            columns = find_columns(header_row)
+            if not columns:
+                continue
+
+            for row in rows[header_row_index + 1 :]:
+                date_idx = columns["date"]
+                if date_idx >= len(row):
+                    continue
+                payment_date = parse_loan_date(row[date_idx])
+                if not payment_date:
+                    continue
+
+                def amount_from(column_name):
+                    column_index = columns[column_name]
+                    if column_index is None or column_index >= len(row):
+                        return None
+                    return parse_amount(row[column_index])
+
+                total_amount = amount_from("total")
+                interest_amount = amount_from("interest")
+                principal_amount = amount_from("principal")
+                if total_amount is None and principal_amount is not None and interest_amount is not None:
+                    total_amount = principal_amount + interest_amount
+                if interest_amount is None and total_amount is not None and principal_amount is not None:
+                    interest_amount = total_amount - principal_amount
+                if principal_amount is None and total_amount is not None and interest_amount is not None:
+                    principal_amount = total_amount - interest_amount
+
+                if total_amount is None or interest_amount is None or principal_amount is None:
+                    continue
+                if total_amount < 0 or interest_amount < 0 or principal_amount < 0:
+                    continue
+
+                bank_name = None
+                bank_idx = columns["bank"]
+                if bank_idx is not None and bank_idx < len(row) and row[bank_idx]:
+                    bank_name = str(row[bank_idx]).strip()
+                installment = {
+                    "payment_date": payment_date,
+                    "bank_name": bank_name,
+                    "total_amount": round(total_amount, 2),
+                    "interest_amount": round(interest_amount, 2),
+                    "principal_amount": round(principal_amount, 2),
+                }
+                installment_key = (
+                    installment["payment_date"],
+                    installment["total_amount"],
+                    installment["interest_amount"],
+                    installment["principal_amount"],
+                    installment["bank_name"],
+                )
+                if installment_key not in seen_installments:
+                    installments.append(installment)
+                    seen_installments.add(installment_key)
+            # Only process the first matching schedule in each sheet.
+            break
     return installments
 
 
