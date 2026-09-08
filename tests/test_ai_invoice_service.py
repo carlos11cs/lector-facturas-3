@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from services import ai_invoice_service as svc
 
@@ -1250,6 +1251,25 @@ class TestAiInvoiceService(unittest.TestCase):
         self.assertAlmostEqual(normalized["vat_amount"], 0.0, places=2)
         self.assertAlmostEqual(normalized["total_amount"], 1262.80, places=2)
         self.assertEqual(normalized["vat_breakdown"], [])
+
+    def test_ocr_is_disabled_by_default_in_production(self):
+        with patch.dict("os.environ", {"ENV": "production"}, clear=True):
+            self.assertFalse(svc._ocr_is_enabled())
+
+    def test_ocr_can_be_explicitly_enabled_in_production(self):
+        with patch.dict(
+            "os.environ",
+            {"ENV": "production", "OCR_ENABLED": "true"},
+            clear=True,
+        ):
+            self.assertTrue(svc._ocr_is_enabled())
+
+    def test_production_ocr_limits_are_conservative(self):
+        with patch.dict("os.environ", {"ENV": "production"}, clear=True):
+            max_pages, max_zoom, max_dim = svc._production_ocr_limits()
+        self.assertEqual(max_pages, 1)
+        self.assertEqual(max_zoom, 1.2)
+        self.assertEqual(max_dim, 1200)
 
 
 if __name__ == "__main__":

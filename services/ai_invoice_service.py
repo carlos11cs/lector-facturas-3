@@ -43,6 +43,26 @@ _EU_AMOUNT_RE = re.compile(r"\d{1,3}(?:[.\s]\d{3})*,\d{2}|\d+,\d{2}")
 _EU_THOUSANDS_RE = re.compile(r"^\d{1,3}\.\d{3},\d{2}$")
 
 
+def _ocr_is_enabled() -> bool:
+    """Avoid loading the heavyweight OCR model on constrained production plans."""
+    configured = os.getenv("OCR_ENABLED", "").strip().lower()
+    if configured in {"1", "true", "yes"}:
+        return True
+    if configured in {"0", "false", "no"}:
+        return False
+    return os.getenv("ENV", "").strip().lower() != "production"
+
+
+def _production_ocr_limits():
+    if os.getenv("ENV", "").strip().lower() != "production":
+        return OCR_MAX_PAGES, PDF_OCR_ZOOM, OCR_MAX_DIM
+    return (
+        min(OCR_MAX_PAGES, int(os.getenv("OCR_PRODUCTION_MAX_PAGES", "1"))),
+        min(PDF_OCR_ZOOM, float(os.getenv("OCR_PRODUCTION_MAX_ZOOM", "1.2"))),
+        min(OCR_MAX_DIM, int(os.getenv("OCR_PRODUCTION_MAX_DIM", "1200"))),
+    )
+
+
 def _get_client() -> OpenAI:
     global _client
     if _client is not None:
@@ -3295,6 +3315,9 @@ def _extract_pdf_text_from_bytes(data: bytes) -> str:
 
 def _get_ocr_reader():
     global _ocr_reader
+    if not _ocr_is_enabled():
+        logger.info("OCR desactivado por configuracion de memoria.")
+        return None
     if _ocr_reader is not None:
         return _ocr_reader
     try:
@@ -3352,20 +3375,15 @@ def _extract_pdf_text_ocr(file_path: str) -> str:
         return ""
 
     parts = []
-    runtime_env = os.getenv("ENV", "").strip().lower()
-    max_pages = OCR_MAX_PAGES
-    if runtime_env == "production" and OCR_MAX_PAGES > 2 and "OCR_MAX_PAGES" not in os.environ:
-        max_pages = 2
+    max_pages, max_zoom, max_dim_limit = _production_ocr_limits()
     with fitz.open(file_path) as doc:
         for idx, page in enumerate(doc):
             if idx >= max_pages:
                 break
-            base_scale = PDF_OCR_ZOOM
-            if runtime_env == "production" and base_scale > 1.4 and "PDF_OCR_ZOOM" not in os.environ:
-                base_scale = 1.4
+            base_scale = max_zoom
             max_dim = max(page.rect.width, page.rect.height, 1)
-            if max_dim * base_scale > OCR_MAX_DIM:
-                base_scale = OCR_MAX_DIM / max_dim
+            if max_dim * base_scale > max_dim_limit:
+                base_scale = max_dim_limit / max_dim
             matrix = fitz.Matrix(base_scale, base_scale)
             pix = page.get_pixmap(matrix=matrix, alpha=False)
             image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
@@ -3396,22 +3414,17 @@ def _extract_pdf_text_ocr_from_bytes(data: bytes) -> str:
 
     parts = []
     start_time = time.time()
-    runtime_env = os.getenv("ENV", "").strip().lower()
-    max_pages = OCR_MAX_PAGES
-    if runtime_env == "production" and OCR_MAX_PAGES > 2 and "OCR_MAX_PAGES" not in os.environ:
-        max_pages = 2
+    max_pages, max_zoom, max_dim_limit = _production_ocr_limits()
     with fitz.open(stream=data, filetype="pdf") as doc:
         for idx, page in enumerate(doc):
             if idx >= max_pages:
                 break
             if time.time() - start_time > OCR_MAX_SECONDS:
                 break
-            base_scale = PDF_OCR_ZOOM
-            if runtime_env == "production" and base_scale > 1.4 and "PDF_OCR_ZOOM" not in os.environ:
-                base_scale = 1.4
+            base_scale = max_zoom
             max_dim = max(page.rect.width, page.rect.height, 1)
-            if max_dim * base_scale > OCR_MAX_DIM:
-                base_scale = OCR_MAX_DIM / max_dim
+            if max_dim * base_scale > max_dim_limit:
+                base_scale = max_dim_limit / max_dim
             matrix = fitz.Matrix(base_scale, base_scale)
             pix = page.get_pixmap(matrix=matrix, alpha=False)
             image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
@@ -3458,10 +3471,11 @@ def _extract_image_text_ocr_from_bytes(data: bytes) -> str:
     image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
     if image is None:
         return ""
+    _, _, max_dim_limit = _production_ocr_limits()
     height, width = image.shape[:2]
     max_dim = max(width, height, 1)
-    if max_dim > OCR_MAX_DIM:
-        scale = OCR_MAX_DIM / max_dim
+    if max_dim > max_dim_limit:
+        scale = max_dim_limit / max_dim
         image = cv2.resize(
             image, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA
         )

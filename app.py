@@ -68,6 +68,13 @@ DOCUMENT_CENTER_ALLOWED_EXTENSIONS = {
     ".xls",
 }
 ANALYSIS_TIMEOUT_SECONDS = int(os.getenv("ANALYSIS_TIMEOUT_SECONDS", "120"))
+MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "12"))
+MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+DOCUMENT_CENTER_ENABLED = os.getenv("DOCUMENT_CENTER_ENABLED", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
 DEFAULT_USER_ID = int(os.getenv("DEFAULT_USER_ID", "1"))
 OWNER_EMAIL = (os.getenv("OWNER_EMAIL") or "").strip().lower()
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
@@ -463,7 +470,9 @@ app.config["SECRET_KEY"] = os.getenv("SECRET_KEY") or secrets.token_urlsafe(32)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = os.getenv("ENV", "").lower() == "production"
-app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
+# Uploads are processed in memory before being sent to the analysis worker.
+# Keep the HTTP cap deliberately below the memory available on small instances.
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_SIZE_BYTES
 if stripe and STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
@@ -1568,6 +1577,17 @@ def allowed_file(filename):
     return ext in ALLOWED_EXTENSIONS
 
 
+def read_uploaded_file_limited(uploaded_file):
+    """Read one upload while enforcing the per-file limit before OCR starts."""
+    declared_size = uploaded_file.content_length
+    if declared_size and declared_size > MAX_UPLOAD_SIZE_BYTES:
+        raise ValueError("El archivo supera el tamaño máximo permitido.")
+    file_bytes = uploaded_file.read(MAX_UPLOAD_SIZE_BYTES + 1)
+    if len(file_bytes) > MAX_UPLOAD_SIZE_BYTES:
+        raise ValueError("El archivo supera el tamaño máximo permitido.")
+    return file_bytes
+
+
 def _row_to_user(row):
     if not row:
         return None
@@ -1639,6 +1659,15 @@ def load_user_and_enforce_auth():
     path = request.path or ""
     if path.startswith("/static/"):
         return None
+    if path.startswith("/api/document-center") and not DOCUMENT_CENTER_ENABLED:
+        return jsonify(
+            {
+                "ok": False,
+                "errors": [
+                    "El centro documental por lotes está desactivado para proteger el servicio."
+                ],
+            }
+        ), 410
     if path == "/api/stripe/webhook":
         return None
     if path.startswith("/invite/"):
@@ -7656,7 +7685,10 @@ def analyze_invoice_api():
                 company_names = [row.get("display_name"), row.get("legal_name")]
             known_suppliers = fetch_known_suppliers(conn, get_data_owner_id(), company_id)
     app.logger.info("Solicitud de análisis recibida: %s (%s)", original_name, file.mimetype)
-    file_bytes = file.read()
+    try:
+        file_bytes = read_uploaded_file_limited(file)
+    except ValueError as exc:
+        return jsonify({"ok": False, "errors": [str(exc)]}), 413
     fallback_status = None
     mime_lower = (file.mimetype or "").lower()
     if mime_lower.startswith("image/"):
@@ -10116,7 +10148,10 @@ def import_loan_installments():
         return jsonify({"ok": False, "errors": ["Nombre de archivo inválido."]}), 400
 
     concept = (request.form.get("concept") or "Préstamo bancario").strip()
-    file_bytes = uploaded_file.read()
+    try:
+        file_bytes = read_uploaded_file_limited(uploaded_file)
+    except ValueError as exc:
+        return jsonify({"ok": False, "errors": [str(exc)]}), 413
     extension = os.path.splitext(filename)[1].lower()
     installments = []
 
