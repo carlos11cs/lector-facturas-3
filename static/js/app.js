@@ -4004,7 +4004,7 @@ function setExpenseMode(mode) {
   if (expenseSectionDescription) {
     expenseSectionDescription.textContent =
       mode === "rent"
-        ? "Registra alquileres del local o de cabinas con retención, IVA y fechas de pago."
+        ? "Registra alquileres del local o de cabinas con retención, IVA y fechas de vencimiento."
         : mode === "payroll"
           ? "Centraliza nóminas, Seguridad Social y otros costes laborales con fecha contable y vencimiento."
           : mode === "financing"
@@ -4333,7 +4333,7 @@ function appendPendingPaymentDatesRow(item) {
   paymentWrap.className = "payment-dates-wrap";
   const paymentLabel = document.createElement("span");
   paymentLabel.className = "field-label";
-  paymentLabel.textContent = "Fechas de pago";
+  paymentLabel.textContent = "Fechas de vencimiento";
   paymentWrap.appendChild(paymentLabel);
 
   const paymentInputs = document.createElement("div");
@@ -5054,7 +5054,7 @@ function renderTable() {
     paymentWrap.className = "payment-dates-wrap";
     const paymentLabel = document.createElement("span");
     paymentLabel.className = "field-label";
-    paymentLabel.textContent = "Fechas de pago";
+    paymentLabel.textContent = "Fechas de vencimiento";
     paymentWrap.appendChild(paymentLabel);
 
     const paymentInputs = document.createElement("div");

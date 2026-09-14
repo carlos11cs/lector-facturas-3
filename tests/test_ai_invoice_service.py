@@ -1374,6 +1374,10 @@ N° intracommunautaire : ESB05410667"""
             "field_evidence": {},
         }
         self.assertEqual(svc._validate_structured_invoice(extraction, "expense"), [])
+        self.assertEqual(
+            [(item["due_date"], item["amount"]) for item in extraction["installments"]],
+            [("2026-10-10", 659.39), ("2026-11-09", 659.39)],
+        )
         self.assertTrue(all(item["actual_payment_date"] is None for item in extraction["installments"]))
 
     def test_responses_request_uses_direct_pdf_and_json_schema(self):

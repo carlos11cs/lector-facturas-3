@@ -1979,6 +1979,7 @@ def compute_payment_date(invoice_date_value, payment_date_value=None):
 
 
 def parse_payment_dates(raw_value):
+    # Legacy payment_date(s) fields store planned due dates; completed dates store payments made.
     if not raw_value:
         return []
     if isinstance(raw_value, list):
@@ -5597,7 +5598,7 @@ PUBLIC_SEO_PAGES = [
         "workflow_copy": "La herramienta no pretende sustituir de golpe todo el ecosistema de la gestoría. Su objetivo es ordenar, validar y acelerar el trabajo previo a la contabilidad y al cierre.",
         "workflow_points": [
             "Carga facturas y gastos con lectura automática.",
-            "Revisa importes, tipos de IVA, retenciones y fechas de pago.",
+            "Revisa importes, tipos de IVA, retenciones y fechas de vencimiento.",
             "Consolida calendario de vencimientos y tesorería prevista.",
             "Prepara reporting trimestral con una visión clara por empresa.",
         ],
@@ -5634,7 +5635,7 @@ PUBLIC_SEO_PAGES = [
             },
             {
                 "title": "Conexión con calendario",
-                "copy": "La información leída puede trasladarse a fechas de pago y seguimiento de vencimientos, no se queda en un simple OCR aislado.",
+                "copy": "La información leída puede trasladarse a vencimientos y seguimiento de pagos, no se queda en un simple OCR aislado.",
             },
         ],
         "workflow_title": "Cómo debería funcionar un buen lector de facturas en un despacho",
@@ -8795,7 +8796,7 @@ def update_invoice(invoice_id):
             payload.get("payment_reference_date") or payload.get("paymentReferenceDate")
         )
         if not payment_date_input and not mark_paid and not mark_unpaid:
-            return jsonify({"ok": False, "errors": ["Fecha de pago obligatoria."]}), 400
+            return jsonify({"ok": False, "errors": ["Fecha de vencimiento obligatoria."]}), 400
         with engine.begin() as conn:
             current_row = conn.execute(
                 select(
@@ -9207,7 +9208,7 @@ def update_income_invoice(invoice_id):
             payload.get("payment_reference_date") or payload.get("paymentReferenceDate")
         )
         if not payment_date_input and not mark_paid and not mark_unpaid:
-            return jsonify({"ok": False, "errors": ["Fecha de pago obligatoria."]}), 400
+            return jsonify({"ok": False, "errors": ["Fecha de vencimiento obligatoria."]}), 400
         with engine.begin() as conn:
             current_row = conn.execute(
                 select(
@@ -9997,7 +9998,7 @@ def create_loan_installment():
 
     errors = []
     if not payment_date:
-        errors.append("Fecha de pago obligatoria.")
+        errors.append("Fecha de vencimiento obligatoria.")
     if not concept:
         errors.append("Concepto obligatorio.")
     try:
@@ -10064,7 +10065,7 @@ def update_loan_installment(installment_id):
             payload.get("payment_reference_date") or payload.get("paymentReferenceDate")
         )
         if not payment_date and not mark_paid and not mark_unpaid:
-            return jsonify({"ok": False, "errors": ["Fecha de pago obligatoria."]}), 400
+            return jsonify({"ok": False, "errors": ["Fecha de vencimiento obligatoria."]}), 400
         with engine.begin() as conn:
             current_row = conn.execute(
                 select(
@@ -10108,7 +10109,7 @@ def update_loan_installment(installment_id):
 
     errors = []
     if not payment_date:
-        errors.append("Fecha de pago obligatoria.")
+        errors.append("Fecha de vencimiento obligatoria.")
     if not concept:
         errors.append("Concepto obligatorio.")
     try:
@@ -10279,7 +10280,7 @@ def create_loan_installments_batch():
         payment_date = (item.get("payment_date") or "").strip()
         bank_name = (item.get("bank_name") or "").strip()
         if not payment_date:
-            errors.append("Fecha de pago inválida.")
+            errors.append("Fecha de vencimiento inválida.")
             continue
         try:
             total_amount = float(item.get("total_amount") or 0)
