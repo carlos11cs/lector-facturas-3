@@ -1311,6 +1311,32 @@ N° intracommunautaire : ESB05410667"""
             svc._extract_supplier_from_text(normalized, ["KALOS HEALTH AND BEAUTY S.L."])
         )
 
+    def test_invoice_review_requires_consistent_amounts_and_supplier(self):
+        reasons = svc._review_reasons_for_invoice(
+            document_type="expense",
+            supplier=None,
+            base_amount=1089.90,
+            vat_amount=228.88,
+            total_amount=1318.78,
+            withholding_amount=0,
+            breakdown_warning=False,
+        )
+        self.assertEqual(len(reasons), 1)
+        self.assertIn("proveedor", reasons[0].lower())
+
+    def test_invoice_review_detects_inconsistent_tax_amounts(self):
+        reasons = svc._review_reasons_for_invoice(
+            document_type="expense",
+            supplier="Proveedor Demo, S.L.",
+            base_amount=100.0,
+            vat_amount=21.0,
+            total_amount=110.0,
+            withholding_amount=0,
+            breakdown_warning=False,
+        )
+        self.assertEqual(len(reasons), 1)
+        self.assertIn("no cuadran", reasons[0])
+
 
 if __name__ == "__main__":
     unittest.main()

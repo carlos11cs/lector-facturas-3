@@ -102,6 +102,8 @@ const TIMEOUT_MESSAGE =
   "El análisis tardó demasiado y se detuvo. Puedes introducir los datos manualmente.";
 const VAT_WARNING_MESSAGE =
   "Puede que la calidad de la imagen o la información sea dudosa. Por favor, revisa siempre las cantidades y los tipos de IVA.";
+const REVIEW_REQUIRED_MESSAGE =
+  "Revisión requerida antes de guardar: la lectura automática no tiene evidencia suficiente para todos los campos.";
 const ANALYSIS_MAX_CONCURRENCY = 1;
 const ANALYSIS_PENDING_TIMEOUT_MS = 70 * 1000;
 
@@ -4263,6 +4265,7 @@ function addFiles(fileList) {
       analysisQueued: true,
       analysisError: false,
       analysisErrorMessage: "",
+      analysisWarning: "",
       analysisStatus: "ok",
       touched: {
         date: false,
@@ -4304,6 +4307,7 @@ function addIncomeFiles(fileList) {
       analysisQueued: true,
       analysisError: false,
       analysisErrorMessage: "",
+      analysisWarning: "",
       analysisStatus: "ok",
       touched: {
         date: false,
@@ -4408,7 +4412,7 @@ function appendPendingPaymentDatesRow(item) {
 }
 
 function appendPendingStatusRow(item) {
-  if (!item.analysisPending && !item.analysisError) {
+  if (!item.analysisPending && !item.analysisError && !item.analysisWarning) {
     return;
   }
   const statusRow = document.createElement("tr");
@@ -4428,9 +4432,11 @@ function appendPendingStatusRow(item) {
   const message = document.createElement("span");
   message.textContent = item.analysisError
     ? item.analysisErrorMessage || ANALYSIS_ERROR_MESSAGE
-    : item.analysisQueued
-      ? "Documento en cola… Se analiza de una en una para evitar bloqueos."
-      : "Analizando documento… Puede tardar hasta 1 minuto.";
+    : item.analysisWarning
+      ? item.analysisWarning
+      : item.analysisQueued
+        ? "Documento en cola… Se analiza de una en una para evitar bloqueos."
+        : "Analizando documento… Puede tardar hasta 1 minuto.";
   statusWrapper.appendChild(message);
   statusTd.appendChild(statusWrapper);
   statusRow.appendChild(statusTd);
@@ -5154,7 +5160,7 @@ function renderTable() {
       );
     }
 
-    if (item.analysisPending || item.analysisError) {
+    if (item.analysisPending || item.analysisError || item.analysisWarning) {
       const statusRow = document.createElement("tr");
       statusRow.className = "processing-row";
       if (item.analysisError) {
@@ -5172,9 +5178,11 @@ function renderTable() {
       const message = document.createElement("span");
       message.textContent = item.analysisError
         ? item.analysisErrorMessage || ANALYSIS_ERROR_MESSAGE
-        : item.analysisQueued
-          ? "Factura en cola… Se analiza de una en una para evitar bloqueos con escaneadas."
-          : "Analizando factura… Las facturas escaneadas pueden tardar hasta 1 minuto.";
+        : item.analysisWarning
+          ? item.analysisWarning
+          : item.analysisQueued
+            ? "Factura en cola… Se analiza de una en una para evitar bloqueos con escaneadas."
+            : "Analizando factura… Las facturas escaneadas pueden tardar hasta 1 minuto.";
       statusWrapper.appendChild(message);
       statusTd.appendChild(statusWrapper);
       statusRow.appendChild(statusTd);
@@ -5624,7 +5632,7 @@ function renderIncomeTable() {
       );
     }
 
-    if (item.analysisPending || item.analysisError) {
+    if (item.analysisPending || item.analysisError || item.analysisWarning) {
       const statusRow = document.createElement("tr");
       statusRow.className = "processing-row";
       if (item.analysisError) {
@@ -5642,9 +5650,11 @@ function renderIncomeTable() {
       const message = document.createElement("span");
       message.textContent = item.analysisError
         ? item.analysisErrorMessage || ANALYSIS_ERROR_MESSAGE
-        : item.analysisQueued
-          ? "Factura en cola… Se analiza de una en una para evitar bloqueos con escaneadas."
-          : "Analizando factura… Las facturas escaneadas pueden tardar hasta 1 minuto.";
+        : item.analysisWarning
+          ? item.analysisWarning
+          : item.analysisQueued
+            ? "Factura en cola… Se analiza de una en una para evitar bloqueos con escaneadas."
+            : "Analizando factura… Las facturas escaneadas pueden tardar hasta 1 minuto.";
       statusWrapper.appendChild(message);
       statusTd.appendChild(statusWrapper);
       statusRow.appendChild(statusTd);
@@ -5701,6 +5711,9 @@ function analyzeIncomeForItem(item) {
           showVatWarningModal();
           vatWarningDismissedIds.add(item.id);
         }
+      }
+      if (extracted.analysis_status === "needs_review") {
+        item.analysisWarning = extracted.review_reasons?.join(" ") || REVIEW_REQUIRED_MESSAGE;
       }
       if (extracted.analysis_status === "low_quality_scan") {
         item.analysisPending = false;
@@ -6194,6 +6207,9 @@ function analyzeInvoiceForItem(item) {
           showVatWarningModal();
           vatWarningDismissedIds.add(item.id);
         }
+      }
+      if (extracted.analysis_status === "needs_review") {
+        item.analysisWarning = extracted.review_reasons?.join(" ") || REVIEW_REQUIRED_MESSAGE;
       }
       if (extracted.analysis_status === "low_quality_scan") {
         item.analysisPending = false;

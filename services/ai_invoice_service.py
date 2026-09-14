@@ -2811,6 +2811,30 @@ def _confidence_score_for_source(source: Optional[str]) -> Optional[float]:
     return mapping.get(source)
 
 
+def _review_reasons_for_invoice(
+    *,
+    document_type: str,
+    supplier: Optional[str],
+    base_amount: Optional[float],
+    vat_amount: Optional[float],
+    total_amount: Optional[float],
+    withholding_amount: Optional[float],
+    breakdown_warning: bool,
+) -> List[str]:
+    reasons = []
+    if document_type != "income" and not supplier:
+        reasons.append("No se ha identificado el proveedor con evidencia suficiente.")
+    if base_amount is None or vat_amount is None or total_amount is None:
+        reasons.append("Faltan importes fiscales necesarios para validar la factura.")
+    elif not _validate_math(
+        base_amount, vat_amount, total_amount, withholding_amount
+    ).get("is_consistent"):
+        reasons.append("Base, IVA, retención y total no cuadran entre sí.")
+    if breakdown_warning:
+        reasons.append("El desglose de IVA requiere comprobación manual.")
+    return reasons
+
+
 def _group_standard_vat_rate(rate: Optional[float], tolerance: float = 0.25) -> Optional[float]:
     if rate is None:
         return None
@@ -4181,8 +4205,21 @@ def analyze_invoice(
 
     validation = _validate_math(base_amount, vat_amount, total_amount, withholding_amount)
     is_rectificativa = bool((base_amount is not None and base_amount < 0) or (total_amount is not None and total_amount < 0))
+    review_reasons = _review_reasons_for_invoice(
+        document_type=document_type,
+        supplier=provider_name,
+        base_amount=base_amount,
+        vat_amount=vat_amount,
+        total_amount=total_amount,
+        withholding_amount=withholding_amount,
+        breakdown_warning=bool(breakdown_warning),
+    )
+    if review_reasons and analysis_status == "ok":
+        analysis_status = "needs_review"
 
     confidence_score = _confidence_score_for_source(amount_source)
+    if confidence_score is not None and review_reasons:
+        confidence_score = min(confidence_score, 0.6)
     logger.info("Fuente importes (%s): %s", filename, amount_source)
     logger.info(
         "Valores detectados (%s): proveedor=%s cliente=%s fecha=%s pago=%s base=%s iva_rate=%s iva_importe=%s retencion=%s total=%s",
@@ -4200,6 +4237,7 @@ def analyze_invoice(
 
     return {
         "analysis_status": analysis_status,
+        "review_reasons": review_reasons,
         "supplier": provider_name,
         "provider_name": provider_name,
         "employee_name": employee_name.strip() if isinstance(employee_name, str) else employee_name,
