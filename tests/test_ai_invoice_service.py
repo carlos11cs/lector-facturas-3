@@ -1271,6 +1271,46 @@ class TestAiInvoiceService(unittest.TestCase):
         self.assertEqual(max_zoom, 1.2)
         self.assertEqual(max_dim, 1200)
 
+    def test_vertical_tax_summary_ignores_zero_euro_footer_amounts(self):
+        text = """Base impuesto
+Tasa
+Importe impuesto
+21,00
+1 089,90
+228,88
+SPA Nacional Normal
+:
+Total
+Factura de impuestos
+0,00
+Importe IVA
+228,88
+Importe IVA en Euros
+0,00EUR
+Generado por ordenador
+1 318,78"""
+
+        summary = svc._extract_tax_summary_from_text(text)
+
+        self.assertTrue(summary["found"])
+        self.assertEqual(summary["base_amount"], 1089.90)
+        self.assertEqual(summary["vat_amount"], 228.88)
+        self.assertEqual(summary["total_amount"], 1318.78)
+        self.assertEqual(summary["vat_rate"], 21.0)
+
+    def test_missing_issuer_text_never_uses_the_customer_as_supplier(self):
+        text = """KALOS HEALTH AND BEAUTY S.L.
+FACTURA&#x20;
+DIRECCION DE ENTREGA
+N° intracommunautaire : ESB05410667"""
+
+        normalized = svc._normalize_ocr_amount_text(text)
+
+        self.assertIn("FACTURA ", normalized)
+        self.assertIsNone(
+            svc._extract_supplier_from_text(normalized, ["KALOS HEALTH AND BEAUTY S.L."])
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

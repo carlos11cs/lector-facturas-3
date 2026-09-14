@@ -1,3 +1,4 @@
+import base64
 import gc
 import json
 import logging
@@ -7,6 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import date, timedelta
 from difflib import SequenceMatcher
+from html import unescape
 from itertools import combinations
 from typing import Any, Dict, Optional, List, Tuple
 
@@ -471,6 +473,7 @@ def parse_eu_amount(value: Any) -> Optional[float]:
 def _normalize_ocr_amount_text(text: str) -> str:
     if not text:
         return text
+    text = unescape(text).replace("\xa0", " ")
     # Fix OCR patterns like "1,042 79" -> "1.042,79"
     return re.sub(r"(\d{1,3})[.,](\d{3})\s(\d{2})", r"\1.\2,\3", text)
 
@@ -1199,7 +1202,15 @@ def _extract_vertical_tax_summary_from_text(text: str) -> Dict[str, Any]:
         return {"found": False}
 
     lines = [line.strip() for line in normalized_text.splitlines() if line.strip()]
-    totals_labels = ("TOTAL BASE IMPONIBLE", "TOTAL IVA", "TOTAL FACTURA", "NETO A PAGAR", "TOTAL A PAGAR")
+    totals_labels = (
+        "TOTAL BASE IMPONIBLE",
+        "TOTAL IVA",
+        "TOTAL FACTURA",
+        "NETO A PAGAR",
+        "TOTAL A PAGAR",
+        "FACTURA DE IMPUESTOS",
+        "IMPORTE IVA",
+    )
 
     header_idx = None
     for idx, line in enumerate(lines):
@@ -1215,7 +1226,7 @@ def _extract_vertical_tax_summary_from_text(text: str) -> Dict[str, Any]:
     while idx < len(lines):
         line = lines[idx].strip()
         upper = line.upper()
-        if any(label in upper for label in totals_labels):
+        if upper == "TOTAL" or any(label in upper for label in totals_labels):
             break
         rate_candidate = _normalize_rate(line)
         if rate_candidate in {0, 4, 10, 21}:
@@ -1280,8 +1291,11 @@ def _extract_vertical_tax_summary_from_text(text: str) -> Dict[str, Any]:
             normalized_text,
             flags=re.IGNORECASE,
         )
-        if currency_matches:
-            total_amount = _normalize_amount(currency_matches[-1])
+        for raw_amount in reversed(currency_matches):
+            candidate = _normalize_amount(raw_amount)
+            if candidate is not None and abs(candidate - total_sum) <= 0.05:
+                total_amount = candidate
+                break
 
     if total_amount is None:
         total_amount = total_sum
@@ -3313,6 +3327,25 @@ def _extract_pdf_text_from_bytes(data: bytes) -> str:
         return "\n".join(parts).strip()
 
 
+def _render_first_pdf_page_for_vision(data: bytes) -> Optional[str]:
+    """Render one compact page only when the issuer is absent from PDF text."""
+    if fitz is None:
+        return None
+    try:
+        with fitz.open(stream=data, filetype="pdf") as doc:
+            if not doc:
+                return None
+            page = doc[0]
+            max_dimension = max(page.rect.width, page.rect.height, 1)
+            scale = min(1.5, 1200 / max_dimension)
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            image_data = pixmap.tobytes("png")
+        return "data:image/png;base64," + base64.b64encode(image_data).decode("ascii")
+    except Exception as exc:
+        logger.warning("No se pudo preparar la primera pagina para vision: %s", exc)
+        return None
+
+
 def _get_ocr_reader():
     global _ocr_reader
     if not _ocr_is_enabled():
@@ -3504,6 +3537,7 @@ def analyze_invoice(
     known_suppliers: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     client = _get_client()
+    company_names = company_names or []
     if file_bytes is None:
         if not file_path:
             raise ValueError("file_path o file_bytes es requerido")
@@ -3638,6 +3672,12 @@ def analyze_invoice(
     is_rent_expense = document_type == "expense_rent"
     is_payroll_expense = document_type == "expense_payroll"
     is_other_expense = document_type == "expense_other"
+    needs_visual_supplier_check = (
+        is_pdf
+        and not is_income
+        and analysis_status == "ok"
+        and _extract_supplier_from_text(extracted_text, company_names) is None
+    )
     if is_income:
         prompt = (
             "Analiza el siguiente texto extraido de una factura emitida (ingreso). "
@@ -3727,6 +3767,27 @@ def analyze_invoice(
             f"TEXTO_FACTURA:\n{extracted_text}"
         )
 
+    messages = [{"role": "user", "content": prompt}]
+    if needs_visual_supplier_check:
+        document_image = _render_first_pdf_page_for_vision(file_bytes)
+        if document_image:
+            prompt += (
+                "\n\nLa imagen adjunta es la primera pagina del PDF. El texto extraible no "
+                "incluye claramente al emisor: usala solo para identificar su razon social, "
+                "logotipo o datos fiscales visibles. Nunca uses como supplier al cliente, "
+                "destinatario o empresa receptora. Si el emisor no es inequívoco, devuelve null."
+            )
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": document_image, "detail": "low"}},
+                    ],
+                }
+            ]
+            logger.info("Se añade comprobacion visual del emisor (%s).", filename)
+
     logger.info("Prompt enviado (%s): %s", filename, prompt)
 
     def _call_llm():
@@ -3737,9 +3798,7 @@ def analyze_invoice(
             top_p=1,
             seed=42,
             timeout=LLM_TIMEOUT_SECONDS,
-            messages=[
-                {"role": "user", "content": prompt},
-            ],
+            messages=messages,
         )
 
     response, llm_timed_out = _run_with_timeout(_call_llm, LLM_TIMEOUT_SECONDS)
