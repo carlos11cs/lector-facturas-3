@@ -10,7 +10,7 @@ services:
       - key: OPENAI_API_KEY
         sync: false
       - key: OPENAI_INVOICE_MODEL
-        value: "gpt-4.1"
+        value: "gpt-5.6-sol"
       - key: DATABASE_URL
         sync: false
       - key: STORAGE_BUCKET

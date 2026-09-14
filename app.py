@@ -2259,21 +2259,55 @@ def detect_document_type(text_value, filename="", company_names=None):
     filename_lower = (filename or "").lower()
     company_names = [item.lower() for item in (company_names or []) if item]
 
+    def has_term(term):
+        return bool(re.search(rf"(?<!\w){re.escape(term)}(?!\w)", text_lower))
+
+    def has_any_term(terms):
+        return any(has_term(term) for term in terms)
+
     if any(token in text_lower for token in ("modelo 303", "modelo 111", "modelo 115", "modelo 200", "modelo 202")):
         return "tax_model"
     if any(token in text_lower for token in ("seguridad social", "rlc", "rnt")):
         return "social_security"
     if any(token in text_lower for token in ("nómina", "nomina", "devengos", "deducciones")):
         return "payroll"
-    if any(token in text_lower for token in ("préstamo", "prestamo", "cuadro de amortización", "cuadro de amortizacion", "tin", "tae")):
+
+    # Classify invoices and financing documents from a combination of their
+    # structural signals. A lone word such as TIN or cuota is insufficient:
+    # it can appear incidentally in company names or commercial text.
+    invoice_evidence = sum(
+        (
+            has_any_term(("factura", "invoice")),
+            has_any_term(("base imponible", "iva", "impuesto")),
+            has_any_term(("nº factura", "no factura", "numero factura", "invoice number")),
+            has_any_term(("cliente", "destinatario", "emisor", "factura emitida")),
+        )
+    )
+    loan_evidence = sum(
+        (
+            has_any_term(("préstamo", "prestamo", "cuadro de amortización", "cuadro de amortizacion")),
+            has_any_term(("tin", "tae", "capital pendiente", "capital amortizado")),
+            has_any_term(("vencimiento", "cuota", "principal", "intereses", "amortización", "amortizacion")),
+        )
+    )
+
+    if invoice_evidence >= 2 and invoice_evidence >= loan_evidence:
+        if any(name and name in text_lower for name in company_names) and has_any_term(
+            ("cliente", "destinatario", "factura emitida")
+        ):
+            return "sales_invoice"
+        if any(token in filename_lower for token in ("venta", "ingreso", "sales", "emitida")):
+            return "sales_invoice"
+        return "purchase_invoice"
+    if loan_evidence >= 2:
         return "loan_document"
     if any(token in text_lower for token in ("extracto", "saldo", "movimientos", "iban")) and len(re.findall(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", text_lower)) >= 2:
         return "bank_statement"
     if "factura simplificada" in text_lower or "ticket" in text_lower:
         return "receipt"
-    if "factura" in text_lower or "nº factura" in text_lower or "base imponible" in text_lower:
-        if any(name and name in text_lower for name in company_names) and any(
-            token in text_lower for token in ("cliente", "destinatario", "factura emitida")
+    if invoice_evidence:
+        if any(name and name in text_lower for name in company_names) and has_any_term(
+            ("cliente", "destinatario", "factura emitida")
         ):
             return "sales_invoice"
         if any(token in filename_lower for token in ("venta", "ingreso", "sales", "emitida")):
@@ -3326,12 +3360,24 @@ def get_no_invoice_deductible_amount(row):
 
 
 def parse_loan_date(value):
+    # Spreadsheet readers yield actual datetime/date values. Preserve that
+    # semantic value instead of reparsing its string representation.
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
     normalized = normalize_date(value)
     if normalized:
         return normalized
     if not value:
         return None
     raw = str(value).strip()
+    iso_match = re.match(r"^(\d{4}-\d{1,2}-\d{1,2})(?:[T\s].*)?$", raw)
+    if iso_match:
+        try:
+            return date.fromisoformat(iso_match.group(1)).isoformat()
+        except ValueError:
+            return None
     match = re.search(r"(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})", raw)
     if not match:
         return None

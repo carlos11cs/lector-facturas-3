@@ -1,5 +1,5 @@
 import unittest
-from datetime import date
+from datetime import date, datetime
 from io import BytesIO
 
 try:
@@ -8,6 +8,7 @@ try:
         build_purchase_export_rows,
         build_sales_export_rows,
         normalize_purchase_invoice_amounts,
+        parse_loan_date,
         parse_loan_installments_from_excel,
         parse_iso_date,
         suggest_expense_account,
@@ -209,6 +210,9 @@ class TestAccountingExportHelpers(unittest.TestCase):
                 "principal_amount": 108.89,
             },
         )
+
+    def test_parse_loan_date_preserves_excel_datetime_value(self):
+        self.assertEqual(parse_loan_date(datetime(2026, 9, 6, 0, 0)), "2026-09-06")
 
 
 if __name__ == "__main__":

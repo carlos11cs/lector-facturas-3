@@ -37,7 +37,7 @@ Opcionales:
 ```bash
 export OPENAI_CHAT_MODEL="gpt-4o-mini"
 # Modelo multimodal para leer la composición visual de facturas y PDFs.
-export OPENAI_INVOICE_MODEL="gpt-4.1"
+export OPENAI_INVOICE_MODEL="gpt-5.6-sol"
 export OPENAI_MAX_OUTPUT_TOKENS="500"
 export ANALYSIS_TIMEOUT_SECONDS="120"
 ```

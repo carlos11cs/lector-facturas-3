@@ -1,4 +1,6 @@
 import unittest
+import json
+import os
 from unittest.mock import patch
 
 from services import ai_invoice_service as svc
@@ -1353,6 +1355,61 @@ N° intracommunautaire : ESB05410667"""
                 "Logotipo del emisor: FILLMED",
             )
         )
+
+    def test_fillmed_structured_regression_and_due_dates_are_not_payments(self):
+        extraction = {
+            "supplier": {"legal_name": "LABORATOIRES FILLMED ESPAÑA, S.L.U."},
+            "customer": {"legal_name": "KALOS HEALTH AND BEAUTY S.L."},
+            "invoice": {"invoice_number": "FCFE226090211", "issue_date": "2026-09-10"},
+            "items": [
+                {"reference": "1V401405", "description": "NCTF 135 HA CE 5x3ML", "quantity": 9, "gross_unit_price": 173.00, "discount_percentage": 30, "net_unit_price": 121.10, "taxable_amount": 1089.90, "is_free": False, "is_promotional": False},
+                {"reference": "1M7073", "description": "MINI - HAB5 HYDRA SERUM 10ML", "quantity": 15, "gross_unit_price": 0, "discount_percentage": 100, "net_unit_price": 0, "taxable_amount": 0, "is_free": True, "is_promotional": True},
+            ],
+            "totals": {"taxable_base": 1089.90, "vat_amount": 228.88, "withholding": 0, "other_taxes": 0, "total": 1318.78},
+            "taxes": [{"taxable_base": 1089.90, "vat_rate": 21, "vat_amount": 228.88}],
+            "installments": [
+                {"due_date": "2026-10-10", "amount": 659.39, "actual_payment_date": None, "payment_evidence": None},
+                {"due_date": "2026-11-09", "amount": 659.39, "actual_payment_date": None, "payment_evidence": None},
+            ],
+            "field_evidence": {},
+        }
+        self.assertEqual(svc._validate_structured_invoice(extraction, "expense"), [])
+        self.assertTrue(all(item["actual_payment_date"] is None for item in extraction["installments"]))
+
+    def test_responses_request_uses_direct_pdf_and_json_schema(self):
+        class FakeResponse:
+            model = "gpt-5.6-sol"
+            status = "completed"
+            output = []
+            output_text = json.dumps({"document_type": "expense"})
+
+        class FakeResponses:
+            def __init__(self):
+                self.kwargs = None
+
+            def create(self, **kwargs):
+                self.kwargs = kwargs
+                return FakeResponse()
+
+        class FakeClient:
+            def __init__(self):
+                self.responses = FakeResponses()
+
+        client = FakeClient()
+        with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": "invoice-test-model"}):
+            svc._call_invoice_responses(
+                client,
+                file_bytes=b"%PDF-test",
+                filename="factura.pdf",
+                mime_type="application/pdf",
+                extracted_text="FACTURA",
+                prompt="Extrae",
+            )
+        request = client.responses.kwargs
+        self.assertEqual(request["model"], "invoice-test-model")
+        self.assertEqual(request["text"]["format"]["type"], "json_schema")
+        self.assertTrue(request["text"]["format"]["strict"])
+        self.assertTrue(any(item["type"] == "input_file" for item in request["input"][0]["content"]))
         self.assertFalse(
             svc._is_valid_visual_supplier(
                 "KALOS HEALTH AND BEAUTY S.L.",
@@ -1360,6 +1417,122 @@ N° intracommunautaire : ESB05410667"""
                 "Cliente: KALOS HEALTH AND BEAUTY S.L.",
             )
         )
+
+    def _responses_client(self, response):
+        class FakeResponses:
+            def __init__(self, value):
+                self.value = value
+                self.calls = 0
+
+            def create(self, **kwargs):
+                self.calls += 1
+                return self.value
+
+        class FakeClient:
+            def __init__(self, value):
+                self.responses = FakeResponses(value)
+
+        return FakeClient(response)
+
+    def _call_responses_for_status(self, response):
+        client = self._responses_client(response)
+        with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": "invoice-test-model"}):
+            return svc._call_invoice_responses(
+                client,
+                file_bytes=b"%PDF-test",
+                filename="factura.pdf",
+                mime_type="application/pdf",
+                extracted_text="",
+                prompt="Extrae",
+            )
+
+    def test_invoice_model_must_be_configured_at_invoice_pipeline_entry(self):
+        with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": ""}):
+            with self.assertRaisesRegex(RuntimeError, "OPENAI_INVOICE_MODEL is not configured"):
+                svc._get_invoice_model()
+
+    def test_missing_invoice_model_returns_safe_failure_without_creating_client(self):
+        with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": ""}), patch.object(
+            svc, "_get_client", side_effect=AssertionError("client must not be initialized")
+        ):
+            result = svc.analyze_invoice(file_bytes=b"%PDF-test", filename="factura.pdf")
+        self.assertEqual(result["analysis_status"], "failed")
+        self.assertEqual(result["analysis_error"]["status"], "configuration_error")
+
+    def test_invoice_model_comes_only_from_environment(self):
+        with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": "custom-invoice-model"}):
+            self.assertEqual(svc._get_invoice_model(), "custom-invoice-model")
+
+    def test_default_model_for_non_invoice_features_is_unchanged(self):
+        expected = os.getenv("OPENAI_CHAT_MODEL", os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini"))
+        self.assertEqual(svc.DEFAULT_MODEL, expected)
+
+    def test_failed_response_is_not_parsed(self):
+        response = type("Response", (), {
+            "status": "failed",
+            "error": {"code": "server_error"},
+            "output_text": json.dumps({"document_type": "expense"}),
+        })()
+        with patch.object(svc, "_extract_json", side_effect=AssertionError("must not parse failed responses")):
+            with self.assertRaises(svc.InvoiceAnalysisResponseError) as context:
+                self._call_responses_for_status(response)
+        self.assertEqual(context.exception.status, "failed")
+        self.assertEqual(context.exception.detail, "server_error")
+
+    def test_incomplete_response_with_max_tokens_is_not_parsed(self):
+        response = type("Response", (), {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output_text": json.dumps({"document_type": "expense"}),
+        })()
+        with patch.object(svc, "_extract_json", side_effect=AssertionError("must not parse incomplete responses")):
+            with self.assertRaises(svc.InvoiceAnalysisResponseError) as context:
+                self._call_responses_for_status(response)
+        self.assertEqual(context.exception.status, "incomplete")
+        self.assertEqual(context.exception.detail, "max_output_tokens")
+
+    def test_cancelled_response_is_not_parsed(self):
+        response = type("Response", (), {
+            "status": "cancelled",
+            "output_text": json.dumps({"document_type": "expense"}),
+        })()
+        with patch.object(svc, "_extract_json", side_effect=AssertionError("must not parse cancelled responses")):
+            with self.assertRaises(svc.InvoiceAnalysisResponseError) as context:
+                self._call_responses_for_status(response)
+        self.assertEqual(context.exception.status, "cancelled")
+
+    def test_completed_refusal_is_not_parsed(self):
+        response = type("Response", (), {
+            "status": "completed",
+            "output": [{"content": [{"type": "refusal", "refusal": "cannot process"}]}],
+            "output_text": "",
+        })()
+        with patch.object(svc, "_extract_json", side_effect=AssertionError("must not parse refusals")):
+            with self.assertRaises(svc.InvoiceAnalysisResponseError) as context:
+                self._call_responses_for_status(response)
+        self.assertEqual(context.exception.status, "refusal")
+
+    def test_completed_empty_output_is_invalid(self):
+        response = type("Response", (), {
+            "status": "completed",
+            "output": [],
+            "output_text": "",
+        })()
+        with self.assertRaises(svc.InvoiceAnalysisResponseError) as context:
+            self._call_responses_for_status(response)
+        self.assertEqual(context.exception.status, "empty_output")
+
+    def test_failed_initial_response_does_not_trigger_audit(self):
+        failure = svc.InvoiceAnalysisResponseError("failed", "server_error")
+        with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": "invoice-test-model"}), patch.object(
+            svc, "_get_client", return_value=object()
+        ), patch.object(svc, "_extract_pdf_text_from_bytes", return_value=""), patch.object(
+            svc, "_call_invoice_responses", side_effect=failure
+        ) as call_responses:
+            result = svc.analyze_invoice(file_bytes=b"%PDF-test", filename="factura.pdf", mime_type="application/pdf")
+        self.assertEqual(result["analysis_status"], "failed")
+        self.assertEqual(result["analysis_error"]["status"], "failed")
+        self.assertEqual(call_responses.call_count, 1)
 
     def test_invoice_date_uses_date_near_invoice_label(self):
         text = """FCFE226090211

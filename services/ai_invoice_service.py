@@ -7,6 +7,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import date, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from difflib import SequenceMatcher
 from html import unescape
 from itertools import combinations
@@ -30,11 +31,9 @@ except ModuleNotFoundError:
 
 logger = logging.getLogger(__name__)
 
-# Financial document extraction needs stronger visual and layout reasoning than
-# the generic assistant features. Keep it independently configurable so a
-# cheaper model can still be used for non-critical helpers.
+# Financial document extraction has its own model configured at request time.
+# Generic assistant features keep using DEFAULT_MODEL below.
 DEFAULT_MODEL = os.getenv("OPENAI_CHAT_MODEL", os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini"))
-INVOICE_MODEL = os.getenv("OPENAI_INVOICE_MODEL", "gpt-4.1")
 MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "500"))
 PDF_TEXT_THRESHOLD = int(os.getenv("PDF_TEXT_THRESHOLD", "100"))
 PDF_OCR_ZOOM = float(os.getenv("PDF_OCR_ZOOM", "2.0"))
@@ -51,6 +50,22 @@ _client: Optional[OpenAI] = None
 _ocr_reader = None
 _EU_AMOUNT_RE = re.compile(r"\d{1,3}(?:[.\s]\d{3})*,\d{2}|\d+,\d{2}")
 _EU_THOUSANDS_RE = re.compile(r"^\d{1,3}\.\d{3},\d{2}$")
+
+
+class InvoiceAnalysisResponseError(RuntimeError):
+    """A terminal API or response-contract failure for invoice extraction."""
+
+    def __init__(self, status: str, detail: Optional[str] = None):
+        self.status = status
+        self.detail = detail or ""
+        super().__init__(f"Invoice analysis response is not usable: {status}")
+
+
+def _get_invoice_model() -> str:
+    model = os.getenv("OPENAI_INVOICE_MODEL", "").strip()
+    if not model:
+        raise RuntimeError("OPENAI_INVOICE_MODEL is not configured")
+    return model
 
 
 def _ocr_is_enabled() -> bool:
@@ -3658,6 +3673,232 @@ def _run_with_timeout(func, timeout: int, *args, **kwargs):
             return None, True
 
 
+def _nullable(kind: str) -> Dict[str, Any]:
+    return {"type": [kind, "null"]}
+
+
+def _strict_object(properties: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties),
+        "additionalProperties": False,
+    }
+
+
+_EVIDENCE_SCHEMA = _strict_object(
+    {"page": _nullable("integer"), "evidence": _nullable("string"), "confidence": _nullable("number")}
+)
+_PARTY_SCHEMA = _strict_object(
+    {
+        "legal_name": _nullable("string"), "commercial_name": _nullable("string"),
+        "tax_id": _nullable("string"), "address": _nullable("string"),
+        "country": _nullable("string"), "billing_address": _nullable("string"),
+        "shipping_address": _nullable("string"),
+    }
+)
+_INVOICE_SCHEMA = _strict_object(
+    {
+        "invoice_number": _nullable("string"), "issue_date": _nullable("string"),
+        "currency": _nullable("string"), "order_reference": _nullable("string"),
+        "delivery_note": _nullable("string"),
+    }
+)
+_ITEM_SCHEMA = _strict_object(
+    {
+        "reference": _nullable("string"), "description": _nullable("string"), "quantity": _nullable("number"),
+        "unit": _nullable("string"), "gross_unit_price": _nullable("number"),
+        "discount_percentage": _nullable("number"), "discount_amount": _nullable("number"),
+        "net_unit_price": _nullable("number"), "taxable_amount": _nullable("number"),
+        "vat_rate": _nullable("number"), "vat_amount": _nullable("number"), "line_total": _nullable("number"),
+        "is_free": {"type": "boolean"}, "is_promotional": {"type": "boolean"},
+    }
+)
+_TAX_SCHEMA = _strict_object(
+    {"taxable_base": _nullable("number"), "vat_rate": _nullable("number"), "vat_amount": _nullable("number")}
+)
+_INSTALLMENT_SCHEMA = _strict_object(
+    {
+        "due_date": _nullable("string"), "amount": _nullable("number"),
+        "actual_payment_date": _nullable("string"), "payment_evidence": _nullable("string"),
+    }
+)
+_TOTALS_SCHEMA = _strict_object(
+    {
+        "subtotal": _nullable("number"), "global_discount": _nullable("number"), "shipping": _nullable("number"),
+        "taxable_base": _nullable("number"), "vat_amount": _nullable("number"), "withholding": _nullable("number"),
+        "other_taxes": _nullable("number"), "total": _nullable("number"),
+    }
+)
+INVOICE_EXTRACTION_SCHEMA = _strict_object(
+    {
+        "document_type": _nullable("string"), "supplier": _PARTY_SCHEMA, "customer": _PARTY_SCHEMA,
+        "invoice": _INVOICE_SCHEMA, "items": {"type": "array", "items": _ITEM_SCHEMA},
+        "taxes": {"type": "array", "items": _TAX_SCHEMA}, "totals": _TOTALS_SCHEMA,
+        "payment": _strict_object({"method": _nullable("string"), "status": _nullable("string"), "iban": _nullable("string"), "bic": _nullable("string")}),
+        "installments": {"type": "array", "items": _INSTALLMENT_SCHEMA},
+        "observations": {"type": "array", "items": {"type": "string"}},
+        "field_evidence": _strict_object({
+            "supplier": _EVIDENCE_SCHEMA, "customer": _EVIDENCE_SCHEMA, "invoice_number": _EVIDENCE_SCHEMA,
+            "issue_date": _EVIDENCE_SCHEMA, "totals": _EVIDENCE_SCHEMA, "taxes": _EVIDENCE_SCHEMA,
+            "installments": _EVIDENCE_SCHEMA,
+        }),
+        "validation": _strict_object({"is_consistent": _nullable("boolean"), "issues": {"type": "array", "items": {"type": "string"}}}),
+    }
+)
+
+
+def _money_decimal(value: Any) -> Optional[Decimal]:
+    amount = _normalize_amount(value)
+    if amount is None:
+        return None
+    try:
+        return Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _validate_structured_invoice(data: Dict[str, Any], document_type: str) -> List[str]:
+    """Validate model output without silently changing any reported value."""
+    issues: List[str] = []
+    supplier = data.get("supplier") or {}
+    invoice = data.get("invoice") or {}
+    totals = data.get("totals") or {}
+    taxes = data.get("taxes") or []
+    installments = data.get("installments") or []
+    items = data.get("items") or []
+    if document_type != "expense_payroll" and not supplier.get("legal_name"):
+        issues.append("Falta el proveedor/emisor.")
+    if document_type != "expense_payroll" and not invoice.get("invoice_number"):
+        issues.append("Falta el número de factura.")
+    base, vat, withholding, other, total = (
+        _money_decimal(totals.get("taxable_base")), _money_decimal(totals.get("vat_amount")),
+        _money_decimal(totals.get("withholding")) or Decimal("0.00"),
+        _money_decimal(totals.get("other_taxes")) or Decimal("0.00"), _money_decimal(totals.get("total")),
+    )
+    if total is None:
+        issues.append("Falta el total de la factura.")
+    elif base is not None and vat is not None:
+        expected = (base + vat + other - abs(withholding)).quantize(Decimal("0.01"))
+        if abs(expected - total) > Decimal("0.01"):
+            issues.append("La ecuación base + IVA + otros impuestos - retención no cuadra con el total.")
+    if taxes and base is not None and vat is not None:
+        tax_base = sum((_money_decimal(line.get("taxable_base")) or Decimal("0.00") for line in taxes), Decimal("0.00"))
+        tax_vat = sum((_money_decimal(line.get("vat_amount")) or Decimal("0.00") for line in taxes), Decimal("0.00"))
+        if abs(tax_base - base) > Decimal("0.01") or abs(tax_vat - vat) > Decimal("0.01"):
+            issues.append("El desglose de impuestos no coincide con los totales.")
+    taxable_lines = []
+    for item in items:
+        quantity = _money_decimal(item.get("quantity"))
+        gross_price = _money_decimal(item.get("gross_unit_price"))
+        net_price = _money_decimal(item.get("net_unit_price"))
+        taxable = _money_decimal(item.get("taxable_amount"))
+        discount_percentage = _money_decimal(item.get("discount_percentage"))
+        if quantity is not None and gross_price is not None and net_price is not None and discount_percentage is not None:
+            expected_net = (gross_price * (Decimal("1") - discount_percentage / Decimal("100"))).quantize(Decimal("0.01"))
+            if abs(expected_net - net_price) > Decimal("0.01"):
+                issues.append("El descuento de una línea no cuadra con su precio neto.")
+                break
+        if taxable is not None:
+            taxable_lines.append(taxable)
+    if taxable_lines and base is not None and abs(sum(taxable_lines, Decimal("0.00")) - base) > Decimal("0.01"):
+        issues.append("La suma de líneas no coincide con la base imponible.")
+    amounts = [_money_decimal(item.get("amount")) for item in installments]
+    if amounts and all(amount is not None for amount in amounts) and total is not None:
+        if abs(sum(amounts, Decimal("0.00")) - total) > Decimal("0.01"):
+            issues.append("La suma de vencimientos no coincide con el total.")
+    for evidence in (data.get("field_evidence") or {}).values():
+        if isinstance(evidence, dict) and evidence.get("confidence") is not None and evidence["confidence"] < 0.75:
+            issues.append("Existe un campo importante con baja confianza.")
+            break
+    return issues
+
+
+def _response_input_for_invoice(file_bytes: bytes, filename: str, mime_type: str, extracted_text: str, prompt: str) -> List[Dict[str, Any]]:
+    content: List[Dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+    data_url = f"data:{mime_type or 'application/octet-stream'};base64," + base64.b64encode(file_bytes).decode("ascii")
+    if mime_type == "application/pdf" or filename.lower().endswith(".pdf"):
+        content.append({"type": "input_file", "filename": filename, "file_data": data_url, "detail": "high"})
+    elif mime_type in {"image/jpeg", "image/png"}:
+        content.append({"type": "input_image", "image_url": data_url, "detail": "high"})
+    if extracted_text:
+        content.append({"type": "input_text", "text": "Texto nativo/apoyo (puede estar desordenado):\n" + extracted_text[:30000]})
+    return [{"role": "user", "content": content}]
+
+
+def _response_value(value: Any, key: str) -> Any:
+    return value.get(key) if isinstance(value, dict) else getattr(value, key, None)
+
+
+def _response_has_refusal(response: Any) -> bool:
+    for item in _response_value(response, "output") or []:
+        for content in _response_value(item, "content") or []:
+            if _response_value(content, "type") == "refusal":
+                return True
+    return False
+
+
+def _call_invoice_responses(client, *, file_bytes: bytes, filename: str, mime_type: str, extracted_text: str, prompt: str, audit_issues: Optional[List[str]] = None) -> Dict[str, Any]:
+    if audit_issues:
+        prompt += "\n\nREVISIÓN LIMITADA: corrige solo estas discrepancias: " + " | ".join(audit_issues)
+    started = time.monotonic()
+    model = _get_invoice_model()
+    try:
+        response = client.responses.create(
+            model=model,
+            reasoning={"effort": "high"},
+            max_output_tokens=max(MAX_OUTPUT_TOKENS, 2500),
+            store=False,
+            input=_response_input_for_invoice(file_bytes, filename, mime_type, extracted_text, prompt),
+            text={"format": {"type": "json_schema", "name": "invoice_extraction", "strict": True, "schema": INVOICE_EXTRACTION_SCHEMA}},
+            timeout=LLM_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning("OpenAI Responses invoice API error: type=%s", type(exc).__name__)
+        raise InvoiceAnalysisResponseError("api_error", type(exc).__name__) from exc
+    status = _response_value(response, "status")
+    if status != "completed":
+        error = _response_value(response, "error") or {}
+        incomplete = _response_value(response, "incomplete_details") or {}
+        detail = _response_value(error, "code") or _response_value(incomplete, "reason") or status or "unknown"
+        logger.warning("OpenAI Responses invoice response_status=%s detail=%s refusal=false", status, detail)
+        raise InvoiceAnalysisResponseError(str(status or "unknown"), str(detail))
+    if _response_has_refusal(response):
+        logger.warning("OpenAI Responses invoice response_status=completed response_refusal=true")
+        raise InvoiceAnalysisResponseError("refusal", "The model refused the document")
+    raw_text = getattr(response, "output_text", "") or ""
+    if not raw_text.strip():
+        logger.warning("OpenAI Responses invoice response_status=completed response_refusal=false empty_output=true")
+        raise InvoiceAnalysisResponseError("empty_output", "No structured output")
+    data = _extract_json(raw_text)
+    if not data:
+        logger.warning("OpenAI Responses invoice response_status=completed response_refusal=false valid_json=false")
+        raise InvoiceAnalysisResponseError("invalid_structured_output", "JSON Schema output could not be parsed")
+    logger.info("OpenAI Responses invoice: model=%s endpoint=responses response_status=completed response_refusal=false direct_document=%s audit=%s elapsed_ms=%s valid_json=true", getattr(response, "model", model), bool(file_bytes), bool(audit_issues), round((time.monotonic() - started) * 1000))
+    return data
+
+
+def _invoice_analysis_failure(status: str, detail: Optional[str] = None) -> Dict[str, Any]:
+    return {
+        "analysis_status": "failed",
+        "analysis_error": {"status": status, "detail": detail or None},
+        "supplier": None,
+        "provider_name": None,
+        "client_name": None,
+        "invoice_date": None,
+        "payment_dates": [],
+        "payment_date": None,
+        "base_amount": None,
+        "vat_rate": None,
+        "vat_amount": None,
+        "total_amount": None,
+        "extraction_source": None,
+        "confidence_score": None,
+        "analysis_text": "",
+        "validation": {"is_consistent": None, "difference": None},
+    }
+
+
 def analyze_invoice(
     file_path: Optional[str] = None,
     file_bytes: Optional[bytes] = None,
@@ -3667,6 +3908,11 @@ def analyze_invoice(
     company_names: Optional[list] = None,
     known_suppliers: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
+    try:
+        _get_invoice_model()
+    except RuntimeError as exc:
+        logger.warning("Invoice analysis configuration error: %s", exc)
+        return _invoice_analysis_failure("configuration_error", str(exc))
     client = _get_client()
     company_names = company_names or []
     if file_bytes is None:
@@ -3704,67 +3950,19 @@ def analyze_invoice(
         text_length = len(embedded_text.strip())
         is_significant = _is_text_significant(embedded_text, PDF_TEXT_THRESHOLD)
         is_scanned = not is_significant
+        # The original PDF is sent directly to Responses. OCR is deliberately
+        # deferred until an incomplete first pass needs audit support.
+        extracted_text = embedded_text if is_significant else ""
         ocr_text = ""
-        if is_scanned:
-            ocr_text, ocr_timed_out = _run_with_timeout(
-                _extract_pdf_text_ocr_from_bytes, OCR_TIMEOUT_SECONDS, file_bytes
-            )
-            if ocr_timed_out:
-                logger.warning("OCR timeout (%s). Se devuelve estado timeout.", filename)
-                return {
-                    "analysis_status": "timeout",
-                    "supplier": None,
-                    "provider_name": None,
-                    "client_name": None,
-                    "invoice_date": None,
-                    "payment_dates": [],
-                    "payment_date": None,
-                    "base_amount": None,
-                    "vat_rate": None,
-                    "vat_amount": None,
-                    "total_amount": None,
-                    "extraction_source": None,
-                    "confidence_score": None,
-                    "analysis_text": "",
-                    "validation": {"is_consistent": None, "difference": None},
-                }
-            extracted_text = ocr_text
-            used_ocr = True
-            pdf_kind = "scanned"
-        else:
-            extracted_text = embedded_text
-            pdf_kind = "original"
+        pdf_kind = "scanned" if is_scanned else "original"
         logger.info("PDF tratado como escaneado (%s): %s", filename, is_scanned)
         logger.info("Longitud texto extraido (%s): %s", filename, text_length)
         logger.info("Texto significativo (%s): %s", filename, is_significant)
-        logger.info("Longitud texto OCR (%s): %s", filename, len(ocr_text.strip()))
-        logger.info("Texto PDF extraido (%s):\n%s", filename, extracted_text)
+        logger.info("OCR diferido (%s): %s", filename, is_scanned)
     elif is_image:
-        extracted_text, ocr_timed_out = _run_with_timeout(
-            _extract_image_text_ocr_from_bytes, OCR_TIMEOUT_SECONDS, file_bytes
-        )
-        if ocr_timed_out:
-            logger.warning("OCR timeout (%s). Se devuelve estado timeout.", filename)
-            return {
-                "analysis_status": "timeout",
-                "supplier": None,
-                "provider_name": None,
-                "client_name": None,
-                "invoice_date": None,
-                "payment_dates": [],
-                "payment_date": None,
-                "base_amount": None,
-                "vat_rate": None,
-                "vat_amount": None,
-                "total_amount": None,
-                "extraction_source": None,
-                "confidence_score": None,
-                "analysis_text": "",
-                "validation": {"is_consistent": None, "difference": None},
-            }
-        used_ocr = True
+        # Images are native multimodal inputs. OCR remains a later fallback.
         pdf_kind = "image"
-        logger.info("OCR aplicado a imagen (%s).", filename)
+        logger.info("OCR diferido para imagen (%s).", filename)
     else:
         logger.warning("Tipo de archivo no soportado (%s). Texto vacio enviado.", filename)
 
@@ -3780,29 +3978,6 @@ def analyze_invoice(
     embedded_text = _normalize_ocr_amount_text(embedded_text)
 
     analysis_status = "ok"
-    if used_ocr and _is_low_quality_ocr(extracted_text) and not _has_amount_hints(extracted_text):
-        analysis_status = "low_quality_scan"
-        logger.warning(
-            "OCR de baja calidad (%s). Se omite analisis IA.", filename
-        )
-        return {
-            "analysis_status": analysis_status,
-            "supplier": None,
-            "provider_name": None,
-            "client_name": None,
-            "invoice_date": None,
-            "payment_dates": [],
-            "payment_date": None,
-            "base_amount": None,
-            "vat_rate": None,
-            "vat_amount": None,
-            "total_amount": None,
-            "extraction_source": None,
-            "confidence_score": None,
-            "analysis_text": "",
-            "validation": {"is_consistent": None, "difference": None},
-        }
-
     is_income = document_type == "income"
     is_rent_expense = document_type == "expense_rent"
     is_payroll_expense = document_type == "expense_payroll"
@@ -3916,71 +4091,93 @@ def analyze_invoice(
         "antes de responder. Incluye evidence como objeto opcional con textos breves "
         "literales del documento para supplier, invoice_date y totals."
     )
-    messages = [{"role": "user", "content": prompt}]
-    if needs_visual_document_check:
-        document_images = _render_document_pages_for_vision(
-            file_bytes,
-            is_pdf=is_pdf,
+    prompt = (
+        "Extrae la factura usando el documento original como fuente primaria y devuelve el schema solicitado. "
+        "No inventes valores. El emisor no puede ser el cliente ni la dirección de entrega. "
+        "Un vencimiento es una fecha prevista; NUNCA es un pago real. actual_payment_date debe ser null "
+        "sin evidencia explícita de cobro/pago. payment.status no puede ser paid solo por existir o vencer una fecha. "
+        "Las retenciones se devuelven siempre en valor absoluto positivo."
+    )
+    try:
+        response_data, llm_timed_out = _run_with_timeout(
+            _call_invoice_responses,
+            LLM_TIMEOUT_SECONDS,
+            client,
+            file_bytes=file_bytes,
+            filename=filename,
             mime_type=mime_type,
+            extracted_text=extracted_text,
+            prompt=prompt,
         )
-        if document_images:
-            content = [{"type": "text", "text": prompt}]
-            for page_number, document_image in enumerate(document_images, start=1):
-                content.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": document_image, "detail": "high"},
-                    }
-                )
-            messages = [{"role": "user", "content": content}]
-            logger.info(
-                "Se adjuntan %s pagina(s) al analisis visual (%s).",
-                len(document_images),
-                filename,
-            )
-
-    logger.info("Prompt enviado (%s): %s", filename, prompt)
-
-    def _call_llm():
-        return client.chat.completions.create(
-            model=INVOICE_MODEL,
-            max_tokens=MAX_OUTPUT_TOKENS,
-            temperature=0,
-            top_p=1,
-            timeout=LLM_TIMEOUT_SECONDS,
-            response_format={"type": "json_object"},
-            messages=messages,
-        )
-
-    response, llm_timed_out = _run_with_timeout(_call_llm, LLM_TIMEOUT_SECONDS)
-    if llm_timed_out or response is None:
+    except InvoiceAnalysisResponseError as exc:
+        logger.warning("Invoice analysis stopped before parsing: status=%s detail=%s", exc.status, exc.detail)
+        return _invoice_analysis_failure(exc.status, exc.detail)
+    except RuntimeError as exc:
+        # Configuration errors must be explicit, not disguised as ambiguity.
+        logger.warning("Invoice analysis configuration error: %s", exc)
+        return _invoice_analysis_failure("configuration_error", str(exc))
+    if llm_timed_out or response_data is None:
         logger.warning("LLM timeout (%s). Se devuelve estado timeout.", filename)
-        return {
-            "analysis_status": "timeout",
-            "supplier": None,
-            "provider_name": None,
-            "client_name": None,
-            "invoice_date": None,
-            "payment_dates": [],
-            "payment_date": None,
-            "base_amount": None,
-            "vat_rate": None,
-            "vat_amount": None,
-            "total_amount": None,
-            "extraction_source": None,
-            "confidence_score": None,
-            "analysis_text": "",
-            "validation": {"is_consistent": None, "difference": None},
-        }
+        return _invoice_analysis_failure("timeout")
 
-    raw_text = ""
-    if response.choices:
-        raw_text = response.choices[0].message.content or ""
-    logger.info("Respuesta cruda modelo (%s): %s", filename, raw_text)
+    structured_data = response_data
+    validation_issues = _validate_structured_invoice(structured_data, document_type)
+    audit_performed = bool(validation_issues)
+    if validation_issues and (is_pdf or is_image) and not extracted_text:
+        ocr_function = _extract_pdf_text_ocr_from_bytes if is_pdf else _extract_image_text_ocr_from_bytes
+        ocr_text, ocr_timed_out = _run_with_timeout(ocr_function, OCR_TIMEOUT_SECONDS, file_bytes)
+        if not ocr_timed_out and ocr_text:
+            extracted_text = _normalize_ocr_amount_text(ocr_text)
+            used_ocr = True
+            logger.info("OCR usado como fallback de auditoría (%s).", filename)
+    if validation_issues:
+        try:
+            audited_data, audit_timed_out = _run_with_timeout(
+                _call_invoice_responses,
+                LLM_TIMEOUT_SECONDS,
+                client,
+                file_bytes=file_bytes,
+                filename=filename,
+                mime_type=mime_type,
+                extracted_text=extracted_text,
+                prompt=prompt,
+                audit_issues=validation_issues,
+            )
+        except InvoiceAnalysisResponseError as exc:
+            logger.warning("Invoice audit failed safely: status=%s", exc.status)
+            audited_data, audit_timed_out = None, False
+        if not audit_timed_out and audited_data:
+            structured_data = audited_data
+            validation_issues = _validate_structured_invoice(structured_data, document_type)
+    logger.info(
+        "Validacion estructurada de factura (%s): valid=%s incidencias=%s segunda_revision=%s",
+        filename,
+        not validation_issues,
+        len(validation_issues),
+        audit_performed,
+    )
 
-    data = _extract_json(raw_text)
+    # Flatten the strict contract to the legacy response expected by the UI.
+    supplier = structured_data.get("supplier") or {}
+    customer = structured_data.get("customer") or {}
+    invoice = structured_data.get("invoice") or {}
+    totals = structured_data.get("totals") or {}
+    evidence = structured_data.get("field_evidence") or {}
+    installments = structured_data.get("installments") or []
+    data = {
+        "supplier": supplier.get("legal_name") or supplier.get("commercial_name"),
+        "client": customer.get("legal_name") or customer.get("commercial_name"),
+        "invoice_date": invoice.get("issue_date"),
+        "invoice_number": invoice.get("invoice_number"),
+        "payment_dates": [item.get("due_date") for item in installments if item.get("due_date")],
+        "withholding_amount": totals.get("withholding"),
+        "totals": {"base": totals.get("taxable_base"), "vat": totals.get("vat_amount"), "total": totals.get("total")},
+        "vat_breakdown": [{"base": item.get("taxable_base"), "vat_amount": item.get("vat_amount"), "rate": item.get("vat_rate")} for item in structured_data.get("taxes") or []],
+        "evidence": {key: (value or {}).get("evidence") for key, value in evidence.items() if isinstance(value, dict)},
+    }
+    raw_text = json.dumps(structured_data, ensure_ascii=False)
     if not data:
-        logger.warning("No se pudo extraer JSON valido (%s). Se usara regex/fallback.", filename)
+        logger.warning("Responses no devolvió una extracción válida (%s).", filename)
 
     provider_name = (
         data.get("supplier")
@@ -4004,7 +4201,7 @@ def analyze_invoice(
         data.get("invoice_date") or data.get("fecha_factura") or data.get("fecha")
     )
     text_invoice_date = _extract_invoice_date_from_text(extracted_text)
-    if text_invoice_date and (invoice_date is None or pdf_kind == "original"):
+    if text_invoice_date and invoice_date is None:
         invoice_date = text_invoice_date
     raw_payment_dates = (
         data.get("payment_dates")
@@ -4118,9 +4315,9 @@ def analyze_invoice(
     )
     explicit_withholding_amount = _extract_explicit_withholding_amount_from_text(extracted_text)
     if explicit_withholding_amount is not None:
-        withholding_amount = explicit_withholding_amount
+        withholding_amount = abs(explicit_withholding_amount)
     elif withholding_amount is not None:
-        withholding_amount = None
+        withholding_amount = abs(withholding_amount)
     amount_source = "llm" if data else "fallback"
 
     if company_names is None:
@@ -4354,6 +4551,7 @@ def analyze_invoice(
         withholding_amount=withholding_amount,
         breakdown_warning=bool(breakdown_warning),
     )
+    review_reasons = list(dict.fromkeys(validation_issues + review_reasons))
     if review_reasons and analysis_status == "ok":
         analysis_status = "needs_review"
 
@@ -4403,6 +4601,8 @@ def analyze_invoice(
         "confidence_score": confidence_score,
         "analysis_text": raw_text[:500],
         "validation": validation,
+        "structured_extraction": structured_data,
+        "payment_status": (structured_data.get("payment") or {}).get("status"),
     }
 
 

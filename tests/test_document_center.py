@@ -33,6 +33,20 @@ class TestDocumentCenterHelpers(unittest.TestCase):
             "sales_invoice",
         )
 
+    def test_invoice_evidence_beats_incidental_financial_acronym(self):
+        text = (
+            "Factura emitida\nCliente: Clínica Norte\n"
+            "Ledged Consulting SL\nBase imponible 1.000,00"
+        )
+        self.assertEqual(
+            detect_document_type(text, "factura-emitida.pdf", ["Ledged Consulting SL"]),
+            "sales_invoice",
+        )
+
+    def test_loan_requires_multiple_structural_signals(self):
+        text = "Cuadro de amortización\nCapital pendiente\nIntereses\nCuota mensual"
+        self.assertEqual(detect_document_type(text, "documento.pdf"), "loan_document")
+
     def test_extract_confidence_marks_complete_invoice_as_ready(self):
         score, status, issue_type, issue_description = extract_confidence_and_fields(
             "purchase_invoice",
