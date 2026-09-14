@@ -1337,6 +1337,29 @@ N° intracommunautaire : ESB05410667"""
         self.assertEqual(len(reasons), 1)
         self.assertIn("no cuadran", reasons[0])
 
+    def test_invoice_date_uses_date_near_invoice_label(self):
+        text = """FCFE226090211
+10/09/2026
+FACTURA
+DIRECCION DE ENTREGA"""
+
+        self.assertEqual(svc._extract_invoice_date_from_text(text), "2026-09-10")
+
+    def test_invalid_or_implausible_dates_are_rejected(self):
+        self.assertIsNone(svc._normalize_date("12/03/2050"))
+        self.assertIsNone(svc._normalize_date("31/02/2026"))
+
+    def test_payment_schedule_excludes_invoice_date_when_due_dates_exist(self):
+        payment_dates, _ = svc._resolve_payment_schedule(
+            extracted_text="",
+            invoice_date="2026-09-10",
+            raw_payment_dates=["2026-09-10", "2026-10-10", "2026-11-10"],
+            single_payment_date_raw=None,
+            payment_terms_days_raw=None,
+        )
+
+        self.assertEqual(payment_dates, ["2026-10-10", "2026-11-10"])
+
 
 if __name__ == "__main__":
     unittest.main()

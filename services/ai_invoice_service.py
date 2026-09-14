@@ -122,20 +122,28 @@ def _extract_json(text: str) -> Dict[str, Any]:
 def _normalize_date(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
-    value = value.strip()
+    value = str(value).strip()
+    day = month = year = None
     if re.match(r"\d{4}-\d{2}-\d{2}$", value):
-        return value
-    match = re.match(r"(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})", value)
-    if match:
-        day, month, year = match.groups()
-        if len(year) == 2:
-            year = f"20{year}"
-        return f"{year.zfill(4)}-{month.zfill(2)}-{day.zfill(2)}"
-    match = re.match(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", value)
-    if match:
-        year, month, day = match.groups()
-        return f"{year.zfill(4)}-{month.zfill(2)}-{day.zfill(2)}"
-    return None
+        year, month, day = value.split("-")
+    else:
+        match = re.match(r"(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$", value)
+        if match:
+            day, month, year = match.groups()
+            if len(year) == 2:
+                year = f"20{year}"
+        else:
+            match = re.match(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})$", value)
+            if not match:
+                return None
+            year, month, day = match.groups()
+    try:
+        parsed = date(int(year), int(month), int(day))
+    except (TypeError, ValueError):
+        return None
+    if not 2000 <= parsed.year <= date.today().year + 2:
+        return None
+    return parsed.isoformat()
 
 
 def _extract_first_date(text: str) -> Optional[str]:
@@ -397,7 +405,16 @@ def _resolve_payment_schedule(
         except ValueError:
             payment_dates = []
 
-    return sorted({d for d in payment_dates if d}), payment_terms_days
+    normalized_dates = sorted({d for d in payment_dates if d})
+    if invoice_date:
+        later_dates = [value for value in normalized_dates if value > invoice_date]
+        # Invoice issue date is frequently returned by generic models as a
+        # payment date. Keep it only for immediate-payment invoices with no
+        # actual later due date in the document.
+        if later_dates:
+            normalized_dates = later_dates
+
+    return normalized_dates, payment_terms_days
 
 
 def _normalize_rate(value: Any) -> Optional[float]:
@@ -1050,6 +1067,21 @@ def _extract_invoice_date_from_text(text: str) -> Optional[str]:
         lowered = line.lower()
         if "vencimiento" in lowered or "fecha de pago" in lowered:
             continue
+        if "factura" in lowered or "invoice" in lowered:
+            if any(token in lowered for token in ("total", "impuesto", "importe", "base")):
+                continue
+            # Some ERP PDFs print the issue date on a nearby line and leave
+            # only the FACTURA label in the text layer.
+            for offset in (0, -1, 1, -2, 2, -3, 3):
+                candidate_idx = idx + offset
+                if candidate_idx < 0 or candidate_idx >= len(lines):
+                    continue
+                candidate_line = lines[candidate_idx].lower()
+                if "vencimiento" in candidate_line or "pago" in candidate_line:
+                    continue
+                found = _extract_first_date(lines[candidate_idx])
+                if found:
+                    return found
         if "factura" in lowered and "fecha" in lowered:
             if "dias" in lowered:
                 continue
