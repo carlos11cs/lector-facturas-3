@@ -3667,6 +3667,10 @@ def analyze_invoice(
         used_ocr,
         len(extracted_text.strip()),
     )
+    # PDF text can contain HTML entities (for example, ``&#x20;`` for a
+    # space). Normalize once before every extractor and the model see it.
+    extracted_text = _normalize_ocr_amount_text(extracted_text)
+    embedded_text = _normalize_ocr_amount_text(embedded_text)
 
     analysis_status = "ok"
     if used_ocr and _is_low_quality_ocr(extracted_text) and not _has_amount_hints(extracted_text):
@@ -3701,6 +3705,11 @@ def analyze_invoice(
         and not is_income
         and analysis_status == "ok"
         and _extract_supplier_from_text(extracted_text, company_names) is None
+    )
+    logger.info(
+        "Comprobacion de emisor (%s): visual=%s",
+        filename,
+        needs_visual_supplier_check,
     )
     if is_income:
         prompt = (
