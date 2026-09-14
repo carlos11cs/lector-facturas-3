@@ -39,4 +39,4 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "gunicorn app:app --timeout 180 --bind 0.0.0.0:${PORT:-8000}"]
+CMD ["sh", "-c", "gunicorn app:app --timeout ${GUNICORN_TIMEOUT_SECONDS:-660} --bind 0.0.0.0:${PORT:-8000}"]

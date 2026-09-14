@@ -38,8 +38,13 @@ Opcionales:
 export OPENAI_CHAT_MODEL="gpt-4o-mini"
 # Modelo multimodal para leer la composición visual de facturas y PDFs.
 export OPENAI_INVOICE_MODEL="gpt-5.6-sol"
+export OPENAI_INVOICE_MAX_OUTPUT_TOKENS="32768"
+export OPENAI_INVOICE_TIMEOUT_SECONDS="240"
+export OPENAI_INVOICE_REASONING_EFFORT="low"
+export OPENAI_INVOICE_AUDIT_REASONING_EFFORT="high"
 export OPENAI_MAX_OUTPUT_TOKENS="500"
-export ANALYSIS_TIMEOUT_SECONDS="120"
+export ANALYSIS_TIMEOUT_SECONDS="600"
+export GUNICORN_TIMEOUT_SECONDS="660"
 ```
 
 ## Inicializar base de datos

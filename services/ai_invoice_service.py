@@ -36,13 +36,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = os.getenv("OPENAI_CHAT_MODEL", os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini"))
 MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "500"))
 DEFAULT_INVOICE_MAX_OUTPUT_TOKENS = 32768
+DEFAULT_INVOICE_TIMEOUT_SECONDS = 240
+DEFAULT_INVOICE_REASONING_EFFORT = "low"
+DEFAULT_INVOICE_AUDIT_REASONING_EFFORT = "high"
+INVOICE_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 PDF_TEXT_THRESHOLD = int(os.getenv("PDF_TEXT_THRESHOLD", "100"))
 PDF_OCR_ZOOM = float(os.getenv("PDF_OCR_ZOOM", "2.0"))
 OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", "5"))
 OCR_MAX_SECONDS = int(os.getenv("OCR_MAX_SECONDS", "7"))
 OCR_MAX_DIM = int(os.getenv("OCR_MAX_DIM", "1600"))
 OCR_TIMEOUT_SECONDS = 60
-LLM_TIMEOUT_SECONDS = 60
 INVOICE_VISION_MAX_PAGES = max(1, int(os.getenv("OPENAI_INVOICE_VISION_MAX_PAGES", "2")))
 INVOICE_VISION_MAX_DIMENSION = max(
     900, int(os.getenv("OPENAI_INVOICE_VISION_MAX_DIMENSION", "1400"))
@@ -78,6 +81,26 @@ def _get_invoice_max_output_tokens() -> int:
     if value <= 0:
         raise RuntimeError("OPENAI_INVOICE_MAX_OUTPUT_TOKENS must be a positive integer")
     return value
+
+
+def _get_invoice_timeout_seconds() -> int:
+    configured = os.getenv("OPENAI_INVOICE_TIMEOUT_SECONDS", str(DEFAULT_INVOICE_TIMEOUT_SECONDS)).strip()
+    try:
+        value = int(configured)
+    except ValueError as exc:
+        raise RuntimeError("OPENAI_INVOICE_TIMEOUT_SECONDS must be a positive integer") from exc
+    if value <= 0:
+        raise RuntimeError("OPENAI_INVOICE_TIMEOUT_SECONDS must be a positive integer")
+    return value
+
+
+def _get_invoice_reasoning_effort(audit: bool = False) -> str:
+    env_key = "OPENAI_INVOICE_AUDIT_REASONING_EFFORT" if audit else "OPENAI_INVOICE_REASONING_EFFORT"
+    default = DEFAULT_INVOICE_AUDIT_REASONING_EFFORT if audit else DEFAULT_INVOICE_REASONING_EFFORT
+    effort = os.getenv(env_key, default).strip().lower()
+    if effort not in INVOICE_REASONING_EFFORTS:
+        raise RuntimeError(f"{env_key} must be a supported reasoning effort")
+    return effort
 
 
 def _ocr_is_enabled() -> bool:
@@ -117,6 +140,7 @@ def _get_client() -> OpenAI:
         logger.info("httpx version: %s", httpx.__version__)
 
     _client = OpenAI(api_key=api_key)
+    logger.info("OpenAI client retry policy: max_retries=%s", _client.max_retries)
     return _client
 
 
@@ -3861,49 +3885,78 @@ def _response_usage_values(response: Any) -> Dict[str, Optional[int]]:
     }
 
 
-def _log_invoice_response_usage(response: Any, *, status: Any, max_output_tokens: int) -> None:
+def _log_invoice_response_usage(
+    response: Any,
+    *,
+    status: Any,
+    max_output_tokens: int,
+    reasoning_effort: str,
+    audit: bool,
+) -> None:
     usage = _response_usage_values(response)
     logger.info(
-        "OpenAI Responses invoice usage: response_status=%s input_tokens=%s output_tokens=%s reasoning_tokens=%s total_tokens=%s max_output_tokens=%s",
+        "OpenAI Responses invoice usage: response_status=%s input_tokens=%s output_tokens=%s reasoning_tokens=%s total_tokens=%s max_output_tokens=%s reasoning_effort=%s audit=%s",
         status,
         usage["input_tokens"],
         usage["output_tokens"],
         usage["reasoning_tokens"],
         usage["total_tokens"],
         max_output_tokens,
+        reasoning_effort,
+        audit,
     )
 
 
 def _call_invoice_responses(client, *, file_bytes: bytes, filename: str, mime_type: str, extracted_text: str, prompt: str, audit_issues: Optional[List[str]] = None) -> Dict[str, Any]:
+    audit = bool(audit_issues)
     if audit_issues:
         prompt += "\n\nREVISIÓN LIMITADA: corrige solo estas discrepancias: " + " | ".join(audit_issues)
     started = time.monotonic()
     model = _get_invoice_model()
     max_output_tokens = _get_invoice_max_output_tokens()
+    timeout_seconds = _get_invoice_timeout_seconds()
+    reasoning_effort = _get_invoice_reasoning_effort(audit)
     try:
         response = client.responses.create(
             model=model,
-            reasoning={"effort": "high"},
+            reasoning={"effort": reasoning_effort},
             max_output_tokens=max_output_tokens,
             store=False,
             input=_response_input_for_invoice(file_bytes, filename, mime_type, extracted_text, prompt),
             text={"format": {"type": "json_schema", "name": "invoice_extraction", "strict": True, "schema": INVOICE_EXTRACTION_SCHEMA}},
-            timeout=LLM_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
         )
     except Exception as exc:
-        logger.warning("OpenAI Responses invoice API error: type=%s", type(exc).__name__)
-        raise InvoiceAnalysisResponseError("api_error", type(exc).__name__) from exc
+        status = "timeout" if openai is not None and isinstance(exc, openai.APITimeoutError) else "api_error"
+        logger.warning(
+            "OpenAI Responses invoice API error: status=%s type=%s audit=%s openai_response_elapsed_ms=%s timeout_seconds=%s reasoning_effort=%s",
+            status,
+            type(exc).__name__,
+            audit,
+            round((time.monotonic() - started) * 1000),
+            timeout_seconds,
+            reasoning_effort,
+        )
+        raise InvoiceAnalysisResponseError(status, type(exc).__name__) from exc
     status = _response_value(response, "status")
-    _log_invoice_response_usage(response, status=status, max_output_tokens=max_output_tokens)
+    _log_invoice_response_usage(
+        response,
+        status=status,
+        max_output_tokens=max_output_tokens,
+        reasoning_effort=reasoning_effort,
+        audit=audit,
+    )
+    request_id = _response_value(response, "_request_id")
     if status != "completed":
         error = _response_value(response, "error") or {}
         incomplete = _response_value(response, "incomplete_details") or {}
         detail = _response_value(error, "code") or _response_value(incomplete, "reason") or status or "unknown"
         logger.warning(
-            "OpenAI Responses invoice response_status=%s detail=%s refusal=false max_output_tokens=%s",
+            "OpenAI Responses invoice response_status=%s detail=%s refusal=false max_output_tokens=%s request_id=%s",
             status,
             detail,
             max_output_tokens,
+            request_id,
         )
         raise InvoiceAnalysisResponseError(str(status or "unknown"), str(detail))
     if _response_has_refusal(response):
@@ -3917,7 +3970,17 @@ def _call_invoice_responses(client, *, file_bytes: bytes, filename: str, mime_ty
     if not data:
         logger.warning("OpenAI Responses invoice response_status=completed response_refusal=false valid_json=false")
         raise InvoiceAnalysisResponseError("invalid_structured_output", "JSON Schema output could not be parsed")
-    logger.info("OpenAI Responses invoice: model=%s endpoint=responses response_status=completed response_refusal=false direct_document=%s audit=%s elapsed_ms=%s valid_json=true", getattr(response, "model", model), bool(file_bytes), bool(audit_issues), round((time.monotonic() - started) * 1000))
+    logger.info(
+        "OpenAI Responses invoice: model=%s endpoint=responses response_status=completed response_refusal=false direct_document=%s audit=%s openai_response_elapsed_ms=%s valid_json=true request_id=%s max_retries=%s timeout_seconds=%s reasoning_effort=%s",
+        getattr(response, "model", model),
+        bool(file_bytes),
+        audit,
+        round((time.monotonic() - started) * 1000),
+        request_id,
+        getattr(client, "max_retries", None),
+        timeout_seconds,
+        reasoning_effort,
+    )
     return data
 
 
@@ -3951,10 +4014,12 @@ def analyze_invoice(
     company_names: Optional[list] = None,
     known_suppliers: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
+    analysis_started = time.monotonic()
     try:
         _get_invoice_model()
     except RuntimeError as exc:
         logger.warning("Invoice analysis configuration error: %s", exc)
+        logger.info("Invoice analysis total: status=configuration_error audit=false ocr=false invoice_total_elapsed_ms=%s", round((time.monotonic() - analysis_started) * 1000))
         return _invoice_analysis_failure("configuration_error", str(exc))
     client = _get_client()
     company_names = company_names or []
@@ -4141,10 +4206,13 @@ def analyze_invoice(
         "sin evidencia explícita de cobro/pago. payment.status no puede ser paid solo por existir o vencer una fecha. "
         "Las retenciones se devuelven siempre en valor absoluto positivo."
     )
+    logger.info(
+        "Invoice preprocessing: document_preprocessing_elapsed_ms=%s ocr=%s",
+        round((time.monotonic() - analysis_started) * 1000),
+        used_ocr,
+    )
     try:
-        response_data, llm_timed_out = _run_with_timeout(
-            _call_invoice_responses,
-            LLM_TIMEOUT_SECONDS,
+        response_data = _call_invoice_responses(
             client,
             file_bytes=file_bytes,
             filename=filename,
@@ -4154,18 +4222,26 @@ def analyze_invoice(
         )
     except InvoiceAnalysisResponseError as exc:
         logger.warning("Invoice analysis stopped before parsing: status=%s detail=%s", exc.status, exc.detail)
+        logger.info("Invoice analysis total: status=%s audit=false ocr=false invoice_total_elapsed_ms=%s", exc.status, round((time.monotonic() - analysis_started) * 1000))
         return _invoice_analysis_failure(exc.status, exc.detail)
     except RuntimeError as exc:
         # Configuration errors must be explicit, not disguised as ambiguity.
         logger.warning("Invoice analysis configuration error: %s", exc)
+        logger.info("Invoice analysis total: status=configuration_error audit=false ocr=false invoice_total_elapsed_ms=%s", round((time.monotonic() - analysis_started) * 1000))
         return _invoice_analysis_failure("configuration_error", str(exc))
-    if llm_timed_out or response_data is None:
-        logger.warning("LLM timeout (%s). Se devuelve estado timeout.", filename)
-        return _invoice_analysis_failure("timeout")
 
     structured_data = response_data
+    validation_started = time.monotonic()
     validation_issues = _validate_structured_invoice(structured_data, document_type)
+    validation_elapsed_ms = round((time.monotonic() - validation_started) * 1000)
     audit_performed = bool(validation_issues)
+    logger.info(
+        "Invoice validation: validation_elapsed_ms=%s issues=%s audit=%s",
+        validation_elapsed_ms,
+        len(validation_issues),
+        audit_performed,
+    )
+    audit_elapsed_ms = 0
     if validation_issues and (is_pdf or is_image) and not extracted_text:
         ocr_function = _extract_pdf_text_ocr_from_bytes if is_pdf else _extract_image_text_ocr_from_bytes
         ocr_text, ocr_timed_out = _run_with_timeout(ocr_function, OCR_TIMEOUT_SECONDS, file_bytes)
@@ -4174,10 +4250,9 @@ def analyze_invoice(
             used_ocr = True
             logger.info("OCR usado como fallback de auditoría (%s).", filename)
     if validation_issues:
+        audit_started = time.monotonic()
         try:
-            audited_data, audit_timed_out = _run_with_timeout(
-                _call_invoice_responses,
-                LLM_TIMEOUT_SECONDS,
+            audited_data = _call_invoice_responses(
                 client,
                 file_bytes=file_bytes,
                 filename=filename,
@@ -4188,10 +4263,20 @@ def analyze_invoice(
             )
         except InvoiceAnalysisResponseError as exc:
             logger.warning("Invoice audit failed safely: status=%s", exc.status)
-            audited_data, audit_timed_out = None, False
-        if not audit_timed_out and audited_data:
+            audited_data = None
+        if audited_data:
             structured_data = audited_data
+            audit_validation_started = time.monotonic()
             validation_issues = _validate_structured_invoice(structured_data, document_type)
+            validation_elapsed_ms += round((time.monotonic() - audit_validation_started) * 1000)
+        audit_elapsed_ms = round((time.monotonic() - audit_started) * 1000)
+    logger.info(
+        "Invoice audit: audit=%s audit_elapsed_ms=%s ocr=%s validation_elapsed_ms=%s",
+        audit_performed,
+        audit_elapsed_ms,
+        used_ocr,
+        validation_elapsed_ms,
+    )
     logger.info(
         "Validacion estructurada de factura (%s): valid=%s incidencias=%s segunda_revision=%s",
         filename,
@@ -4616,7 +4701,7 @@ def analyze_invoice(
         total_amount,
     )
 
-    return {
+    result = {
         "analysis_status": analysis_status,
         "review_reasons": review_reasons,
         "supplier": provider_name,
@@ -4647,6 +4732,14 @@ def analyze_invoice(
         "structured_extraction": structured_data,
         "payment_status": (structured_data.get("payment") or {}).get("status"),
     }
+    logger.info(
+        "Invoice analysis total: status=%s audit=%s ocr=%s invoice_total_elapsed_ms=%s",
+        analysis_status,
+        audit_performed,
+        used_ocr,
+        round((time.monotonic() - analysis_started) * 1000),
+    )
+    return result
 
 
 def extract_loan_schedule(text: str) -> List[Dict[str, Any]]:

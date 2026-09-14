@@ -1410,7 +1410,9 @@ N° intracommunautaire : ESB05410667"""
             )
         request = client.responses.kwargs
         self.assertEqual(request["model"], "invoice-test-model")
+        self.assertEqual(request["reasoning"]["effort"], "low")
         self.assertEqual(request["max_output_tokens"], 4096)
+        self.assertEqual(request["timeout"], 240)
         self.assertEqual(request["text"]["format"]["type"], "json_schema")
         self.assertTrue(request["text"]["format"]["strict"])
         self.assertTrue(any(item["type"] == "input_file" for item in request["input"][0]["content"]))
@@ -1427,9 +1429,13 @@ N° intracommunautaire : ESB05410667"""
             def __init__(self, value):
                 self.value = value
                 self.calls = 0
+                self.requests = []
 
             def create(self, **kwargs):
                 self.calls += 1
+                self.requests.append(kwargs)
+                if isinstance(self.value, BaseException):
+                    raise self.value
                 return self.value
 
         class FakeClient:
@@ -1474,6 +1480,47 @@ N° intracommunautaire : ESB05410667"""
     def test_invoice_max_output_tokens_comes_from_environment(self):
         with patch.dict(os.environ, {"OPENAI_INVOICE_MAX_OUTPUT_TOKENS": "16384"}):
             self.assertEqual(svc._get_invoice_max_output_tokens(), 16384)
+
+    def test_invoice_timeout_defaults_to_240_seconds(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(svc._get_invoice_timeout_seconds(), 240)
+
+    def test_invoice_timeout_comes_from_environment(self):
+        with patch.dict(os.environ, {"OPENAI_INVOICE_TIMEOUT_SECONDS": "180"}):
+            self.assertEqual(svc._get_invoice_timeout_seconds(), 180)
+
+    def test_invoice_reasoning_efforts_come_from_environment(self):
+        with patch.dict(os.environ, {
+            "OPENAI_INVOICE_REASONING_EFFORT": "medium",
+            "OPENAI_INVOICE_AUDIT_REASONING_EFFORT": "high",
+        }):
+            self.assertEqual(svc._get_invoice_reasoning_effort(), "medium")
+            self.assertEqual(svc._get_invoice_reasoning_effort(audit=True), "high")
+
+    def test_audit_response_uses_configured_high_reasoning_effort(self):
+        response = type("Response", (), {
+            "model": "gpt-5.6-sol",
+            "status": "completed",
+            "output": [],
+            "output_text": json.dumps({"document_type": "expense"}),
+        })()
+        client = self._responses_client(response)
+        with patch.dict(os.environ, {
+            "OPENAI_INVOICE_MODEL": "invoice-test-model",
+            "OPENAI_INVOICE_REASONING_EFFORT": "low",
+            "OPENAI_INVOICE_AUDIT_REASONING_EFFORT": "high",
+        }):
+            svc._call_invoice_responses(
+                client,
+                file_bytes=b"%PDF-test",
+                filename="factura.pdf",
+                mime_type="application/pdf",
+                extracted_text="",
+                prompt="Extrae",
+                audit_issues=["La ecuacion no cuadra"],
+            )
+        self.assertEqual(client.responses.calls, 1)
+        self.assertEqual(client.responses.requests[0]["reasoning"]["effort"], "high")
 
     def test_default_model_for_non_invoice_features_is_unchanged(self):
         expected = os.getenv("OPENAI_CHAT_MODEL", os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini"))
@@ -1521,6 +1568,122 @@ N° intracommunautaire : ESB05410667"""
             svc._response_usage_values(missing),
             {"input_tokens": None, "output_tokens": None, "reasoning_tokens": None, "total_tokens": None},
         )
+
+    def test_response_metrics_are_logged_without_altering_the_extraction(self):
+        response = type("Response", (), {
+            "model": "gpt-5.6-sol",
+            "status": "completed",
+            "output": [],
+            "output_text": json.dumps({"document_type": "expense"}),
+            "_request_id": "req_test",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "output_tokens_details": {"reasoning_tokens": 10},
+                "total_tokens": 150,
+            },
+        })()
+        with self.assertLogs(svc.logger, level="INFO") as logs:
+            result = self._call_responses_for_status(response)
+        output = "\n".join(logs.output)
+        self.assertEqual(result, {"document_type": "expense"})
+        self.assertIn("input_tokens=100", output)
+        self.assertIn("reasoning_effort=low", output)
+        self.assertIn("openai_response_elapsed_ms=", output)
+        self.assertIn("request_id=req_test", output)
+
+    def test_sdk_timeout_returns_terminal_timeout_status(self):
+        timeout_error = svc.openai.APITimeoutError(request=object())
+        with self.assertRaises(svc.InvoiceAnalysisResponseError) as context:
+            self._call_responses_for_status(timeout_error)
+        self.assertEqual(context.exception.status, "timeout")
+
+    @staticmethod
+    def _completed_structured_invoice():
+        return {
+            "supplier": {"legal_name": "Proveedor de prueba", "commercial_name": None},
+            "customer": {"legal_name": None, "commercial_name": None},
+            "invoice": {"invoice_number": "F-1", "issue_date": "2026-09-10"},
+            "totals": {"taxable_base": 100.0, "vat_amount": 21.0, "withholding": 0.0, "other_taxes": 0.0, "total": 121.0},
+            "taxes": [{"taxable_base": 100.0, "vat_rate": 21.0, "vat_amount": 21.0}],
+            "items": [],
+            "installments": [],
+            "field_evidence": {},
+            "payment": {"status": None},
+        }
+
+    def test_completed_response_is_preserved_without_legacy_llm_timeout(self):
+        extraction = self._completed_structured_invoice()
+        with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": "invoice-test-model"}), patch.object(
+            svc, "_get_client", return_value=object()
+        ), patch.object(svc, "_extract_pdf_text_from_bytes", return_value="Texto nativo " * 20), patch.object(
+            svc, "_call_invoice_responses", return_value=extraction
+        ), patch.object(svc, "_validate_structured_invoice", return_value=[]), patch.object(
+            svc, "_run_with_timeout", side_effect=AssertionError("LLM must use the SDK timeout directly")
+        ):
+            result = svc.analyze_invoice(file_bytes=b"%PDF-test", filename="factura.pdf", mime_type="application/pdf")
+        self.assertEqual(result["total_amount"], 121.0)
+        self.assertNotEqual(result["analysis_status"], "failed")
+
+    def test_secondary_audit_uses_the_same_sdk_timeout_without_thread_wrapper(self):
+        initial = self._completed_structured_invoice()
+        audited = self._completed_structured_invoice()
+        audited["totals"] = {"taxable_base": 100.0, "vat_amount": 21.0, "withholding": 0.0, "other_taxes": 0.0, "total": 121.0}
+        with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": "invoice-test-model"}), patch.object(
+            svc, "_get_client", return_value=object()
+        ), patch.object(svc, "_extract_pdf_text_from_bytes", return_value="Texto nativo " * 20), patch.object(
+            svc, "_call_invoice_responses", side_effect=[initial, audited]
+        ) as call_responses, patch.object(svc, "_validate_structured_invoice", side_effect=[["revisar"], []]), patch.object(
+            svc, "_run_with_timeout", side_effect=AssertionError("LLM audit must use the SDK timeout directly")
+        ):
+            result = svc.analyze_invoice(file_bytes=b"%PDF-test", filename="factura.pdf", mime_type="application/pdf")
+        self.assertEqual(call_responses.call_count, 2)
+        self.assertEqual(call_responses.call_args_list[1].kwargs["audit_issues"], ["revisar"])
+        self.assertEqual(result["total_amount"], 121.0)
+
+    def test_valid_invoice_does_not_trigger_audit(self):
+        extraction = self._completed_structured_invoice()
+        with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": "invoice-test-model"}), patch.object(
+            svc, "_get_client", return_value=object()
+        ), patch.object(svc, "_extract_pdf_text_from_bytes", return_value="Texto nativo " * 20), patch.object(
+            svc, "_call_invoice_responses", return_value=extraction
+        ) as call_responses, patch.object(svc, "_validate_structured_invoice", return_value=[]):
+            result = svc.analyze_invoice(file_bytes=b"%PDF-test", filename="factura.pdf", mime_type="application/pdf")
+        self.assertEqual(call_responses.call_count, 1)
+        self.assertEqual(result["total_amount"], 121.0)
+
+    def test_completed_response_after_legacy_timeout_preserves_invoice_fields(self):
+        extraction = self._completed_structured_invoice()
+        extraction["supplier"] = {"legal_name": "Proveedor Demo S.L.", "commercial_name": None}
+        with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": "invoice-test-model"}), patch.object(
+            svc, "_get_client", return_value=object()
+        ), patch.object(svc, "_extract_pdf_text_from_bytes", return_value="Texto nativo " * 20), patch.object(
+            svc, "_call_invoice_responses", return_value=extraction
+        ), patch.object(svc, "_validate_structured_invoice", return_value=[]), patch.object(
+            svc, "_run_with_timeout", side_effect=AssertionError("Responses must not use the legacy timeout wrapper")
+        ):
+            result = svc.analyze_invoice(file_bytes=b"%PDF-test", filename="factura.pdf", mime_type="application/pdf")
+        self.assertNotEqual(result["analysis_status"], "failed")
+        self.assertNotIn("analysis_error", result)
+        self.assertEqual(result["provider_name"], "Proveedor Demo S.L.")
+        self.assertEqual(result["total_amount"], 121.0)
+
+    def test_pipeline_latency_metrics_do_not_alter_valid_result(self):
+        extraction = self._completed_structured_invoice()
+        with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": "invoice-test-model"}), patch.object(
+            svc, "_get_client", return_value=object()
+        ), patch.object(svc, "_extract_pdf_text_from_bytes", return_value="Texto nativo " * 20), patch.object(
+            svc, "_call_invoice_responses", return_value=extraction
+        ), patch.object(svc, "_validate_structured_invoice", return_value=[]), self.assertLogs(
+            svc.logger, level="INFO"
+        ) as logs:
+            result = svc.analyze_invoice(file_bytes=b"%PDF-test", filename="factura.pdf", mime_type="application/pdf")
+        output = "\n".join(logs.output)
+        self.assertEqual(result["total_amount"], 121.0)
+        self.assertIn("document_preprocessing_elapsed_ms=", output)
+        self.assertIn("validation_elapsed_ms=", output)
+        self.assertIn("audit_elapsed_ms=0", output)
+        self.assertIn("invoice_total_elapsed_ms=", output)
 
     def test_cancelled_response_is_not_parsed(self):
         response = type("Response", (), {
