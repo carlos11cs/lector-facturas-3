@@ -722,13 +722,13 @@ class TestAiInvoiceService(unittest.TestCase):
         self.assertAlmostEqual(summary.get("vat_amount"), 245.98, places=2)
         self.assertAlmostEqual(summary.get("total_amount"), 1417.32, places=2)
 
-    def test_tax_summary_overrides_llm(self):
+    def test_tax_summary_overrides_incoherent_llm_result(self):
         summary = svc._extract_tax_summary_from_text(FIXTURE_TEXT)
         base, vat, total, rate, source = svc._apply_tax_summary_override(
             FIXTURE_TEXT,
             971.34,
             245.98,
-            1217.32,
+            1200.00,
             21.0,
             summary,
         )
@@ -1336,6 +1336,30 @@ N° intracommunautaire : ESB05410667"""
         )
         self.assertEqual(len(reasons), 1)
         self.assertIn("no cuadran", reasons[0])
+
+    def test_invoice_math_does_not_allow_percentage_difference(self):
+        validation = svc._validate_math(8018.87, 1683.96, 9702.20)
+        self.assertFalse(validation["is_consistent"])
+
+    def test_invoice_math_accepts_withholding_as_positive_deduction(self):
+        validation = svc._validate_math(2264.15, 475.47, 2400.00, 339.62)
+        self.assertTrue(validation["is_consistent"])
+
+    def test_visual_supplier_needs_literal_evidence_and_cannot_be_customer(self):
+        self.assertTrue(
+            svc._is_valid_visual_supplier(
+                "FILLMED",
+                ["KALOS HEALTH AND BEAUTY S.L."],
+                "Logotipo del emisor: FILLMED",
+            )
+        )
+        self.assertFalse(
+            svc._is_valid_visual_supplier(
+                "KALOS HEALTH AND BEAUTY S.L.",
+                ["KALOS HEALTH AND BEAUTY S.L."],
+                "Cliente: KALOS HEALTH AND BEAUTY S.L.",
+            )
+        )
 
     def test_invoice_date_uses_date_near_invoice_label(self):
         text = """FCFE226090211

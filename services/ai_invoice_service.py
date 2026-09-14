@@ -30,7 +30,11 @@ except ModuleNotFoundError:
 
 logger = logging.getLogger(__name__)
 
+# Financial document extraction needs stronger visual and layout reasoning than
+# the generic assistant features. Keep it independently configurable so a
+# cheaper model can still be used for non-critical helpers.
 DEFAULT_MODEL = os.getenv("OPENAI_CHAT_MODEL", os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini"))
+INVOICE_MODEL = os.getenv("OPENAI_INVOICE_MODEL", "gpt-4.1")
 MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "500"))
 PDF_TEXT_THRESHOLD = int(os.getenv("PDF_TEXT_THRESHOLD", "100"))
 PDF_OCR_ZOOM = float(os.getenv("PDF_OCR_ZOOM", "2.0"))
@@ -39,6 +43,10 @@ OCR_MAX_SECONDS = int(os.getenv("OCR_MAX_SECONDS", "7"))
 OCR_MAX_DIM = int(os.getenv("OCR_MAX_DIM", "1600"))
 OCR_TIMEOUT_SECONDS = 60
 LLM_TIMEOUT_SECONDS = 60
+INVOICE_VISION_MAX_PAGES = max(1, int(os.getenv("OPENAI_INVOICE_VISION_MAX_PAGES", "2")))
+INVOICE_VISION_MAX_DIMENSION = max(
+    900, int(os.getenv("OPENAI_INVOICE_VISION_MAX_DIMENSION", "1400"))
+)
 _client: Optional[OpenAI] = None
 _ocr_reader = None
 _EU_AMOUNT_RE = re.compile(r"\d{1,3}(?:[.\s]\d{3})*,\d{2}|\d+,\d{2}")
@@ -1641,6 +1649,7 @@ def _apply_tax_summary_override(
     total_amount: Optional[float],
     vat_rate: Optional[float],
     summary: Optional[Dict[str, Any]],
+    withholding_amount: Optional[float] = None,
 ) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float], str]:
     source = "llm"
     if not summary or not summary.get("found"):
@@ -1675,7 +1684,15 @@ def _apply_tax_summary_override(
         and summary_total is not None
         and within_tolerance(summary_base + summary_vat, summary_total)
     )
-    llm_math_ok = _validate_math(base_amount, vat_amount, total_amount).get("is_consistent")
+    llm_math_ok = _validate_math(
+        base_amount, vat_amount, total_amount, withholding_amount
+    ).get("is_consistent")
+
+    # A complete and coherent result read from the visual document is more
+    # reliable than a flattened text table. Regex is a validator/fallback, not
+    # the decision-maker for invoice amounts.
+    if llm_math_ok:
+        return base_amount, vat_amount, total_amount, vat_rate, source
 
     if (
         summary_base_raw
@@ -2244,6 +2261,37 @@ def _is_valid_supplier(
     if require_tax_id and text and not has_form and not (has_tax or inline_tax):
         return False
     return True
+
+
+def _is_valid_visual_supplier(
+    candidate: Optional[str],
+    company_names,
+    evidence: Optional[str],
+) -> bool:
+    """Allow an issuer visible only in a document header or logo.
+
+    Some supplier names are not embedded in a PDF text layer. They may still
+    be unambiguous in the visual header (for example, a registered brand). We
+    only accept this narrower path when the model returns literal evidence and
+    the candidate cannot be the registered customer company.
+    """
+    if candidate is None or not evidence:
+        return False
+    value = _trim_company_name(str(candidate).strip())
+    if not value or contains_forbidden_keyword(value):
+        return False
+    if _looks_like_address_line(value) or _looks_like_legal_or_footer_text(value):
+        return False
+    if _is_same_entity(value, company_names):
+        return False
+    normalized_value = _normalize_entity_name(value)
+    normalized_evidence = _normalize_entity_name(str(evidence))
+    meaningful_tokens = re.findall(r"[A-Za-zÀ-ÿ]{3,}", value)
+    return bool(
+        meaningful_tokens
+        and normalized_value
+        and normalized_value in normalized_evidence
+    )
 
 
 def _looks_like_metadata(line: str) -> bool:
@@ -2817,7 +2865,10 @@ def _validate_math(
         return {"is_consistent": None, "difference": None}
     withholding = max(float(withholding_amount or 0), 0)
     difference = round((base_amount + vat_amount - withholding) - total_amount, 2)
-    tolerance = max(0.05, total_amount * 0.01)
+    # Invoice totals are exact monetary values. A percentage tolerance could
+    # silently accept a wrong total on high-value invoices; only permit normal
+    # rounding differences.
+    tolerance = 0.05
     return {
         "is_consistent": abs(difference) <= tolerance,
         "difference": difference,
@@ -3217,6 +3268,7 @@ def _force_tax_summary_result_if_available(
     amount_source: Optional[str],
     breakdown_warning: bool,
     tax_summary: Optional[Dict[str, Any]],
+    withholding_amount: Optional[float] = None,
 ) -> Dict[str, Any]:
     if not isinstance(tax_summary, dict) or not tax_summary.get("found"):
         return {
@@ -3253,7 +3305,8 @@ def _force_tax_summary_result_if_available(
         base_amount is not None
         and vat_amount is not None
         and total_amount is not None
-        and abs((base_amount + vat_amount) - total_amount) <= 0.02
+        and abs((base_amount + vat_amount - max(float(withholding_amount or 0), 0)) - total_amount)
+        <= 0.02
     )
 
     should_force_summary = summary_is_complete and (
@@ -3383,23 +3436,45 @@ def _extract_pdf_text_from_bytes(data: bytes) -> str:
         return "\n".join(parts).strip()
 
 
-def _render_first_pdf_page_for_vision(data: bytes) -> Optional[str]:
-    """Render one compact page only when the issuer is absent from PDF text."""
+def _render_document_pages_for_vision(
+    data: bytes,
+    *,
+    is_pdf: bool,
+    mime_type: Optional[str] = None,
+) -> List[str]:
+    """Return compact document pages for the invoice model to inspect visually."""
+    if not data:
+        return []
+    if not is_pdf:
+        image_mime = mime_type if mime_type in {"image/jpeg", "image/png"} else "image/png"
+        return [
+            f"data:{image_mime};base64,"
+            + base64.b64encode(data).decode("ascii")
+        ]
     if fitz is None:
-        return None
+        return []
     try:
+        images = []
         with fitz.open(stream=data, filetype="pdf") as doc:
-            if not doc:
-                return None
-            page = doc[0]
-            max_dimension = max(page.rect.width, page.rect.height, 1)
-            scale = min(1.5, 1200 / max_dimension)
-            pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
-            image_data = pixmap.tobytes("png")
-        return "data:image/png;base64," + base64.b64encode(image_data).decode("ascii")
+            for page_number in range(min(len(doc), INVOICE_VISION_MAX_PAGES)):
+                page = doc[page_number]
+                max_dimension = max(page.rect.width, page.rect.height, 1)
+                scale = min(2.0, INVOICE_VISION_MAX_DIMENSION / max_dimension)
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+                image_data = pixmap.tobytes("png")
+                images.append(
+                    "data:image/png;base64," + base64.b64encode(image_data).decode("ascii")
+                )
+        return images
     except Exception as exc:
-        logger.warning("No se pudo preparar la primera pagina para vision: %s", exc)
-        return None
+        logger.warning("No se pudo preparar el documento para vision: %s", exc)
+        return []
+
+
+def _render_first_pdf_page_for_vision(data: bytes) -> Optional[str]:
+    """Backward-compatible helper for callers that only need page one."""
+    pages = _render_document_pages_for_vision(data, is_pdf=True)
+    return pages[0] if pages else None
 
 
 def _get_ocr_reader():
@@ -3732,16 +3807,14 @@ def analyze_invoice(
     is_rent_expense = document_type == "expense_rent"
     is_payroll_expense = document_type == "expense_payroll"
     is_other_expense = document_type == "expense_other"
-    needs_visual_supplier_check = (
-        is_pdf
-        and not is_income
-        and analysis_status == "ok"
-        and _extract_supplier_from_text(extracted_text, company_names) is None
-    )
+    # The visual document is the primary extraction source. PDF text order is
+    # frequently unrelated to its visual layout and may omit logos, headers or
+    # columns where the issuer and fiscal totals are shown.
+    needs_visual_document_check = (is_pdf or is_image) and analysis_status == "ok"
     logger.info(
-        "Comprobacion de emisor (%s): visual=%s",
+        "Analisis documental multimodal (%s): visual=%s",
         filename,
-        needs_visual_supplier_check,
+        needs_visual_document_check,
     )
     if is_income:
         prompt = (
@@ -3832,37 +3905,50 @@ def analyze_invoice(
             f"TEXTO_FACTURA:\n{extracted_text}"
         )
 
+    prompt += (
+        "\n\nREGLAS DE EXTRACCION: La imagen adjunta es el documento original y es la "
+        "fuente principal; el texto extraido solo sirve como apoyo porque puede estar "
+        "desordenado. Lee el encabezado, las tablas y el pie visualmente. No confundas "
+        "al cliente, destinatario o dirección de entrega con el emisor/proveedor. No "
+        "inventes ningún IVA, retención, fecha ni importe: usa null si no aparece de forma "
+        "inequívoca. Para una factura recibida, total = base + IVA - retención. La retención "
+        "siempre se devuelve como importe positivo. Comprueba internamente esa ecuación "
+        "antes de responder. Incluye evidence como objeto opcional con textos breves "
+        "literales del documento para supplier, invoice_date y totals."
+    )
     messages = [{"role": "user", "content": prompt}]
-    if needs_visual_supplier_check:
-        document_image = _render_first_pdf_page_for_vision(file_bytes)
-        if document_image:
-            prompt += (
-                "\n\nLa imagen adjunta es la primera pagina del PDF. El texto extraible no "
-                "incluye claramente al emisor: usala solo para identificar su razon social, "
-                "logotipo o datos fiscales visibles. Nunca uses como supplier al cliente, "
-                "destinatario o empresa receptora. Si el emisor no es inequívoco, devuelve null."
+    if needs_visual_document_check:
+        document_images = _render_document_pages_for_vision(
+            file_bytes,
+            is_pdf=is_pdf,
+            mime_type=mime_type,
+        )
+        if document_images:
+            content = [{"type": "text", "text": prompt}]
+            for page_number, document_image in enumerate(document_images, start=1):
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": document_image, "detail": "high"},
+                    }
+                )
+            messages = [{"role": "user", "content": content}]
+            logger.info(
+                "Se adjuntan %s pagina(s) al analisis visual (%s).",
+                len(document_images),
+                filename,
             )
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": document_image, "detail": "low"}},
-                    ],
-                }
-            ]
-            logger.info("Se añade comprobacion visual del emisor (%s).", filename)
 
     logger.info("Prompt enviado (%s): %s", filename, prompt)
 
     def _call_llm():
         return client.chat.completions.create(
-            model=DEFAULT_MODEL,
+            model=INVOICE_MODEL,
             max_tokens=MAX_OUTPUT_TOKENS,
             temperature=0,
             top_p=1,
-            seed=42,
             timeout=LLM_TIMEOUT_SECONDS,
+            response_format={"type": "json_object"},
             messages=messages,
         )
 
@@ -3901,6 +3987,12 @@ def analyze_invoice(
         or data.get("proveedor")
         or data.get("provider_name")
         or data.get("provider")
+    )
+    evidence_payload = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
+    supplier_evidence = _pick_first_non_empty(
+        evidence_payload.get("supplier"),
+        evidence_payload.get("provider"),
+        evidence_payload.get("emisor"),
     )
     client_name = (
         data.get("client")
@@ -4042,7 +4134,12 @@ def analyze_invoice(
         if provider_name is not None and not _is_valid_supplier(
             provider_name, company_names, supplier_source_text, require_tax_id=False
         ):
-            provider_name = None
+            if not _is_valid_visual_supplier(
+                provider_name,
+                company_names,
+                supplier_evidence,
+            ):
+                provider_name = None
         if provider_name is None and analysis_status == "ok":
             learned_supplier = _match_known_supplier(
                 supplier_source_text, known_suppliers, company_names
@@ -4136,6 +4233,7 @@ def analyze_invoice(
         total_amount,
         vat_rate,
         tax_summary,
+        withholding_amount,
     )
     if summary_source != "llm":
         amount_source = summary_source
@@ -4205,6 +4303,7 @@ def analyze_invoice(
         amount_source,
         bool(breakdown_warning),
         tax_summary,
+        withholding_amount,
     )
     analysis_status = forced_summary.get("analysis_status") or analysis_status
     base_amount = forced_summary.get("base_amount")
