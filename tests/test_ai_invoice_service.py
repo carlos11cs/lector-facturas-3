@@ -1396,7 +1396,10 @@ N° intracommunautaire : ESB05410667"""
                 self.responses = FakeResponses()
 
         client = FakeClient()
-        with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": "invoice-test-model"}):
+        with patch.dict(os.environ, {
+            "OPENAI_INVOICE_MODEL": "invoice-test-model",
+            "OPENAI_INVOICE_MAX_OUTPUT_TOKENS": "4096",
+        }):
             svc._call_invoice_responses(
                 client,
                 file_bytes=b"%PDF-test",
@@ -1407,6 +1410,7 @@ N° intracommunautaire : ESB05410667"""
             )
         request = client.responses.kwargs
         self.assertEqual(request["model"], "invoice-test-model")
+        self.assertEqual(request["max_output_tokens"], 4096)
         self.assertEqual(request["text"]["format"]["type"], "json_schema")
         self.assertTrue(request["text"]["format"]["strict"])
         self.assertTrue(any(item["type"] == "input_file" for item in request["input"][0]["content"]))
@@ -1463,6 +1467,14 @@ N° intracommunautaire : ESB05410667"""
         with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": "custom-invoice-model"}):
             self.assertEqual(svc._get_invoice_model(), "custom-invoice-model")
 
+    def test_invoice_max_output_tokens_defaults_to_32768(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(svc._get_invoice_max_output_tokens(), 32768)
+
+    def test_invoice_max_output_tokens_comes_from_environment(self):
+        with patch.dict(os.environ, {"OPENAI_INVOICE_MAX_OUTPUT_TOKENS": "16384"}):
+            self.assertEqual(svc._get_invoice_max_output_tokens(), 16384)
+
     def test_default_model_for_non_invoice_features_is_unchanged(self):
         expected = os.getenv("OPENAI_CHAT_MODEL", os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini"))
         self.assertEqual(svc.DEFAULT_MODEL, expected)
@@ -1490,6 +1502,25 @@ N° intracommunautaire : ESB05410667"""
                 self._call_responses_for_status(response)
         self.assertEqual(context.exception.status, "incomplete")
         self.assertEqual(context.exception.detail, "max_output_tokens")
+
+    def test_response_usage_handles_present_and_missing_usage(self):
+        present = type("Response", (), {
+            "usage": {
+                "input_tokens": 120,
+                "output_tokens": 340,
+                "output_tokens_details": {"reasoning_tokens": 200},
+                "total_tokens": 460,
+            },
+        })()
+        missing = type("Response", (), {})()
+        self.assertEqual(
+            svc._response_usage_values(present),
+            {"input_tokens": 120, "output_tokens": 340, "reasoning_tokens": 200, "total_tokens": 460},
+        )
+        self.assertEqual(
+            svc._response_usage_values(missing),
+            {"input_tokens": None, "output_tokens": None, "reasoning_tokens": None, "total_tokens": None},
+        )
 
     def test_cancelled_response_is_not_parsed(self):
         response = type("Response", (), {
@@ -1533,6 +1564,19 @@ N° intracommunautaire : ESB05410667"""
         self.assertEqual(result["analysis_status"], "failed")
         self.assertEqual(result["analysis_error"]["status"], "failed")
         self.assertEqual(call_responses.call_count, 1)
+
+    def test_incomplete_initial_response_does_not_trigger_ocr_or_audit(self):
+        failure = svc.InvoiceAnalysisResponseError("incomplete", "max_output_tokens")
+        with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": "invoice-test-model"}), patch.object(
+            svc, "_get_client", return_value=object()
+        ), patch.object(svc, "_extract_pdf_text_from_bytes", return_value=""), patch.object(
+            svc, "_extract_pdf_text_ocr_from_bytes", side_effect=AssertionError("OCR must not run")
+        ) as ocr, patch.object(svc, "_call_invoice_responses", side_effect=failure) as call_responses:
+            result = svc.analyze_invoice(file_bytes=b"%PDF-test", filename="factura.pdf", mime_type="application/pdf")
+        self.assertEqual(result["analysis_status"], "failed")
+        self.assertEqual(result["analysis_error"]["status"], "incomplete")
+        self.assertEqual(call_responses.call_count, 1)
+        ocr.assert_not_called()
 
     def test_invoice_date_uses_date_near_invoice_label(self):
         text = """FCFE226090211

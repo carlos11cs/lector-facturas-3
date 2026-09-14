@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 # Generic assistant features keep using DEFAULT_MODEL below.
 DEFAULT_MODEL = os.getenv("OPENAI_CHAT_MODEL", os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini"))
 MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "500"))
+DEFAULT_INVOICE_MAX_OUTPUT_TOKENS = 32768
 PDF_TEXT_THRESHOLD = int(os.getenv("PDF_TEXT_THRESHOLD", "100"))
 PDF_OCR_ZOOM = float(os.getenv("PDF_OCR_ZOOM", "2.0"))
 OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", "5"))
@@ -66,6 +67,17 @@ def _get_invoice_model() -> str:
     if not model:
         raise RuntimeError("OPENAI_INVOICE_MODEL is not configured")
     return model
+
+
+def _get_invoice_max_output_tokens() -> int:
+    configured = os.getenv("OPENAI_INVOICE_MAX_OUTPUT_TOKENS", str(DEFAULT_INVOICE_MAX_OUTPUT_TOKENS)).strip()
+    try:
+        value = int(configured)
+    except ValueError as exc:
+        raise RuntimeError("OPENAI_INVOICE_MAX_OUTPUT_TOKENS must be a positive integer") from exc
+    if value <= 0:
+        raise RuntimeError("OPENAI_INVOICE_MAX_OUTPUT_TOKENS must be a positive integer")
+    return value
 
 
 def _ocr_is_enabled() -> bool:
@@ -3838,16 +3850,41 @@ def _response_has_refusal(response: Any) -> bool:
     return False
 
 
+def _response_usage_values(response: Any) -> Dict[str, Optional[int]]:
+    usage = _response_value(response, "usage") or {}
+    output_details = _response_value(usage, "output_tokens_details") or {}
+    return {
+        "input_tokens": _response_value(usage, "input_tokens"),
+        "output_tokens": _response_value(usage, "output_tokens"),
+        "reasoning_tokens": _response_value(output_details, "reasoning_tokens"),
+        "total_tokens": _response_value(usage, "total_tokens"),
+    }
+
+
+def _log_invoice_response_usage(response: Any, *, status: Any, max_output_tokens: int) -> None:
+    usage = _response_usage_values(response)
+    logger.info(
+        "OpenAI Responses invoice usage: response_status=%s input_tokens=%s output_tokens=%s reasoning_tokens=%s total_tokens=%s max_output_tokens=%s",
+        status,
+        usage["input_tokens"],
+        usage["output_tokens"],
+        usage["reasoning_tokens"],
+        usage["total_tokens"],
+        max_output_tokens,
+    )
+
+
 def _call_invoice_responses(client, *, file_bytes: bytes, filename: str, mime_type: str, extracted_text: str, prompt: str, audit_issues: Optional[List[str]] = None) -> Dict[str, Any]:
     if audit_issues:
         prompt += "\n\nREVISIÓN LIMITADA: corrige solo estas discrepancias: " + " | ".join(audit_issues)
     started = time.monotonic()
     model = _get_invoice_model()
+    max_output_tokens = _get_invoice_max_output_tokens()
     try:
         response = client.responses.create(
             model=model,
             reasoning={"effort": "high"},
-            max_output_tokens=max(MAX_OUTPUT_TOKENS, 2500),
+            max_output_tokens=max_output_tokens,
             store=False,
             input=_response_input_for_invoice(file_bytes, filename, mime_type, extracted_text, prompt),
             text={"format": {"type": "json_schema", "name": "invoice_extraction", "strict": True, "schema": INVOICE_EXTRACTION_SCHEMA}},
@@ -3857,11 +3894,17 @@ def _call_invoice_responses(client, *, file_bytes: bytes, filename: str, mime_ty
         logger.warning("OpenAI Responses invoice API error: type=%s", type(exc).__name__)
         raise InvoiceAnalysisResponseError("api_error", type(exc).__name__) from exc
     status = _response_value(response, "status")
+    _log_invoice_response_usage(response, status=status, max_output_tokens=max_output_tokens)
     if status != "completed":
         error = _response_value(response, "error") or {}
         incomplete = _response_value(response, "incomplete_details") or {}
         detail = _response_value(error, "code") or _response_value(incomplete, "reason") or status or "unknown"
-        logger.warning("OpenAI Responses invoice response_status=%s detail=%s refusal=false", status, detail)
+        logger.warning(
+            "OpenAI Responses invoice response_status=%s detail=%s refusal=false max_output_tokens=%s",
+            status,
+            detail,
+            max_output_tokens,
+        )
         raise InvoiceAnalysisResponseError(str(status or "unknown"), str(detail))
     if _response_has_refusal(response):
         logger.warning("OpenAI Responses invoice response_status=completed response_refusal=true")
