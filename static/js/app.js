@@ -105,7 +105,8 @@ const VAT_WARNING_MESSAGE =
 const REVIEW_REQUIRED_MESSAGE =
   "Revisión requerida antes de guardar: la lectura automática no tiene evidencia suficiente para todos los campos.";
 const ANALYSIS_MAX_CONCURRENCY = 1;
-const ANALYSIS_PENDING_TIMEOUT_MS = 70 * 1000;
+// Must outlive the server-side 600 s analysis limit and exclude queue time.
+const ANALYSIS_PENDING_TIMEOUT_MS = 610 * 1000;
 
 const analysisTaskQueue = [];
 let activeAnalysisTasks = 0;
@@ -169,6 +170,7 @@ function processAnalysisQueue() {
     }
     activeAnalysisTasks += 1;
     task.item.analysisQueued = false;
+    scheduleAnalysisTimeout(task.item, task.render);
     if (typeof task.render === "function") {
       task.render();
     }
@@ -186,7 +188,6 @@ function enqueueAnalysisTask(item, run, render) {
   item.analysisPending = true;
   item.analysisQueued = true;
   item._analysisCancelled = false;
-  scheduleAnalysisTimeout(item, render);
   analysisTaskQueue.push({ item, run, render });
   processAnalysisQueue();
 }
