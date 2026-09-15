@@ -1777,6 +1777,16 @@ def normalize_purchase_invoice_amounts(
     return base_amount, vat_amount, total_amount
 
 
+def is_withholding_within_invoice_total(
+    total_amount, withholding_amount, is_rectificativa=False
+):
+    """Validate withholding against the payable amount, preserving credit-note signs."""
+    if total_amount is None:
+        return True
+    limit = abs(float(total_amount)) if is_rectificativa else float(total_amount)
+    return abs(float(withholding_amount or 0)) <= limit
+
+
 def get_current_user_id():
     if getattr(g, "current_user", None):
         return int(g.current_user["id"])
@@ -7524,13 +7534,15 @@ def upload_invoices():
                 if total_amount is None:
                     errors.append(f"Total inválido para {original_name}.")
                     continue
-                if withholding_amount > total_amount:
+                if (base_amount < 0 or total_amount < 0) and not is_rectificativa:
+                    errors.append(f"Factura rectificativa no indicada en {original_name}.")
+                    continue
+                if not is_withholding_within_invoice_total(
+                    total_amount, withholding_amount, is_rectificativa
+                ):
                     errors.append(
                         f"La retención no puede superar el total en {original_name}."
                     )
-                    continue
-                if (base_amount < 0 or total_amount < 0) and not is_rectificativa:
-                    errors.append(f"Factura rectificativa no indicada en {original_name}.")
                     continue
                 if supplier and is_supplier_same_as_company(supplier, company_id, conn):
                     errors.append(
@@ -8882,9 +8894,12 @@ def update_invoice(invoice_id):
                 errors.append("El proveedor no puede ser la empresa activa.")
     if base_amount is None and total_amount is None:
         errors.append("Base imponible o total obligatorio.")
-    if base_amount is not None and total_amount is not None:
-        if (base_amount < 0 or total_amount < 0) and not is_rectificativa:
-            errors.append("Factura rectificativa no indicada.")
+    has_negative_amount = bool(
+        (base_amount is not None and base_amount < 0)
+        or (total_amount is not None and total_amount < 0)
+    )
+    if has_negative_amount and not is_rectificativa:
+        errors.append("Factura rectificativa no indicada.")
     if vat_breakdown:
         vat_rate = infer_vat_rate_from_breakdown(vat_breakdown)
         summary = summarize_vat_breakdown(vat_breakdown)
@@ -8906,7 +8921,9 @@ def update_invoice(invoice_id):
         vat_deductible = vat_deductible in (True, "true", "True", 1, "1")
     if expense_category == "non_deductible":
         vat_deductible = False
-    if total_amount is not None and withholding_amount > total_amount:
+    if not (has_negative_amount and not is_rectificativa) and not is_withholding_within_invoice_total(
+        total_amount, withholding_amount, is_rectificativa
+    ):
         errors.append("La retención no puede superar el total.")
 
     if errors:

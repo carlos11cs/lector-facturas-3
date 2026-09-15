@@ -4894,6 +4894,22 @@ function renderTable() {
     calculationLabel.className = "invoice-calculation-label";
     calculationLabel.textContent = "Resumen de cálculo";
     calculation.appendChild(calculationLabel);
+    const rectificativaControl = document.createElement("label");
+    rectificativaControl.className = "invoice-rectificativa-toggle";
+    rectificativaControl.title =
+      "Actívala para una factura rectificativa o abono con importes negativos.";
+    const rectificativaInput = document.createElement("input");
+    rectificativaInput.type = "checkbox";
+    rectificativaInput.checked = Boolean(item.isRectificativa);
+    rectificativaInput.disabled = item.analysisPending;
+    rectificativaInput.addEventListener("change", () => {
+      item.isRectificativa = rectificativaInput.checked;
+    });
+    const rectificativaText = document.createElement("span");
+    rectificativaText.textContent = "Factura rectificativa";
+    rectificativaControl.appendChild(rectificativaInput);
+    rectificativaControl.appendChild(rectificativaText);
+    calculation.appendChild(rectificativaControl);
     const calculationParts = [
       ["base", "Base", item.base],
       ["vatAmount", "IVA", item.vatAmount],
@@ -5960,18 +5976,20 @@ function validatePending() {
     ) {
       errors.push(`IVA pendiente de confirmar: ${item.file.name}`);
     }
-    if (totalValue !== null && withholdingValue > totalValue) {
-      errors.push(`La retención no puede superar el total: ${item.file.name}`);
-    }
-    const isRectificativa =
-      item.isRectificativa ||
+    const isRectificativa = Boolean(item.isRectificativa);
+    const hasNegativeAmount =
       (baseValue !== null && baseValue < 0) ||
       (totalValue !== null && totalValue < 0);
-    if (baseValue !== null && baseValue < 0 && !isRectificativa) {
-      errors.push(`Base imponible inválida: ${item.file.name}`);
+    if (hasNegativeAmount && !isRectificativa) {
+      errors.push(`Marca "Factura rectificativa" para guardar importes negativos: ${item.file.name}`);
     }
-    if (totalValue !== null && totalValue < 0 && !isRectificativa) {
-      errors.push(`Total inválido: ${item.file.name}`);
+    const withholdingLimit = isRectificativa ? Math.abs(totalValue || 0) : totalValue;
+    if (
+      totalValue !== null &&
+      (isRectificativa || !hasNegativeAmount) &&
+      withholdingValue > withholdingLimit
+    ) {
+      errors.push(`La retención no puede superar el total: ${item.file.name}`);
     }
     if (!item.date) {
       errors.push(`Fecha obligatoria: ${item.file.name}`);

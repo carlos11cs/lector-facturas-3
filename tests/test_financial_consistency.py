@@ -1,7 +1,11 @@
 import unittest
 
 try:
-    from app import _split_amount_across_dates, _sum_amount_for_period_dates
+    from app import (
+        _split_amount_across_dates,
+        _sum_amount_for_period_dates,
+        is_withholding_within_invoice_total,
+    )
     APP_IMPORT_ERROR = None
 except Exception as exc:  # pragma: no cover - import guard
     APP_IMPORT_ERROR = exc
@@ -20,6 +24,11 @@ class TestFinancialConsistencyHelpers(unittest.TestCase):
         february_amount = _sum_amount_for_period_dates(190.0, payment_dates, ["2026-02"])
         self.assertEqual(january_amount, 0.0)
         self.assertEqual(february_amount, 190.0)
+
+    def test_rectificative_withholding_uses_absolute_total_limit(self):
+        self.assertTrue(is_withholding_within_invoice_total(-9702.83, 1202.83, True))
+        self.assertFalse(is_withholding_within_invoice_total(-9702.83, 12000.00, True))
+        self.assertFalse(is_withholding_within_invoice_total(100.00, 120.00, False))
 
 
 if __name__ == "__main__":

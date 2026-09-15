@@ -1672,6 +1672,30 @@ h1 {
   margin-right: 4px;
 }
 
+.invoice-rectificativa-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid #c8ddd1;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--text);
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.invoice-rectificativa-toggle input {
+  accent-color: var(--primary);
+}
+
+.invoice-rectificativa-toggle:has(input:checked) {
+  border-color: #e5a45a;
+  background: #fff4e8;
+  color: #8a4b12;
+}
+
 .invoice-calculation-operator {
   color: #8aa194;
   font-weight: 700;
