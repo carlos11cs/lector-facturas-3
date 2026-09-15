@@ -1637,12 +1637,19 @@ N° intracommunautaire : ESB05410667"""
             svc, "_get_client", return_value=object()
         ), patch.object(svc, "_extract_pdf_text_from_bytes", return_value="Texto nativo " * 20), patch.object(
             svc, "_call_invoice_responses", side_effect=[initial, audited]
-        ) as call_responses, patch.object(svc, "_validate_structured_invoice", side_effect=[["revisar"], []]), patch.object(
+        ) as call_responses, patch.object(
+            svc,
+            "_validate_structured_invoice",
+            side_effect=[["La ecuación base + IVA + otros impuestos - retención no cuadra con el total."], []],
+        ), patch.object(
             svc, "_run_with_timeout", side_effect=AssertionError("LLM audit must use the SDK timeout directly")
         ):
             result = svc.analyze_invoice(file_bytes=b"%PDF-test", filename="factura.pdf", mime_type="application/pdf")
         self.assertEqual(call_responses.call_count, 2)
-        self.assertEqual(call_responses.call_args_list[1].kwargs["audit_issues"], ["revisar"])
+        self.assertEqual(
+            call_responses.call_args_list[1].kwargs["audit_issues"],
+            ["La ecuación base + IVA + otros impuestos - retención no cuadra con el total."],
+        )
         self.assertEqual(result["total_amount"], 121.0)
 
     def test_valid_invoice_does_not_trigger_audit(self):
@@ -1767,6 +1774,19 @@ DIRECCION DE ENTREGA"""
         )
 
         self.assertEqual(payment_dates, ["2026-10-10", "2026-11-10"])
+
+    def test_only_critical_accounting_issues_trigger_second_invoice_audit(self):
+        self.assertFalse(
+            svc._requires_invoice_audit(["La suma de líneas no coincide con la base imponible."])
+        )
+        self.assertFalse(
+            svc._requires_invoice_audit(["Existe un campo importante con baja confianza."])
+        )
+        self.assertTrue(
+            svc._requires_invoice_audit(
+                ["La ecuación base + IVA + otros impuestos - retención no cuadra con el total."]
+            )
+        )
 
 
 if __name__ == "__main__":

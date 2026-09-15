@@ -3850,6 +3850,16 @@ def _validate_structured_invoice(data: Dict[str, Any], document_type: str) -> Li
     return issues
 
 
+def _requires_invoice_audit(validation_issues: List[str]) -> bool:
+    """Reserve the expensive second pass for missing or inconsistent accounting totals."""
+    critical_issues = {
+        "Falta el total de la factura.",
+        "La ecuación base + IVA + otros impuestos - retención no cuadra con el total.",
+        "El desglose de impuestos no coincide con los totales.",
+    }
+    return any(issue in critical_issues for issue in validation_issues)
+
+
 def _response_input_for_invoice(file_bytes: bytes, filename: str, mime_type: str, extracted_text: str, prompt: str) -> List[Dict[str, Any]]:
     content: List[Dict[str, Any]] = [{"type": "input_text", "text": prompt}]
     data_url = f"data:{mime_type or 'application/octet-stream'};base64," + base64.b64encode(file_bytes).decode("ascii")
@@ -4234,22 +4244,23 @@ def analyze_invoice(
     validation_started = time.monotonic()
     validation_issues = _validate_structured_invoice(structured_data, document_type)
     validation_elapsed_ms = round((time.monotonic() - validation_started) * 1000)
-    audit_performed = bool(validation_issues)
+    audit_performed = _requires_invoice_audit(validation_issues)
     logger.info(
-        "Invoice validation: validation_elapsed_ms=%s issues=%s audit=%s",
+        "Invoice validation: validation_elapsed_ms=%s issues=%s audit=%s issues_detail=%s",
         validation_elapsed_ms,
         len(validation_issues),
         audit_performed,
+        validation_issues,
     )
     audit_elapsed_ms = 0
-    if validation_issues and (is_pdf or is_image) and not extracted_text:
+    if audit_performed and (is_pdf or is_image) and not extracted_text:
         ocr_function = _extract_pdf_text_ocr_from_bytes if is_pdf else _extract_image_text_ocr_from_bytes
         ocr_text, ocr_timed_out = _run_with_timeout(ocr_function, OCR_TIMEOUT_SECONDS, file_bytes)
         if not ocr_timed_out and ocr_text:
             extracted_text = _normalize_ocr_amount_text(ocr_text)
             used_ocr = True
             logger.info("OCR usado como fallback de auditoría (%s).", filename)
-    if validation_issues:
+    if audit_performed:
         audit_started = time.monotonic()
         try:
             audited_data = _call_invoice_responses(
