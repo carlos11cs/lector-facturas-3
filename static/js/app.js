@@ -37,6 +37,7 @@ let currentBalanceManualData = {};
 let currentDocumentBatches = [];
 let currentDocumentCenterDocuments = [];
 let currentAccountingIntegrationSummary = null;
+let currentAccountingImportPreview = null;
 let currentArchiveRecords = [];
 let selectedDocumentBatchId = "";
 let selectedDocumentCenterDocumentId = null;
@@ -134,8 +135,17 @@ function abortPendingAnalysis(item) {
     clearTimeout(item._analysisTimeoutId);
     item._analysisTimeoutId = null;
   }
+  if (item._analysisPollTimeoutId) {
+    clearTimeout(item._analysisPollTimeoutId);
+    item._analysisPollTimeoutId = null;
+  }
   if (item._analysisController) {
     item._analysisController.abort();
+  }
+  if (item.analysisJobId) {
+    fetch(withCompanyParam(`/api/invoice-analysis-jobs/${item.analysisJobId}`), {
+      method: "DELETE",
+    }).catch(() => undefined);
   }
 }
 
@@ -1342,6 +1352,14 @@ const integrationExportPurchasesBtn = document.getElementById("integrationExport
 const integrationExportSalesBtn = document.getElementById("integrationExportSalesBtn");
 const integrationExportJournalBtn = document.getElementById("integrationExportJournalBtn");
 const integrationExportPackageBtn = document.getElementById("integrationExportPackageBtn");
+const integrationImportSource = document.getElementById("integrationImportSource");
+const integrationImportType = document.getElementById("integrationImportType");
+const integrationImportFile = document.getElementById("integrationImportFile");
+const integrationImportTemplateBtn = document.getElementById("integrationImportTemplateBtn");
+const integrationImportPreviewBtn = document.getElementById("integrationImportPreviewBtn");
+const integrationImportConfirmBtn = document.getElementById("integrationImportConfirmBtn");
+const integrationImportStatus = document.getElementById("integrationImportStatus");
+const integrationImportPreview = document.getElementById("integrationImportPreview");
 const fiscalModelsTableBody = document.getElementById("fiscalModelsTableBody");
 const documentCenterPeriod = document.getElementById("documentCenterPeriod");
 const documentCenterFiles = document.getElementById("documentCenterFiles");
@@ -4246,6 +4264,7 @@ function addFiles(fileList) {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       file,
       originalFilename: file.name,
+      isIncome: false,
       date: new Date().toISOString().slice(0, 10),
       paymentDate: "",
       paymentDates: [],
@@ -4293,6 +4312,7 @@ function addIncomeFiles(fileList) {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       file,
       originalFilename: file.name,
+      isIncome: true,
       date: new Date().toISOString().slice(0, 10),
       paymentDate: "",
       paymentDates: [],
@@ -5299,6 +5319,7 @@ function renderIncomeTable() {
         base: baseInput,
         vat: vatSelect,
         vatAmount: vatAmountInput,
+        withholding: withholdingInput,
         total: totalInput,
       }, "base");
     });
@@ -5325,6 +5346,7 @@ function renderIncomeTable() {
         base: baseInput,
         vat: vatSelect,
         vatAmount: vatAmountInput,
+        withholding: withholdingInput,
         total: totalInput,
       }, "vat");
     });
@@ -5364,10 +5386,44 @@ function renderIncomeTable() {
         base: baseInput,
         vat: vatSelect,
         vatAmount: vatAmountInput,
+        withholding: withholdingInput,
         total: totalInput,
       }, "vatAmount");
     });
     vatAmountTd.appendChild(vatAmountInput);
+
+    const withholdingTd = document.createElement("td");
+    const withholdingInput = document.createElement("input");
+    withholdingInput.type = "text";
+    withholdingInput.min = "0";
+    withholdingInput.placeholder = "0,00";
+    withholdingInput.value = item.withholdingAmount || "";
+    withholdingInput.disabled = item.analysisPending;
+    attachAmountInputBehavior(withholdingInput);
+    withholdingInput.addEventListener("input", () => {
+      item.withholdingAmount = withholdingInput.value;
+      item.touched.withholdingAmount = true;
+      applyVatCalculation(item, {
+        base: baseInput,
+        vat: vatSelect,
+        vatAmount: vatAmountInput,
+        withholding: withholdingInput,
+        total: totalInput,
+      }, "withholding");
+    });
+    withholdingInput.addEventListener("blur", () => {
+      const withholdingAmount = getWithholdingAmount(withholdingInput.value);
+      item.withholdingAmount = formatAmountInput(withholdingAmount);
+      withholdingInput.value = item.withholdingAmount;
+      applyVatCalculation(item, {
+        base: baseInput,
+        vat: vatSelect,
+        vatAmount: vatAmountInput,
+        withholding: withholdingInput,
+        total: totalInput,
+      }, "withholding");
+    });
+    withholdingTd.appendChild(withholdingInput);
 
     const totalTd = document.createElement("td");
     const totalInput = document.createElement("input");
@@ -5385,6 +5441,7 @@ function renderIncomeTable() {
         base: baseInput,
         vat: vatSelect,
         vatAmount: vatAmountInput,
+        withholding: withholdingInput,
         total: totalInput,
       }, "total");
     });
@@ -5413,6 +5470,7 @@ function renderIncomeTable() {
     tr.appendChild(baseTd);
     tr.appendChild(vatTd);
     tr.appendChild(vatAmountTd);
+    tr.appendChild(withholdingTd);
     tr.appendChild(totalTd);
     tr.appendChild(actionsTd);
     incomeUploadTableBody.appendChild(tr);
@@ -5429,6 +5487,7 @@ function renderIncomeTable() {
         const baseCell = document.createElement("td");
         const rateCell = document.createElement("td");
         const vatCell = document.createElement("td");
+        const withholdingCell = document.createElement("td");
         const totalCell = document.createElement("td");
         const actionsCell = document.createElement("td");
         actionsCell.className = "row-actions";
@@ -5518,7 +5577,9 @@ function renderIncomeTable() {
           if (totals) {
             item.base = formatAmountInput(totals.base);
             item.vatAmount = formatAmountInput(totals.vatAmount);
-            item.total = formatAmountInput(totals.total);
+            item.total = formatAmountInput(
+              roundAmount(totals.total - getWithholdingAmount(item.withholdingAmount))
+            );
             baseInput.value = item.base;
             vatAmountInput.value = item.vatAmount;
             totalInput.value = item.total;
@@ -5533,6 +5594,7 @@ function renderIncomeTable() {
         row.appendChild(baseCell);
         row.appendChild(rateCell);
         row.appendChild(vatCell);
+        row.appendChild(withholdingCell);
         row.appendChild(totalCell);
         row.appendChild(actionsCell);
         incomeUploadTableBody.appendChild(row);
@@ -5542,7 +5604,7 @@ function renderIncomeTable() {
     const paymentRow = document.createElement("tr");
     paymentRow.className = "payment-dates-row";
     const paymentCell = document.createElement("td");
-    paymentCell.colSpan = 8;
+    paymentCell.colSpan = 9;
     const paymentWrap = document.createElement("div");
     paymentWrap.className = "payment-dates-wrap";
     const paymentLabel = document.createElement("span");
@@ -5631,7 +5693,9 @@ function renderIncomeTable() {
       if (totals) {
         item.base = formatAmountInput(totals.base);
         item.vatAmount = formatAmountInput(totals.vatAmount);
-        item.total = formatAmountInput(totals.total);
+        item.total = formatAmountInput(
+          roundAmount(totals.total - getWithholdingAmount(item.withholdingAmount))
+        );
         baseInput.value = item.base;
         vatAmountInput.value = item.vatAmount;
         totalInput.value = item.total;
@@ -5643,6 +5707,7 @@ function renderIncomeTable() {
           base: baseInput,
           vat: vatSelect,
           vatAmount: vatAmountInput,
+          withholding: withholdingInput,
           total: totalInput,
         },
         initialSource
@@ -5680,10 +5745,125 @@ function renderIncomeTable() {
   });
 }
 
-function analyzeIncomeForItem(item) {
+function applyIncomeAnalysisResult(item, data) {
   if (item._analysisCancelled || !isPendingUploadItemPresent(item)) {
-    return Promise.resolve();
+    return;
   }
+  if (!data.ok) {
+    item.analysisPending = false;
+    item.analysisQueued = false;
+    item.analysisError = true;
+    item.analysisErrorMessage = ANALYSIS_ERROR_MESSAGE;
+    renderIncomeTable();
+    return;
+  }
+  const extracted = data.extracted || {};
+  item.analysisText = extracted.analysis_text || "";
+  item.analysisStatus = extracted.analysis_status || "ok";
+  const extractedBreakdown = parseVatBreakdown(
+    extracted.vat_breakdown || extracted.vatBreakdown
+  );
+  if (extractedBreakdown.length) {
+    item.vatBreakdown = extractedBreakdown;
+    item.vatBreakdownOpen = extractedBreakdown.length > 1;
+  }
+  if (extracted.breakdown_warning) {
+    item.analysisWarning = VAT_WARNING_MESSAGE;
+    if (!vatWarningDismissedIds.has(item.id)) {
+      showVatWarningModal();
+      vatWarningDismissedIds.add(item.id);
+    }
+  }
+  if (extracted.analysis_status === "needs_review") {
+    item.analysisWarning = extracted.review_reasons?.join(" ") || REVIEW_REQUIRED_MESSAGE;
+  }
+  if (extracted.analysis_status === "low_quality_scan") {
+    item.analysisPending = false;
+    item.analysisQueued = false;
+    item.analysisError = true;
+    item.analysisErrorMessage = LOW_QUALITY_SCAN_MESSAGE;
+    if (!lowQualityDismissedIds.has(item.id)) {
+      showLowQualityModal();
+      lowQualityDismissedIds.add(item.id);
+    }
+    renderIncomeTable();
+    return;
+  }
+  if (extracted.analysis_status === "timeout") {
+    item.analysisPending = false;
+    item.analysisQueued = false;
+    item.analysisError = true;
+    item.analysisErrorMessage = TIMEOUT_MESSAGE;
+    renderIncomeTable();
+    return;
+  }
+  if (extracted.is_rectificativa) {
+    item.isRectificativa = true;
+  }
+  const detectedClient = extracted.client_name || extracted.client;
+
+  if (!item.touched.client && detectedClient) {
+    item.client = detectedClient;
+  }
+  if (!item.touched.date && extracted.invoice_date) {
+    item.date = extracted.invoice_date;
+  }
+  if (Array.isArray(extracted.payment_dates) && extracted.payment_dates.length) {
+    item.paymentDates = extracted.payment_dates.slice();
+  }
+  if (!item.paymentDate) {
+    const primaryDate = item.paymentDates[0] || extracted.payment_date;
+    item.paymentDate = computePaymentDate(item.date, primaryDate);
+  }
+  if (!item.touched.base && extracted.base_amount !== null && extracted.base_amount !== undefined) {
+    item.base = String(extracted.base_amount);
+  }
+  if (!item.touched.vat) {
+    const detectedVat = normalizeVatRateValue(extracted.vat_rate);
+    if (detectedVat !== null) {
+      item.vat = detectedVat;
+    }
+  }
+  if (
+    !item.touched.vatAmount &&
+    extracted.vat_amount !== null &&
+    extracted.vat_amount !== undefined
+  ) {
+    item.vatAmount = String(extracted.vat_amount);
+  }
+  if (!item.touched.total && extracted.total_amount !== null && extracted.total_amount !== undefined) {
+    item.total = String(extracted.total_amount);
+  }
+
+  const normalizedAmounts = normalizeInvoiceAmounts(item);
+  if (!item.touched.base && normalizedAmounts.base) {
+    item.base = normalizedAmounts.base;
+  }
+  if (!item.touched.vatAmount && normalizedAmounts.vatAmount) {
+    item.vatAmount = normalizedAmounts.vatAmount;
+  }
+  if (!item.touched.total && normalizedAmounts.total) {
+    item.total = normalizedAmounts.total;
+  }
+
+  item.analysisPending = false;
+  item.analysisQueued = false;
+  const hasExtractedValue = [
+    detectedClient,
+    extracted.invoice_date,
+    extracted.base_amount,
+    extracted.vat_rate,
+    extracted.vat_amount,
+    extracted.total_amount,
+    extracted.vat_breakdown,
+    extracted.totals,
+  ].some((value) => value !== null && value !== undefined && value !== "");
+  item.analysisError = !hasExtractedValue && !item.analysisText;
+  item.analysisErrorMessage = item.analysisError ? ANALYSIS_ERROR_MESSAGE : "";
+  renderIncomeTable();
+}
+
+function analyzeIncomeForItemDirect(item) {
   const formData = new FormData();
   formData.append("file", item.file);
   formData.append("document_type", "income");
@@ -5693,150 +5873,18 @@ function analyzeIncomeForItem(item) {
   }
   const controller = new AbortController();
   item._analysisController = controller;
-
   return fetch("/api/analyze-invoice", {
     method: "POST",
     body: formData,
     signal: controller.signal,
   })
     .then((res) => res.json())
-    .then((data) => {
-      if (item._analysisCancelled || !isPendingUploadItemPresent(item)) {
-        return;
-      }
-      if (!data.ok) {
-        item.analysisPending = false;
-        item.analysisQueued = false;
-        item.analysisError = true;
-        item.analysisErrorMessage = ANALYSIS_ERROR_MESSAGE;
-        renderIncomeTable();
-        return;
-      }
-      const extracted = data.extracted || {};
-      item.analysisText = extracted.analysis_text || "";
-      item.analysisStatus = extracted.analysis_status || "ok";
-      const extractedBreakdown = parseVatBreakdown(
-        extracted.vat_breakdown || extracted.vatBreakdown
-      );
-      if (extractedBreakdown.length) {
-        item.vatBreakdown = extractedBreakdown;
-        item.vatBreakdownOpen = extractedBreakdown.length > 1;
-      }
-      if (extracted.breakdown_warning) {
-        item.analysisWarning = VAT_WARNING_MESSAGE;
-        if (!vatWarningDismissedIds.has(item.id)) {
-          showVatWarningModal();
-          vatWarningDismissedIds.add(item.id);
-        }
-      }
-      if (extracted.analysis_status === "needs_review") {
-        item.analysisWarning = extracted.review_reasons?.join(" ") || REVIEW_REQUIRED_MESSAGE;
-      }
-      if (extracted.analysis_status === "low_quality_scan") {
-        item.analysisPending = false;
-        item.analysisQueued = false;
-        item.analysisError = true;
-        item.analysisErrorMessage = LOW_QUALITY_SCAN_MESSAGE;
-        if (!lowQualityDismissedIds.has(item.id)) {
-          showLowQualityModal();
-          lowQualityDismissedIds.add(item.id);
-        }
-        renderIncomeTable();
-        return;
-      }
-      if (extracted.analysis_status === "timeout") {
-        item.analysisPending = false;
-        item.analysisQueued = false;
-        item.analysisError = true;
-        item.analysisErrorMessage = TIMEOUT_MESSAGE;
-        renderIncomeTable();
-        return;
-      }
-      if (extracted.is_rectificativa) {
-        item.isRectificativa = true;
-      }
-      const detectedClient = extracted.client_name || extracted.client;
-
-      if (!item.touched.client && detectedClient) {
-        item.client = detectedClient;
-      }
-      if (!item.touched.date && extracted.invoice_date) {
-        item.date = extracted.invoice_date;
-      }
-      if (Array.isArray(extracted.payment_dates) && extracted.payment_dates.length) {
-        item.paymentDates = extracted.payment_dates.slice();
-      }
-      if (!item.paymentDate) {
-        const primaryDate = item.paymentDates[0] || extracted.payment_date;
-        item.paymentDate = computePaymentDate(item.date, primaryDate);
-      }
-      if (!item.touched.base && extracted.base_amount !== null && extracted.base_amount !== undefined) {
-        item.base = String(extracted.base_amount);
-      }
-      if (!item.touched.vat) {
-        const detectedVat = normalizeVatRateValue(extracted.vat_rate);
-        if (detectedVat !== null) {
-          item.vat = detectedVat;
-        }
-      }
-      if (
-        !item.touched.vatAmount &&
-        extracted.vat_amount !== null &&
-        extracted.vat_amount !== undefined
-      ) {
-        item.vatAmount = String(extracted.vat_amount);
-      }
-      if (!item.touched.total && extracted.total_amount !== null && extracted.total_amount !== undefined) {
-        item.total = String(extracted.total_amount);
-      }
-
-      const normalizedAmounts = normalizeInvoiceAmounts(item);
-      if (!item.touched.base && normalizedAmounts.base) {
-        item.base = normalizedAmounts.base;
-      }
-      if (!item.touched.vatAmount && normalizedAmounts.vatAmount) {
-        item.vatAmount = normalizedAmounts.vatAmount;
-      }
-      if (!item.touched.total && normalizedAmounts.total) {
-        item.total = normalizedAmounts.total;
-      }
-
-      item.analysisPending = false;
-      item.analysisQueued = false;
-      const hasExtractedValue = [
-        detectedClient,
-        extracted.invoice_date,
-        extracted.base_amount,
-        extracted.vat_rate,
-        extracted.vat_amount,
-        extracted.total_amount,
-        extracted.vat_breakdown,
-        extracted.totals,
-      ].some((value) => value !== null && value !== undefined && value !== "");
-      item.analysisError = !hasExtractedValue && !item.analysisText;
-      item.analysisErrorMessage = item.analysisError ? ANALYSIS_ERROR_MESSAGE : "";
-      renderIncomeTable();
-    })
+    .then((data) => applyIncomeAnalysisResult(item, data))
     .catch((error) => {
-      if (error && error.name === "AbortError") {
-        return;
-      }
-      if (item._analysisCancelled || !isPendingUploadItemPresent(item)) {
-        return;
-      }
-      item.analysisPending = false;
-      item.analysisQueued = false;
-      item.analysisError = true;
-      item.analysisErrorMessage = ANALYSIS_ERROR_MESSAGE;
-      renderIncomeTable();
+      if (error && error.name === "AbortError") return;
+      markPersistentAnalysisError(item, renderIncomeTable);
     })
-    .finally(() => {
-      if (item._analysisTimeoutId) {
-        clearTimeout(item._analysisTimeoutId);
-        item._analysisTimeoutId = null;
-      }
-      item._analysisController = null;
-    });
+    .finally(() => clearAnalysisRequestState(item));
 }
 
 function validateIncomePending() {
@@ -5918,7 +5966,10 @@ function uploadIncomePending() {
           ? getPrimaryVatRateFromBreakdown(breakdownPayload)
           : normalizeVatRateValue(item.vat),
         vatAmount: breakdownTotals ? breakdownTotals.vatAmount : normalized.vatAmount || item.vatAmount,
-        total: breakdownTotals ? breakdownTotals.total : normalized.total || item.total,
+        withholdingAmount: getWithholdingAmount(item.withholdingAmount),
+        total: breakdownTotals
+          ? roundAmount(breakdownTotals.total - getWithholdingAmount(item.withholdingAmount))
+          : normalized.total || item.total,
         vatBreakdown: breakdownPayload,
         companyId: getSelectedCompanyId(),
       };
@@ -5938,7 +5989,9 @@ function uploadIncomePending() {
         alert((data.errors || ["Error al guardar."]).join("\n"));
         return;
       }
+      const completedItems = pendingIncomeFiles.slice();
       pendingIncomeFiles = [];
+      consumePersistentAnalysisJobs(completedItems);
       renderIncomeTable();
       refreshIncomeInvoices();
       refreshPayments();
@@ -6169,39 +6222,11 @@ function getExpenseOperationPayload(item) {
   };
 }
 
-function analyzeInvoiceForItem(item) {
+function applyInvoiceAnalysisResult(item, data) {
   if (item._analysisCancelled || !isPendingUploadItemPresent(item)) {
-    return Promise.resolve();
+    return;
   }
-  const formData = new FormData();
-  formData.append("file", item.file);
-  const expenseUploadKind = item.expenseUploadKind || getExpenseUploadKind();
-  const expenseDocumentType =
-    expenseUploadKind === "received"
-      ? "expense"
-      : expenseUploadKind === "rent"
-        ? "expense_rent"
-        : expenseUploadKind === "payroll"
-          ? "expense_payroll"
-          : "expense_other";
-  formData.append("document_type", expenseDocumentType);
-  const companyId = getSelectedCompanyId();
-  if (companyId) {
-    formData.append("company_id", companyId);
-  }
-  const controller = new AbortController();
-  item._analysisController = controller;
-
-  return fetch("/api/analyze-invoice", {
-    method: "POST",
-    body: formData,
-    signal: controller.signal,
-  })
-    .then((res) => res.json())
-    .then((data) => {
-      if (item._analysisCancelled || !isPendingUploadItemPresent(item)) {
-        return;
-      }
+  {
       if (!data.ok) {
         item.analysisPending = false;
         item.analysisQueued = false;
@@ -6374,27 +6399,265 @@ function analyzeInvoiceForItem(item) {
       item.analysisError = !hasExtractedValue && !item.analysisText;
       item.analysisErrorMessage = item.analysisError ? ANALYSIS_ERROR_MESSAGE : "";
       renderTable();
+  }
+}
+
+function analyzeInvoiceForItemDirect(item) {
+  const formData = new FormData();
+  formData.append("file", item.file);
+  formData.append("document_type", getExpenseAnalysisDocumentType(item));
+  const companyId = getSelectedCompanyId();
+  if (companyId) {
+    formData.append("company_id", companyId);
+  }
+  const controller = new AbortController();
+  item._analysisController = controller;
+  return fetch("/api/analyze-invoice", {
+    method: "POST",
+    body: formData,
+    signal: controller.signal,
+  })
+    .then((res) => res.json())
+    .then((data) => applyInvoiceAnalysisResult(item, data))
+    .catch((error) => {
+      if (error && error.name === "AbortError") return;
+      markPersistentAnalysisError(item, renderTable);
+    })
+    .finally(() => clearAnalysisRequestState(item));
+}
+
+function getExpenseAnalysisDocumentType(item) {
+  const kind = item.expenseUploadKind || getExpenseUploadKind();
+  if (kind === "rent") return "expense_rent";
+  if (kind === "payroll") return "expense_payroll";
+  if (kind !== "received") return "expense_other";
+  return "expense";
+}
+
+function clearAnalysisRequestState(item) {
+  if (item._analysisTimeoutId) {
+    clearTimeout(item._analysisTimeoutId);
+    item._analysisTimeoutId = null;
+  }
+  item._analysisController = null;
+}
+
+function markPersistentAnalysisError(item, render, message = ANALYSIS_ERROR_MESSAGE) {
+  if (item._analysisCancelled || !isPendingUploadItemPresent(item)) return;
+  item.analysisPending = false;
+  item.analysisQueued = false;
+  item.analysisError = true;
+  item.analysisErrorMessage = message;
+  if (typeof render === "function") render();
+}
+
+function schedulePersistentAnalysisPoll(item, render) {
+  if (item._analysisPollTimeoutId) {
+    clearTimeout(item._analysisPollTimeoutId);
+  }
+  item._analysisPollTimeoutId = setTimeout(() => {
+    pollPersistentAnalysisJob(item, render);
+  }, 1800);
+}
+
+function pollPersistentAnalysisJob(item, render) {
+  if (
+    item._analysisCancelled ||
+    !item.analysisJobId ||
+    !isPendingUploadItemPresent(item)
+  ) {
+    return;
+  }
+  fetch(withCompanyParam(`/api/invoice-analysis-jobs/${item.analysisJobId}`))
+    .then((res) => res.json().then((data) => ({ res, data })))
+    .then(({ res, data }) => {
+      if (item._analysisCancelled || !isPendingUploadItemPresent(item)) return;
+      if (!res.ok || !data.ok || !data.job) {
+        markPersistentAnalysisError(item, render);
+        return;
+      }
+      const job = data.job;
+      if (job.status === "completed") {
+        if (item.isIncome) {
+          applyIncomeAnalysisResult(item, { ok: true, extracted: job.result || {} });
+        } else {
+          applyInvoiceAnalysisResult(item, { ok: true, extracted: job.result || {} });
+        }
+        return;
+      }
+      if (job.status === "failed") {
+        markPersistentAnalysisError(item, render, job.error || ANALYSIS_ERROR_MESSAGE);
+        return;
+      }
+      item.analysisQueued = job.status === "queued";
+      if (typeof render === "function") render();
+      schedulePersistentAnalysisPoll(item, render);
+    })
+    .catch(() => schedulePersistentAnalysisPoll(item, render));
+}
+
+function submitPersistentAnalysisJob(item, documentType, render, directAnalysis) {
+  if (item._analysisCancelled || !isPendingUploadItemPresent(item)) {
+    return Promise.resolve();
+  }
+  if (!item.file || !item.file.name) {
+    markPersistentAnalysisError(item, render);
+    return Promise.resolve();
+  }
+  const formData = new FormData();
+  formData.append("file", item.file);
+  formData.append("document_type", documentType);
+  const companyId = getSelectedCompanyId();
+  if (companyId) formData.append("company_id", companyId);
+  const controller = new AbortController();
+  let fallbackToDirect = false;
+  item._analysisController = controller;
+  return fetch("/api/invoice-analysis-jobs", {
+    method: "POST",
+    body: formData,
+    signal: controller.signal,
+  })
+    .then((res) => res.json().then((data) => ({ res, data })))
+    .then(({ res, data }) => {
+      if (item._analysisCancelled || !isPendingUploadItemPresent(item)) return;
+      if (res.status === 503 && data.asyncAnalysisUnavailable) {
+        clearAnalysisRequestState(item);
+        fallbackToDirect = true;
+        return directAnalysis(item);
+      }
+      if (!res.ok || !data.ok || !data.job?.id) {
+        markPersistentAnalysisError(item, render, (data.errors || [ANALYSIS_ERROR_MESSAGE])[0]);
+        return;
+      }
+      item.analysisJobId = data.job.id;
+      item.analysisQueued = true;
+      clearAnalysisRequestState(item);
+      if (typeof render === "function") render();
+      schedulePersistentAnalysisPoll(item, render);
     })
     .catch((error) => {
-      if (error && error.name === "AbortError") {
-        return;
-      }
-      if (item._analysisCancelled || !isPendingUploadItemPresent(item)) {
-        return;
-      }
-      item.analysisPending = false;
-      item.analysisQueued = false;
-      item.analysisError = true;
-      item.analysisErrorMessage = ANALYSIS_ERROR_MESSAGE;
-      renderTable();
+      if (error && error.name === "AbortError") return;
+      markPersistentAnalysisError(item, render);
     })
     .finally(() => {
-      if (item._analysisTimeoutId) {
-        clearTimeout(item._analysisTimeoutId);
-        item._analysisTimeoutId = null;
-      }
-      item._analysisController = null;
+      if (!item.analysisJobId && !fallbackToDirect) clearAnalysisRequestState(item);
     });
+}
+
+function analyzeIncomeForItem(item) {
+  return submitPersistentAnalysisJob(
+    item,
+    "income",
+    renderIncomeTable,
+    analyzeIncomeForItemDirect
+  );
+}
+
+function analyzeInvoiceForItem(item) {
+  return submitPersistentAnalysisJob(
+    item,
+    getExpenseAnalysisDocumentType(item),
+    renderTable,
+    analyzeInvoiceForItemDirect
+  );
+}
+
+function buildRecoveredAnalysisItem(job) {
+  const isIncome = job.documentType === "income";
+  const expenseUploadKind = {
+    expense_rent: "rent",
+    expense_payroll: "payroll",
+    expense_other: "other",
+  }[job.documentType] || "received";
+  return {
+    id: `analysis-job-${job.id}`,
+    analysisJobId: job.id,
+    file: { name: job.originalFilename || "Documento" },
+    originalFilename: job.originalFilename || "Documento",
+    isIncome,
+    date: new Date().toISOString().slice(0, 10),
+    paymentDate: "",
+    paymentDates: [],
+    supplier: "",
+    client: "",
+    base: "",
+    vat: "",
+    vatAmount: "",
+    total: "",
+    vatBreakdown: [],
+    vatBreakdownOpen: false,
+    expenseUploadKind,
+    payrollPeriod: "",
+    payrollDeductionsAmount: "",
+    payrollEmployerCostAmount: "",
+    withholdingAmount: "",
+    analysisText: "",
+    analysisPending: job.status === "queued" || job.status === "processing",
+    analysisQueued: job.status === "queued",
+    analysisError: false,
+    analysisErrorMessage: "",
+    analysisWarning: "",
+    analysisStatus: "ok",
+    touched: {
+      date: false,
+      supplier: false,
+      client: false,
+      base: false,
+      payrollDeductionsAmount: false,
+      vat: false,
+      vatAmount: false,
+      withholdingAmount: false,
+      total: false,
+    },
+  };
+}
+
+function recoverPersistentAnalysisJobs() {
+  const companyId = getSelectedCompanyId();
+  if (!companyId) return Promise.resolve();
+  return fetch(withCompanyParam("/api/invoice-analysis-jobs"))
+    .then((res) => res.json())
+    .then((data) => {
+      if (!data.ok || !Array.isArray(data.jobs)) return;
+      const knownJobIds = new Set(
+        [...pendingFiles, ...pendingIncomeFiles]
+          .map((item) => String(item.analysisJobId || ""))
+          .filter(Boolean)
+      );
+      data.jobs.forEach((job) => {
+        if (knownJobIds.has(String(job.id))) return;
+        const item = buildRecoveredAnalysisItem(job);
+        if (item.isIncome) {
+          pendingIncomeFiles.push(item);
+        } else {
+          pendingFiles.push(item);
+        }
+        if (job.status === "completed") {
+          const payload = { ok: true, extracted: job.result || {} };
+          if (item.isIncome) applyIncomeAnalysisResult(item, payload);
+          else applyInvoiceAnalysisResult(item, payload);
+        } else if (job.status === "failed") {
+          markPersistentAnalysisError(item, item.isIncome ? renderIncomeTable : renderTable, job.error);
+        } else {
+          schedulePersistentAnalysisPoll(item, item.isIncome ? renderIncomeTable : renderTable);
+        }
+      });
+      renderTable();
+      renderIncomeTable();
+    })
+    .catch(() => undefined);
+}
+
+function consumePersistentAnalysisJobs(items) {
+  const jobIds = items
+    .map((item) => item.analysisJobId)
+    .filter((jobId) => Number.isInteger(jobId));
+  if (!jobIds.length) return Promise.resolve();
+  return fetch(withCompanyParam("/api/invoice-analysis-jobs/consume"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jobIds }),
+  }).catch(() => undefined);
 }
 
 function uploadPending() {
@@ -6514,11 +6777,13 @@ function uploadPending() {
     .then(() => {
       if (uploadedIds.length) {
         const uploadedSet = new Set(uploadedIds);
+        const completedItems = pendingFiles.filter((item) => uploadedSet.has(item.id));
         for (let index = pendingFiles.length - 1; index >= 0; index -= 1) {
           if (uploadedSet.has(pendingFiles[index].id)) {
             pendingFiles.splice(index, 1);
           }
         }
+        consumePersistentAnalysisJobs(completedItems);
       }
       renderTable();
       if (groupedErrors.length) {
@@ -8059,8 +8324,8 @@ function renderInvoices(invoices) {
         invoice.supplier,
         invoice.base_amount,
         invoice.vat_amount,
-        invoice.total_amount,
         invoice.withholding_amount,
+        invoice.total_amount,
         formatExpenseCategory(invoice.expense_category || "with_invoice"),
       ],
       invoiceSearchInput?.value || ""
@@ -8199,6 +8464,7 @@ function renderIncomeInvoices(invoices) {
         invoice.client,
         invoice.base_amount,
         invoice.vat_amount,
+        invoice.withholding_amount,
         invoice.total_amount,
       ],
       incomeSearchInput?.value || ""
@@ -8242,6 +8508,9 @@ function renderIncomeInvoices(invoices) {
     const vatAmountTd = document.createElement("td");
     vatAmountTd.textContent = formatCurrency(invoice.vat_amount || 0);
 
+    const withholdingTd = document.createElement("td");
+    withholdingTd.textContent = formatCurrency(invoice.withholding_amount || 0);
+
     const totalTd = document.createElement("td");
     totalTd.textContent = formatCurrency(invoice.total_amount);
 
@@ -8275,6 +8544,7 @@ function renderIncomeInvoices(invoices) {
     tr.appendChild(baseTd);
     tr.appendChild(vatTd);
     tr.appendChild(vatAmountTd);
+    tr.appendChild(withholdingTd);
     tr.appendChild(totalTd);
     tr.appendChild(actionsTd);
     incomeInvoicesTableBody.appendChild(tr);
@@ -8292,8 +8562,9 @@ function enterIncomeInvoiceEditMode(row, invoice) {
   const baseTd = row.children[2];
   const vatTd = row.children[3];
   const vatAmountTd = row.children[4];
-  const totalTd = row.children[5];
-  const actionsTd = row.children[6];
+  const withholdingTd = row.children[5];
+  const totalTd = row.children[6];
+  const actionsTd = row.children[7];
 
   const dateInput = document.createElement("input");
   dateInput.type = "date";
@@ -8315,6 +8586,11 @@ function enterIncomeInvoiceEditMode(row, invoice) {
   vatAmountInput.min = "0";
   vatAmountInput.value = formatAmountInput(invoice.vat_amount || 0);
 
+  const withholdingInput = document.createElement("input");
+  withholdingInput.type = "text";
+  withholdingInput.min = "0";
+  withholdingInput.value = formatAmountInput(invoice.withholding_amount || 0);
+
   const totalInput = document.createElement("input");
   totalInput.type = "text";
   totalInput.min = "0";
@@ -8324,16 +8600,21 @@ function enterIncomeInvoiceEditMode(row, invoice) {
     base: baseInput,
     vat: vatSelect,
     vatAmount: vatAmountInput,
+    withholding: withholdingInput,
     total: totalInput,
   };
   attachAmountInputBehavior(baseInput);
   attachAmountInputBehavior(vatAmountInput);
+  attachAmountInputBehavior(withholdingInput);
   attachAmountInputBehavior(totalInput);
   baseInput.addEventListener("input", () => {
     applyVatCalculation(invoice, calcInputs, "base");
   });
   vatSelect.addEventListener("change", () => {
     applyVatCalculation(invoice, calcInputs, "vat");
+  });
+  withholdingInput.addEventListener("input", () => {
+    applyVatCalculation(invoice, calcInputs, "withholding");
   });
   totalInput.addEventListener("input", () => {
     applyVatCalculation(invoice, calcInputs, "total");
@@ -8348,6 +8629,8 @@ function enterIncomeInvoiceEditMode(row, invoice) {
   vatTd.appendChild(vatSelect);
   vatAmountTd.textContent = "";
   vatAmountTd.appendChild(vatAmountInput);
+  withholdingTd.textContent = "";
+  withholdingTd.appendChild(withholdingInput);
   totalTd.textContent = "";
   totalTd.appendChild(totalInput);
 
@@ -8367,6 +8650,7 @@ function enterIncomeInvoiceEditMode(row, invoice) {
       base_amount: baseInput.value,
       vat_rate: vatSelect.value,
       vat_amount: vatAmountInput.value,
+      withholding_amount: withholdingInput.value,
       total_amount: totalInput.value,
     });
   });
@@ -8388,6 +8672,7 @@ function updateIncomeInvoice(invoiceId, payload) {
     base: payload.base_amount,
     total: payload.total_amount,
     vat: payload.vat_rate,
+    withholdingAmount: payload.withholding_amount,
   });
   const normalizedPayload = {
     ...payload,
@@ -10739,6 +11024,236 @@ function triggerAccountingExport(kind) {
   window.location.href = withCompanyParam(baseUrl);
 }
 
+function setAccountingImportStatus(message = "", tone = "") {
+  if (!integrationImportStatus) {
+    return;
+  }
+  integrationImportStatus.textContent = message;
+  integrationImportStatus.className = `panel-helper integration-import-status${tone ? ` ${tone}` : ""}`;
+}
+
+function resetAccountingImportPreview() {
+  currentAccountingImportPreview = null;
+  if (integrationImportConfirmBtn) {
+    integrationImportConfirmBtn.disabled = true;
+  }
+  if (integrationImportPreview) {
+    integrationImportPreview.hidden = true;
+    integrationImportPreview.replaceChildren();
+  }
+}
+
+function appendImportCell(row, value) {
+  const cell = document.createElement("td");
+  cell.textContent = value === null || value === undefined || value === "" ? "-" : String(value);
+  row.appendChild(cell);
+}
+
+function renderAccountingImportPreview(data) {
+  if (!integrationImportPreview) {
+    return;
+  }
+  const summary = data?.summary || {};
+  integrationImportPreview.hidden = false;
+  integrationImportPreview.replaceChildren();
+
+  const summaryRow = document.createElement("div");
+  summaryRow.className = "integration-import-summary";
+  const badges = [
+    ["Filas leídas", summary.rows || 0, ""],
+    ["Listas para registrar", summary.ready || 0, "ready"],
+    ["Duplicadas", summary.duplicates || 0, summary.duplicates ? "warning" : ""],
+    ["Con errores", summary.invalid || 0, summary.invalid ? "error" : ""],
+  ];
+  badges.forEach(([label, value, tone]) => {
+    const badge = document.createElement("span");
+    badge.className = tone;
+    badge.textContent = `${label}: ${value}`;
+    summaryRow.appendChild(badge);
+  });
+  integrationImportPreview.appendChild(summaryRow);
+
+  const tableWrap = document.createElement("div");
+  tableWrap.className = "integration-import-table-wrap";
+  const table = document.createElement("table");
+  table.className = "integration-import-table";
+  const header = document.createElement("thead");
+  const headerRow = document.createElement("tr");
+  ["Fila", "Fecha", "Proveedor / cliente", "Base", "IVA", "Retención", "Total", "Estado"].forEach(
+    (label) => {
+      const cell = document.createElement("th");
+      cell.textContent = label;
+      headerRow.appendChild(cell);
+    }
+  );
+  header.appendChild(headerRow);
+  table.appendChild(header);
+
+  const body = document.createElement("tbody");
+  (data?.records || []).forEach((record) => {
+    const row = document.createElement("tr");
+    const hasErrors = Array.isArray(record.errors) && record.errors.length > 0;
+    if (hasErrors) {
+      row.className = "integration-import-row-error";
+    } else if (record.duplicate) {
+      row.className = "integration-import-row-duplicate";
+    }
+    appendImportCell(row, record.row);
+    appendImportCell(row, record.date);
+    appendImportCell(row, record.counterparty);
+    appendImportCell(row, formatCurrency(record.base));
+    appendImportCell(
+      row,
+      `${formatPercent(record.vatRate)} · ${formatCurrency(record.vatAmount)}`
+    );
+    appendImportCell(row, formatCurrency(record.withholding));
+    appendImportCell(row, formatCurrency(record.total));
+    appendImportCell(
+      row,
+      hasErrors
+        ? record.errors.join(" ")
+        : record.duplicate
+          ? "Posible duplicado: no se registrará."
+          : "Lista para registrar"
+    );
+    body.appendChild(row);
+  });
+  table.appendChild(body);
+  tableWrap.appendChild(table);
+  integrationImportPreview.appendChild(tableWrap);
+
+  if (Number(summary.rows || 0) > (data?.records || []).length) {
+    const sampleNote = document.createElement("p");
+    sampleNote.className = "panel-helper integration-import-sample-note";
+    sampleNote.textContent = "Se muestran las primeras 50 filas. Las incidencias se enumeran a continuación.";
+    integrationImportPreview.appendChild(sampleNote);
+  }
+  if (Array.isArray(data?.issues) && data.issues.length) {
+    const issues = document.createElement("div");
+    issues.className = "integration-import-issues";
+    const title = document.createElement("strong");
+    title.textContent = "Filas que debes corregir";
+    issues.appendChild(title);
+    const list = document.createElement("ul");
+    data.issues.forEach((issue) => {
+      const item = document.createElement("li");
+      item.textContent = `Fila ${issue.row}: ${(issue.errors || []).join(" ")}`;
+      list.appendChild(item);
+    });
+    issues.appendChild(list);
+    integrationImportPreview.appendChild(issues);
+  }
+}
+
+async function sendAccountingImportRequest(preview) {
+  const selectedFile = integrationImportFile?.files?.[0];
+  if (!selectedFile) {
+    throw new Error("Selecciona un archivo CSV o XLSX.");
+  }
+  const formData = new FormData();
+  formData.append("file", selectedFile);
+  formData.append("record_type", integrationImportType?.value || "purchases");
+  formData.append("source", integrationImportSource?.value || "generic");
+  if (preview) {
+    formData.append("preview", "true");
+  }
+  const response = await fetch(withCompanyParam("/api/accounting-integrations/import"), {
+    method: "POST",
+    body: formData,
+    credentials: "same-origin",
+  });
+  let data = null;
+  try {
+    data = await response.json();
+  } catch (error) {
+    data = null;
+  }
+  if (!response.ok || !data?.ok) {
+    if (data?.records) {
+      renderAccountingImportPreview(data);
+    }
+    throw new Error((data?.errors || ["No se pudo procesar la importación."]).join(" "));
+  }
+  return data;
+}
+
+async function previewAccountingImport() {
+  if (!getSelectedCompanyId()) {
+    alert("Selecciona una empresa antes de importar.");
+    return;
+  }
+  resetAccountingImportPreview();
+  if (integrationImportPreviewBtn) {
+    integrationImportPreviewBtn.disabled = true;
+  }
+  setAccountingImportStatus("Leyendo el archivo y validando sus registros...");
+  try {
+    const data = await sendAccountingImportRequest(true);
+    currentAccountingImportPreview = data;
+    renderAccountingImportPreview(data);
+    const summary = data.summary || {};
+    const hasInvalidRows = Number(summary.invalid || 0) > 0;
+    const canConfirm = Number(summary.ready || 0) > 0 && !hasInvalidRows;
+    if (integrationImportConfirmBtn) {
+      integrationImportConfirmBtn.disabled = !canConfirm;
+    }
+    if (hasInvalidRows) {
+      setAccountingImportStatus(
+        "Hay filas con errores. Corrige el archivo y vuelve a validarlo antes de registrar.",
+        "error"
+      );
+    } else if (!canConfirm) {
+      setAccountingImportStatus("No hay registros nuevos para incorporar.", "warning");
+    } else if (Number(summary.duplicates || 0) > 0) {
+      setAccountingImportStatus(
+        "La vista previa está lista. Las posibles duplicadas se omitirán al registrar.",
+        "warning"
+      );
+    } else {
+      setAccountingImportStatus("Validación completada. Revisa la muestra y registra cuando quieras.", "ready");
+    }
+  } catch (error) {
+    setAccountingImportStatus(error.message || "No se pudo validar el archivo.", "error");
+  } finally {
+    if (integrationImportPreviewBtn) {
+      integrationImportPreviewBtn.disabled = false;
+    }
+  }
+}
+
+async function confirmAccountingImport() {
+  if (!currentAccountingImportPreview || integrationImportConfirmBtn?.disabled) {
+    return;
+  }
+  if (integrationImportConfirmBtn) {
+    integrationImportConfirmBtn.disabled = true;
+  }
+  setAccountingImportStatus("Registrando los datos validados...");
+  try {
+    const data = await sendAccountingImportRequest(false);
+    const duplicateSuffix = data.duplicates ? ` Se omitieron ${data.duplicates} posibles duplicados.` : "";
+    setAccountingImportStatus(
+      `Se han registrado ${data.inserted || 0} registros.${duplicateSuffix}`,
+      "ready"
+    );
+    if (integrationImportFile) {
+      integrationImportFile.value = "";
+    }
+    resetAccountingImportPreview();
+    await refreshAllData();
+  } catch (error) {
+    setAccountingImportStatus(error.message || "No se pudo registrar la importación.", "error");
+  }
+}
+
+function downloadAccountingImportTemplate() {
+  const recordType = integrationImportType?.value || "purchases";
+  const url = withCompanyParam(
+    `/api/accounting-integrations/import-template?record_type=${encodeURIComponent(recordType)}`
+  );
+  window.location.href = url;
+}
+
 function downloadQuarterlyReport() {
   if (!getSelectedCompanyId()) {
     alert("Selecciona una empresa antes de generar el informe.");
@@ -11312,6 +11827,7 @@ function bindEvents() {
       loadYears().then(() => {
         syncReportSelectorsFromMain();
         refreshAllData();
+        recoverPersistentAnalysisJobs();
       });
     });
   }
@@ -11457,6 +11973,30 @@ function bindEvents() {
   if (integrationExportPackageBtn) {
     integrationExportPackageBtn.addEventListener("click", () => triggerAccountingExport("package"));
   }
+  if (integrationImportTemplateBtn) {
+    integrationImportTemplateBtn.addEventListener("click", downloadAccountingImportTemplate);
+  }
+  if (integrationImportPreviewBtn) {
+    integrationImportPreviewBtn.addEventListener("click", previewAccountingImport);
+  }
+  if (integrationImportConfirmBtn) {
+    integrationImportConfirmBtn.addEventListener("click", confirmAccountingImport);
+  }
+  if (integrationImportFile) {
+    integrationImportFile.addEventListener("change", () => {
+      resetAccountingImportPreview();
+      setAccountingImportStatus("");
+    });
+  }
+  if (integrationImportSource) {
+    integrationImportSource.addEventListener("change", resetAccountingImportPreview);
+  }
+  if (integrationImportType) {
+    integrationImportType.addEventListener("change", () => {
+      resetAccountingImportPreview();
+      setAccountingImportStatus("");
+    });
+  }
   bindPnlInputs();
 }
 
@@ -11502,6 +12042,7 @@ function init() {
       }
       updateHeaderContext();
       refreshAllData();
+      recoverPersistentAnalysisJobs();
     });
 }
 

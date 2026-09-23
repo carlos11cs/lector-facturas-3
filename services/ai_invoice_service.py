@@ -4122,8 +4122,7 @@ def analyze_invoice(
             "Si hay payment_terms_days y invoice_date, devuelve payment_dates con invoice_date + X dias. "
             "payment_dates debe ser una lista (YYYY-MM-DD) y puede estar vacia. "
             "Usa null si no puedes inferir un dato con seguridad. "
-            "No incluyas texto adicional fuera del JSON.\n\n"
-            f"TEXTO_FACTURA:\n{extracted_text}"
+            "No incluyas texto adicional fuera del JSON."
         )
     elif is_rent_expense:
         prompt = (
@@ -4141,8 +4140,7 @@ def analyze_invoice(
             "Si hay payment_terms_days y invoice_date, devuelve payment_dates con invoice_date + X dias. "
             "payment_dates debe ser una lista de fechas (YYYY-MM-DD) y puede estar vacia. "
             "Usa null si no puedes inferir un dato con seguridad. "
-            "No incluyas texto adicional fuera del JSON.\n\n"
-            f"TEXTO_FACTURA:\n{extracted_text}"
+            "No incluyas texto adicional fuera del JSON."
         )
     elif is_payroll_expense:
         prompt = (
@@ -4158,8 +4156,7 @@ def analyze_invoice(
             "Prioriza trabajador, periodo, fecha, bruto, deducciones, liquido y retencion. "
             "payment_dates debe ser una lista de fechas (YYYY-MM-DD) y puede estar vacia. "
             "Usa null si no puedes inferir un dato con seguridad. "
-            "No incluyas texto adicional fuera del JSON.\n\n"
-            f"TEXTO_FACTURA:\n{extracted_text}"
+            "No incluyas texto adicional fuera del JSON."
         )
     elif is_other_expense:
         prompt = (
@@ -4174,8 +4171,7 @@ def analyze_invoice(
             "Prioriza fecha, base, IVA, total y retencion. "
             "payment_dates debe ser una lista de fechas (YYYY-MM-DD) y puede estar vacia. "
             "Usa null si no puedes inferir un dato con seguridad. "
-            "No incluyas texto adicional fuera del JSON.\n\n"
-            f"TEXTO_FACTURA:\n{extracted_text}"
+            "No incluyas texto adicional fuera del JSON."
         )
     else:
         prompt = (
@@ -4194,8 +4190,7 @@ def analyze_invoice(
             "Si hay payment_terms_days y invoice_date, devuelve payment_dates con invoice_date + X dias. "
             "payment_dates debe ser una lista de fechas (YYYY-MM-DD) y puede estar vacia. "
             "Usa null si no puedes inferir un dato con seguridad. "
-            "No incluyas texto adicional fuera del JSON.\n\n"
-            f"TEXTO_FACTURA:\n{extracted_text}"
+            "No incluyas texto adicional fuera del JSON."
         )
 
     prompt += (
@@ -4209,8 +4204,8 @@ def analyze_invoice(
         "antes de responder. Incluye evidence como objeto opcional con textos breves "
         "literales del documento para supplier, invoice_date y totals."
     )
-    prompt = (
-        "Extrae la factura usando el documento original como fuente primaria y devuelve el schema solicitado. "
+    prompt += (
+        "\n\nINSTRUCCIONES TRANSVERSALES: Extrae la factura usando el documento original como fuente primaria y devuelve el schema solicitado. "
         "No inventes valores. El emisor no puede ser el cliente ni la dirección de entrega. "
         "Un vencimiento es una fecha prevista; NUNCA es un pago real. actual_payment_date debe ser null "
         "sin evidencia explícita de cobro/pago. payment.status no puede ser paid solo por existir o vencer una fecha. "

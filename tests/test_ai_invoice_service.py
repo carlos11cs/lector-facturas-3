@@ -1663,6 +1663,25 @@ N° intracommunautaire : ESB05410667"""
         self.assertEqual(call_responses.call_count, 1)
         self.assertEqual(result["total_amount"], 121.0)
 
+    def test_specialized_invoice_prompt_is_preserved_with_global_rules(self):
+        extraction = self._completed_structured_invoice()
+        with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": "invoice-test-model"}), patch.object(
+            svc, "_get_client", return_value=object()
+        ), patch.object(svc, "_extract_pdf_text_from_bytes", return_value="Texto nativo " * 20), patch.object(
+            svc, "_call_invoice_responses", return_value=extraction
+        ) as call_responses, patch.object(svc, "_validate_structured_invoice", return_value=[]):
+            svc.analyze_invoice(
+                file_bytes=b"%PDF-test",
+                filename="factura.pdf",
+                mime_type="application/pdf",
+            )
+
+        prompt = call_responses.call_args.kwargs["prompt"]
+        self.assertIn("factura recibida (gasto)", prompt)
+        self.assertIn("total = base + IVA - retención", prompt)
+        self.assertIn("NUNCA es un pago real", prompt)
+        self.assertNotIn("Texto nativo", prompt)
+
     def test_completed_response_after_legacy_timeout_preserves_invoice_fields(self):
         extraction = self._completed_structured_invoice()
         extraction["supplier"] = {"legal_name": "Proveedor Demo S.L.", "commercial_name": None}

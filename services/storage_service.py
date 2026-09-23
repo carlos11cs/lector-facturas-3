@@ -16,6 +16,11 @@ def _has_bucket() -> bool:
     return bool(bucket and bucket.strip())
 
 
+def _private_bucket() -> Optional[str]:
+    bucket = os.getenv("PRIVATE_STORAGE_BUCKET")
+    return bucket.strip() if bucket and bucket.strip() else None
+
+
 def _local_storage_dir() -> str:
     base_dir = os.getenv("UPLOAD_FOLDER") or os.path.join(tempfile.gettempdir(), "uploads")
     os.makedirs(base_dir, exist_ok=True)
@@ -85,3 +90,44 @@ def upload_bytes(data: bytes, key: str, content_type: Optional[str] = None) -> s
     url = _build_public_url(bucket, key)
     logger.info("Archivo subido a storage: %s", url)
     return url
+
+
+def has_private_object_storage() -> bool:
+    """Return whether a web process and a worker can share private objects.
+
+    Private analysis sources intentionally require a different bucket from the
+    potentially public bucket used for invoice attachments.
+    """
+    return _private_bucket() is not None
+
+
+def upload_private_bytes(data: bytes, key: str, content_type: Optional[str] = None) -> None:
+    """Store a temporary object without creating or exposing a public URL."""
+    bucket = _private_bucket()
+    if not bucket:
+        raise RuntimeError("El almacenamiento privado no está configurado.")
+    params = {
+        "Bucket": bucket,
+        "Key": key,
+        "Body": data,
+    }
+    if content_type:
+        params["ContentType"] = content_type
+    _get_client().put_object(**params)
+
+
+def download_private_bytes(key: str) -> bytes:
+    """Read a private object for server-side processing only."""
+    bucket = _private_bucket()
+    if not bucket:
+        raise RuntimeError("El almacenamiento privado no está configurado.")
+    response = _get_client().get_object(Bucket=bucket, Key=key)
+    return response["Body"].read()
+
+
+def delete_private_object(key: str) -> None:
+    """Delete a temporary private object once processing is complete."""
+    bucket = _private_bucket()
+    if not bucket:
+        return
+    _get_client().delete_object(Bucket=bucket, Key=key)

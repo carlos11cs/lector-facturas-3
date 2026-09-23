@@ -466,6 +466,46 @@
           </article>
         </section>
 
+        <section class="panel integration-import-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Migrar datos a Ledged</h2>
+              <p>Importa el export CSV o XLSX de tu programa contable. Ledged detecta las columnas, valida el cálculo fiscal y te muestra una vista previa antes de registrar nada.</p>
+            </div>
+          </div>
+          <div class="integration-import-form">
+            <div class="field">
+              <label for="integrationImportSource">Origen del archivo (trazabilidad)</label>
+              <select id="integrationImportSource">
+                <option value="generic">Archivo contable / plantilla Ledged</option>
+                <option value="a3">A3</option>
+                <option value="contasol">ContaSOL</option>
+                <option value="odoo">Odoo</option>
+                <option value="cegid">Cegid</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="integrationImportType">Qué quieres incorporar</label>
+              <select id="integrationImportType">
+                <option value="purchases">Facturas recibidas y gastos</option>
+                <option value="sales">Facturas emitidas e ingresos</option>
+              </select>
+            </div>
+            <div class="field integration-import-file-field">
+              <label for="integrationImportFile">Archivo CSV o XLSX</label>
+              <input type="file" id="integrationImportFile" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+            </div>
+          </div>
+          <div class="integration-actions">
+            <button id="integrationImportTemplateBtn" class="button ghost" type="button">Descargar plantilla</button>
+            <button id="integrationImportPreviewBtn" class="button primary" type="button">Validar y previsualizar</button>
+            <button id="integrationImportConfirmBtn" class="button primary" type="button" disabled>Registrar datos validados</button>
+          </div>
+          <p class="panel-helper">Campos necesarios: fecha, proveedor o cliente, base e IVA. Ledged reconoce cabeceras habituales de exportaciones contables y te detiene si los importes no cuadran. La retención se trata siempre como valor absoluto y se descuenta del total de las compras. Máximo 5.000 filas por carga.</p>
+          <p id="integrationImportStatus" class="panel-helper" aria-live="polite"></p>
+          <div id="integrationImportPreview" class="integration-import-preview" hidden></div>
+        </section>
+
         <section class="panel">
           <div class="panel-header">
             <div>
@@ -1254,7 +1294,8 @@
                   <th>Base imponible</th>
                   <th>IVA</th>
                   <th>IVA (€)</th>
-                  <th>Total (€)</th>
+                  <th>Retención IRPF (-)</th>
+                  <th>Total a cobrar (€)</th>
                   <th></th>
                 </tr>
               </thead>
@@ -1280,6 +1321,7 @@
                     <th>Base (€)</th>
                     <th>IVA</th>
                     <th>IVA (€)</th>
+                    <th>Ret. IRPF (€)</th>
                     <th>Total (€)</th>
                     <th>Acciones</th>
                   </tr>

@@ -3,6 +3,7 @@ import csv
 import hashlib
 from html import escape
 import io
+from itertools import chain
 import json
 import logging
 import multiprocessing as mp
@@ -11,6 +12,7 @@ import re
 import secrets
 import sys
 import tempfile
+import unicodedata
 import zipfile
 from datetime import date, datetime, timedelta
 from functools import wraps
@@ -52,7 +54,14 @@ from services.ai_invoice_service import (
     _extract_image_text_ocr_from_bytes,
     extract_loan_schedule,
 )
-from services.storage_service import get_public_url, upload_bytes
+from services.storage_service import (
+    delete_private_object,
+    download_private_bytes,
+    get_public_url,
+    has_private_object_storage,
+    upload_bytes,
+    upload_private_bytes,
+)
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data.db")
@@ -67,9 +76,30 @@ DOCUMENT_CENTER_ALLOWED_EXTENSIONS = {
     ".xlsx",
     ".xls",
 }
+ACCOUNTING_IMPORT_ALLOWED_EXTENSIONS = {".csv", ".xlsx"}
+ACCOUNTING_IMPORT_MAX_ROWS = int(os.getenv("ACCOUNTING_IMPORT_MAX_ROWS", "5000"))
 ANALYSIS_TIMEOUT_SECONDS = int(os.getenv("ANALYSIS_TIMEOUT_SECONDS", "600"))
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "12"))
 MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+ASYNC_INVOICE_ANALYSIS_ENABLED = os.getenv(
+    "ASYNC_INVOICE_ANALYSIS_ENABLED", ""
+).strip().lower() in {"1", "true", "yes"}
+ASYNC_INVOICE_ANALYSIS_LEASE_SECONDS = int(
+    os.getenv("ASYNC_INVOICE_ANALYSIS_LEASE_SECONDS", "720")
+)
+ASYNC_INVOICE_ANALYSIS_RESULT_TTL_SECONDS = int(
+    os.getenv("ASYNC_INVOICE_ANALYSIS_RESULT_TTL_SECONDS", "86400")
+)
+ASYNC_INVOICE_ANALYSIS_POLL_SECONDS = float(
+    os.getenv("ASYNC_INVOICE_ANALYSIS_POLL_SECONDS", "1.5")
+)
+ASYNC_INVOICE_ANALYSIS_DOCUMENT_TYPES = {
+    "expense",
+    "expense_rent",
+    "expense_payroll",
+    "expense_other",
+    "income",
+}
 DOCUMENT_CENTER_ENABLED = os.getenv("DOCUMENT_CENTER_ENABLED", "").strip().lower() in {
     "1",
     "true",
@@ -324,6 +354,7 @@ income_invoices_table = Table(
     Column("vat_amount", Float),
     Column("total_amount", Float, nullable=False),
     Column("vat_breakdown", Text),
+    Column("withholding_amount", Float),
     Column("payment_date", String),
     Column("payment_dates", Text),
     Column("payment_completed_dates", Text),
@@ -342,6 +373,29 @@ known_suppliers_table = Table(
     Column("name", String, nullable=False),
     Column("tax_id", String),
     Column("confirmed_at", String, nullable=False),
+)
+
+invoice_analysis_jobs_table = Table(
+    "invoice_analysis_jobs",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", Integer, nullable=False),
+    Column("company_id", Integer, nullable=False),
+    Column("submitted_by_user_id", Integer, nullable=False),
+    Column("document_type", String, nullable=False),
+    Column("original_filename", String, nullable=False),
+    Column("mime_type", String),
+    Column("storage_key", String),
+    Column("status", String, nullable=False, index=True),
+    Column("result_json", Text),
+    Column("error_message", Text),
+    Column("attempt_count", Integer, nullable=False, server_default=text("0")),
+    Column("lease_expires_at", String),
+    Column("created_at", String, nullable=False),
+    Column("started_at", String),
+    Column("completed_at", String),
+    Column("updated_at", String, nullable=False),
+    Column("expires_at", String, nullable=False),
 )
 
 facturacion_table = Table(
@@ -1473,6 +1527,7 @@ def init_db():
     add_column_if_missing("income_invoices", "payment_dates", "TEXT")
     add_column_if_missing("income_invoices", "payment_completed_dates", "TEXT")
     add_column_if_missing("income_invoices", "vat_breakdown", "TEXT")
+    add_column_if_missing("income_invoices", "withholding_amount", "FLOAT")
     add_column_if_missing("income_invoices", "extraction_source", "VARCHAR")
     add_column_if_missing("income_invoices", "confidence_score", "FLOAT")
     drop_not_null_if_needed("income_invoices", "vat_rate")
@@ -1774,6 +1829,30 @@ def normalize_purchase_invoice_amounts(
         vat_amount = round(base_amount * rate, 2)
         payable_total = round(base_amount + vat_amount - withholding, 2)
         return base_amount, vat_amount, payable_total
+    return base_amount, vat_amount, total_amount
+
+
+def normalize_income_invoice_amounts(
+    base_amount, vat_rate, vat_amount, total_amount, withholding_amount=0.0
+):
+    """Normalize a sales invoice using its net amount receivable by the issuer."""
+    withholding = abs(float(withholding_amount or 0))
+    if vat_rate is None:
+        return base_amount, vat_amount, total_amount
+    if base_amount is None and total_amount is None:
+        return base_amount, vat_amount, total_amount
+
+    rate = vat_rate / 100
+    if base_amount is None and total_amount is not None:
+        gross_total = round(total_amount + withholding, 2)
+        base_amount = round(gross_total / (1 + rate), 2)
+        vat_amount = round(gross_total - base_amount, 2)
+        return base_amount, vat_amount, round(total_amount, 2)
+
+    if base_amount is not None:
+        vat_amount = round(base_amount * rate, 2)
+        receivable_total = round(base_amount + vat_amount - withholding, 2)
+        return base_amount, vat_amount, receivable_total
     return base_amount, vat_amount, total_amount
 
 
@@ -2935,11 +3014,13 @@ def register_processed_document(conn, row, data_owner_id, current_user_id):
             vat_rate = int(vat_rate)
         except (TypeError, ValueError):
             vat_rate = 0
-        base_amount, vat_amount, total_amount = normalize_vat_amounts(
+        withholding_amount = abs(parse_amount(data.get("withholding_amount")) or 0.0)
+        base_amount, vat_amount, total_amount = normalize_income_invoice_amounts(
             parse_amount(data.get("base_amount")),
             vat_rate,
             parse_amount(data.get("vat_amount")),
             parse_amount(data.get("total_amount")),
+            withholding_amount,
         )
         client = (data.get("client_name") or data.get("client") or "").strip() or "Cliente pendiente"
         result = conn.execute(
@@ -2955,6 +3036,7 @@ def register_processed_document(conn, row, data_owner_id, current_user_id):
                 vat_amount=vat_amount,
                 total_amount=total_amount or 0.0,
                 vat_breakdown=vat_breakdown_json,
+                withholding_amount=withholding_amount,
                 payment_date=payment_date,
                 payment_dates=serialize_payment_dates(payment_dates),
                 ocr_text=row.get("extracted_text"),
@@ -3614,6 +3696,581 @@ def parse_loan_installments_from_excel(file_bytes):
     return installments
 
 
+# Accounting exports are structured data, so onboarding imports deliberately do
+# not use the invoice AI/OCR pipeline.  These aliases cover the common labels
+# exported by A3, ContaSOL, Odoo and Cegid while keeping Ledged's own export
+# headers round-trippable.
+ACCOUNTING_IMPORT_FIELD_ALIASES = {
+    "date": {
+        "fecha",
+        "fecha_factura",
+        "fecha_contable",
+        "fecha_documento",
+        "fecha_expedicion",
+        "fecha_emision",
+        "fecha_registro",
+    },
+    "counterparty": {
+        "proveedor",
+        "nombre_proveedor",
+        "acreedor",
+        "tercero",
+        "contraparte",
+        "cliente",
+        "nombre_cliente",
+        "razon_social",
+    },
+    "concept": {
+        "concepto",
+        "descripcion",
+        "descripcion_factura",
+        "detalle",
+        "asiento",
+        "texto",
+    },
+    "document_number": {
+        "numero_factura",
+        "n_factura",
+        "num_factura",
+        "factura",
+        "serie_numero",
+        "referencia",
+    },
+    "base": {
+        "base_imponible",
+        "base",
+        "importe_base",
+        "base_iva",
+    },
+    "vat_rate": {
+        "tipo_iva",
+        "porcentaje_iva",
+        "iva_porcentaje",
+        "iva_pct",
+        "tasa_iva",
+    },
+    "vat_amount": {
+        "cuota_iva",
+        "importe_iva",
+        "iva_importe",
+        "iva",
+    },
+    "withholding": {
+        "retencion",
+        "retencion_irpf",
+        "irpf",
+        "importe_retencion",
+    },
+    "total": {
+        "total",
+        "importe_total",
+        "total_factura",
+        "total_a_pagar",
+        "importe_final",
+    },
+    "due_date": {
+        "vencimiento",
+        "fecha_vencimiento",
+        "fecha_pago",
+        "fecha_cobro",
+    },
+    "rectificative": {
+        "rectificativa",
+        "factura_rectificativa",
+        "abono",
+        "nota_credito",
+        "credit_note",
+    },
+}
+
+ACCOUNTING_IMPORT_SOURCE_LABELS = {
+    "generic": "archivo contable",
+    "a3": "A3",
+    "contasol": "ContaSOL",
+    "odoo": "Odoo",
+    "cegid": "Cegid",
+}
+
+
+def normalize_accounting_import_header(value):
+    text_value = unicodedata.normalize("NFKD", str(value or ""))
+    text_value = "".join(
+        character for character in text_value if not unicodedata.combining(character)
+    ).lower()
+    return re.sub(r"[^a-z0-9]+", "_", text_value).strip("_")
+
+
+def detect_accounting_import_columns(headers):
+    """Return Ledged fields plus any explicitly split VAT-rate columns."""
+    columns = {}
+    vat_breakdown_columns = {}
+    for index, header in enumerate(headers):
+        normalized_header = normalize_accounting_import_header(header)
+        if not normalized_header:
+            continue
+        split_vat = _detect_accounting_import_split_vat_column(normalized_header)
+        if split_vat:
+            rate, field = split_vat
+            vat_breakdown_columns.setdefault(rate, {})[field] = index
+            continue
+        for field, aliases in ACCOUNTING_IMPORT_FIELD_ALIASES.items():
+            if field in columns:
+                continue
+            if normalized_header in aliases:
+                columns[field] = index
+                break
+    if vat_breakdown_columns:
+        columns["vat_breakdown"] = vat_breakdown_columns
+    return columns
+
+
+def _detect_accounting_import_split_vat_column(normalized_header):
+    """Recognize common columns such as `Base IVA 10%` or `Cuota IVA 21`."""
+    patterns = (
+        (r"^(?:base|base_imponible|base_iva)_(?:iva_)?(0|4|10|21)(?:_pct)?$", "base"),
+        (r"^(?:cuota_iva|importe_iva|iva_importe|iva)_(0|4|10|21)(?:_pct)?$", "vat_amount"),
+    )
+    for pattern, field in patterns:
+        match = re.match(pattern, normalized_header)
+        if match:
+            return int(match.group(1)), field
+    return None
+
+
+def _accounting_import_header_score(columns):
+    if "date" not in columns or "counterparty" not in columns:
+        return -1
+    amount_fields = {"base", "vat_amount", "vat_rate", "total"}
+    if not amount_fields.intersection(columns):
+        return -1
+    return len(columns)
+
+
+def _iter_accounting_csv_rows(file_bytes):
+    decoded = None
+    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            decoded = file_bytes.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if decoded is None:
+        raise ValueError("No se pudo leer el CSV. Exporta el archivo en UTF-8 o Latin-1.")
+
+    sample = decoded[:8192]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=";,\t|")
+    except csv.Error:
+        delimiter = ";" if sample.count(";") > sample.count(",") else ","
+        return csv.reader(io.StringIO(decoded), delimiter=delimiter)
+    return csv.reader(io.StringIO(decoded), dialect)
+
+
+def _find_accounting_import_header_from_csv(file_bytes):
+    reader = _iter_accounting_csv_rows(file_bytes)
+    leading_rows = []
+    for _ in range(25):
+        try:
+            row = next(reader)
+        except StopIteration:
+            break
+        leading_rows.append(row)
+
+    best = None
+    for row_index, row in enumerate(leading_rows):
+        columns = detect_accounting_import_columns(row)
+        score = _accounting_import_header_score(columns)
+        if best is None or score > best[0]:
+            best = (score, row_index, columns)
+    if not best or best[0] < 0:
+        raise ValueError(
+            "No se reconocen las cabeceras. Debe incluir fecha, proveedor o cliente y algún importe."
+        )
+    _, header_row_index, columns = best
+    return leading_rows[header_row_index], columns, chain(
+        leading_rows[header_row_index + 1 :], reader
+    )
+
+
+def _find_accounting_import_header_from_workbook(file_bytes):
+    try:
+        workbook = openpyxl.load_workbook(
+            io.BytesIO(file_bytes), read_only=True, data_only=True
+        )
+    except Exception as exc:
+        raise ValueError("No se pudo leer el Excel. Exporta el archivo como XLSX o CSV.") from exc
+
+    best = None
+    for sheet in workbook.worksheets:
+        for row_index, row in enumerate(sheet.iter_rows(values_only=True)):
+            if row_index >= 25:
+                break
+            columns = detect_accounting_import_columns(row)
+            score = _accounting_import_header_score(columns)
+            if best is None or score > best[0]:
+                best = (score, sheet.title, row_index, list(row), columns)
+    if not best or best[0] < 0:
+        workbook.close()
+        raise ValueError(
+            "No se reconocen las cabeceras. Debe incluir fecha, proveedor o cliente y algún importe."
+        )
+    _, sheet_name, header_row_index, headers, columns = best
+    sheet = workbook[sheet_name]
+
+    def row_iterator():
+        try:
+            for row_index, row in enumerate(sheet.iter_rows(values_only=True)):
+                if row_index > header_row_index:
+                    yield list(row)
+        finally:
+            workbook.close()
+
+    return headers, columns, row_iterator()
+
+
+def _get_accounting_import_cell(row, columns, field):
+    column_index = columns.get(field)
+    if column_index is None or column_index >= len(row):
+        return None
+    return row[column_index]
+
+
+def _parse_accounting_import_vat_breakdown(row, columns):
+    split_columns = columns.get("vat_breakdown") or {}
+    if not split_columns:
+        return []
+
+    lines = []
+    for rate, field_columns in sorted(split_columns.items()):
+        base_amount = parse_amount(
+            _get_accounting_import_cell(row, {"value": field_columns.get("base")}, "value")
+        )
+        vat_amount = parse_amount(
+            _get_accounting_import_cell(
+                row, {"value": field_columns.get("vat_amount")}, "value"
+            )
+        )
+        if base_amount is None and vat_amount is None:
+            continue
+        if base_amount is None and vat_amount is not None and rate:
+            base_amount = round(vat_amount / (rate / 100), 2)
+        if base_amount is None:
+            continue
+        expected_vat = round(base_amount * (rate / 100), 2)
+        if vat_amount is None:
+            vat_amount = expected_vat
+        lines.append(
+            {
+                "rate": rate,
+                "base": base_amount,
+                "vat_amount": vat_amount,
+                "total": round(base_amount + vat_amount, 2),
+            }
+        )
+    return lines
+
+
+def _parse_accounting_import_date(value):
+    return parse_loan_date(value)
+
+
+def _parse_accounting_import_dates(value):
+    if value is None:
+        return []
+    if isinstance(value, (datetime, date)):
+        parsed = _parse_accounting_import_date(value)
+        return [parsed] if parsed else []
+    values = re.split(r"[;,|]", str(value))
+    return sorted(
+        {
+            parsed
+            for item in values
+            if (parsed := _parse_accounting_import_date(item.strip()))
+        }
+    )
+
+
+def _parse_accounting_import_vat_rate(value):
+    if value is None or str(value).strip() == "":
+        return None
+    cleaned = str(value).replace("%", "").strip()
+    parsed = parse_amount(cleaned)
+    if parsed is None:
+        return None
+    rounded = int(round(parsed))
+    return rounded if abs(parsed - rounded) < 0.001 else None
+
+
+def _parse_accounting_import_bool(value):
+    normalized = normalize_accounting_import_header(value)
+    return normalized in {
+        "1",
+        "si",
+        "true",
+        "yes",
+        "rectificativa",
+        "abono",
+        "r",
+        "credit_note",
+    }
+
+
+def _derive_accounting_import_vat_rate(base_amount, vat_amount):
+    if base_amount in (None, 0) or vat_amount is None:
+        return None
+    inferred = abs(vat_amount / base_amount * 100)
+    for allowed_rate in (0, 4, 10, 21):
+        if abs(inferred - allowed_rate) <= 0.05:
+            return allowed_rate
+    return None
+
+
+def _normalize_accounting_import_record(row, row_number, columns, record_type, source):
+    errors = []
+    invoice_date = _parse_accounting_import_date(
+        _get_accounting_import_cell(row, columns, "date")
+    )
+    counterparty = str(
+        _get_accounting_import_cell(row, columns, "counterparty") or ""
+    ).strip()
+    base_amount = parse_amount(_get_accounting_import_cell(row, columns, "base"))
+    vat_amount = parse_amount(_get_accounting_import_cell(row, columns, "vat_amount"))
+    vat_rate = _parse_accounting_import_vat_rate(
+        _get_accounting_import_cell(row, columns, "vat_rate")
+    )
+    vat_breakdown = _parse_accounting_import_vat_breakdown(row, columns)
+    total_amount = parse_amount(_get_accounting_import_cell(row, columns, "total"))
+    withholding_amount = abs(
+        parse_amount(_get_accounting_import_cell(row, columns, "withholding")) or 0.0
+    )
+    payment_dates = _parse_accounting_import_dates(
+        _get_accounting_import_cell(row, columns, "due_date")
+    )
+    document_number = str(
+        _get_accounting_import_cell(row, columns, "document_number") or ""
+    ).strip()
+    concept = str(_get_accounting_import_cell(row, columns, "concept") or "").strip()
+    is_rectificativa = _parse_accounting_import_bool(
+        _get_accounting_import_cell(row, columns, "rectificative")
+    )
+    is_rectificativa = is_rectificativa or any(
+        value is not None and value < 0
+        for value in (base_amount, vat_amount, total_amount)
+    ) or any(
+        value is not None and value < 0
+        for line in vat_breakdown
+        for value in (line.get("base"), line.get("vat_amount"), line.get("total"))
+    )
+
+    if not invoice_date:
+        errors.append("Fecha inválida o ausente.")
+    if not counterparty:
+        errors.append("Proveedor o cliente ausente.")
+    if vat_breakdown:
+        for line in vat_breakdown:
+            rate = line["rate"]
+            expected_vat_amount = round(line["base"] * (rate / 100), 2)
+            if abs(line["vat_amount"] - expected_vat_amount) > 0.02:
+                errors.append(
+                    f"La cuota de IVA del {rate}% no cuadra con su base imponible."
+                )
+        base_amount, vat_amount, gross_total = summarize_vat_breakdown(vat_breakdown)
+        vat_rate = infer_vat_rate_from_breakdown(vat_breakdown)
+        calculated_total = round(gross_total - withholding_amount, 2)
+        if total_amount is not None and abs(total_amount - calculated_total) > 0.02:
+            errors.append("El total no cuadra con el desglose de IVA y la retención.")
+        total_amount = calculated_total
+    else:
+        if base_amount is None:
+            errors.append("Base imponible inválida o ausente.")
+        if vat_rate is None:
+            vat_rate = _derive_accounting_import_vat_rate(base_amount, vat_amount)
+        if vat_rate is None and base_amount is not None and total_amount is not None:
+            if abs(total_amount - base_amount + withholding_amount) <= 0.02:
+                vat_rate = 0
+                vat_amount = 0.0
+        if vat_rate not in {0, 4, 10, 21}:
+            errors.append("Tipo de IVA no identificable. Incluye tipo IVA o cuota IVA.")
+        if base_amount is not None and vat_rate is not None:
+            calculated_vat_amount = round(base_amount * (vat_rate / 100), 2)
+            if vat_amount is not None and abs(vat_amount - calculated_vat_amount) > 0.02:
+                errors.append("La cuota de IVA no cuadra con la base y el tipo de IVA.")
+            vat_amount = calculated_vat_amount
+            normalizer = (
+                normalize_purchase_invoice_amounts
+                if record_type == "purchases"
+                else normalize_income_invoice_amounts
+            )
+            base_amount, vat_amount, calculated_total = normalizer(
+                base_amount,
+                vat_rate,
+                vat_amount,
+                total_amount,
+                withholding_amount,
+            )
+            if total_amount is not None and abs(total_amount - calculated_total) > 0.02:
+                errors.append("El total no cuadra con base, IVA y retención.")
+            total_amount = calculated_total
+    if total_amount is None:
+        errors.append("Total inválido o ausente.")
+    if (
+        total_amount is not None
+        and not is_withholding_within_invoice_total(
+            total_amount, withholding_amount, is_rectificativa
+        )
+    ):
+        errors.append("La retención supera el total de la factura.")
+    if (base_amount is not None or total_amount is not None) and not is_rectificativa:
+        if (base_amount or 0) < 0 or (total_amount or 0) < 0:
+            errors.append("Factura rectificativa no indicada.")
+
+    source_label = ACCOUNTING_IMPORT_SOURCE_LABELS.get(source, "archivo contable")
+    reference = document_number or f"fila {row_number}"
+    original_filename = f"Importación {source_label} · {reference}"[:240]
+    return {
+        "row_number": row_number,
+        "invoice_date": invoice_date,
+        "counterparty": counterparty,
+        "concept": concept,
+        "document_number": document_number,
+        "base_amount": base_amount,
+        "vat_rate": vat_rate,
+        "vat_amount": vat_amount,
+        "vat_breakdown": vat_breakdown,
+        "withholding_amount": withholding_amount,
+        "total_amount": total_amount,
+        "payment_dates": payment_dates,
+        "payment_date": payment_dates[0] if payment_dates else compute_payment_date(invoice_date),
+        "is_rectificativa": is_rectificativa,
+        "original_filename": original_filename,
+        "errors": errors,
+    }
+
+
+def parse_accounting_import_file(file_bytes, filename, record_type, source="generic"):
+    extension = os.path.splitext(filename.lower())[1]
+    if extension == ".csv":
+        headers, columns, rows = _find_accounting_import_header_from_csv(file_bytes)
+    elif extension == ".xlsx":
+        headers, columns, rows = _find_accounting_import_header_from_workbook(file_bytes)
+    else:
+        raise ValueError("Formato no soportado. Usa CSV o XLSX.")
+
+    records = []
+    non_empty_rows = 0
+    for row_index, row in enumerate(rows, start=2):
+        if not any(value not in (None, "") for value in row):
+            continue
+        non_empty_rows += 1
+        if non_empty_rows > ACCOUNTING_IMPORT_MAX_ROWS:
+            raise ValueError(
+                f"El archivo supera el máximo de {ACCOUNTING_IMPORT_MAX_ROWS} filas por carga."
+            )
+        records.append(
+            _normalize_accounting_import_record(
+                row, row_index, columns, record_type, source
+            )
+        )
+    if not records:
+        raise ValueError("El archivo no contiene filas de datos.")
+    return {
+        "headers": [str(header or "") for header in headers],
+        "columns": columns,
+        "records": records,
+    }
+
+
+def _accounting_import_duplicate_key(record):
+    return (
+        record.get("invoice_date") or "",
+        normalize_entity_name(record.get("counterparty") or ""),
+        round(float(record.get("base_amount") or 0), 2),
+        round(float(record.get("total_amount") or 0), 2),
+    )
+
+
+def mark_accounting_import_duplicates(conn, records, record_type, data_owner_id, company_id):
+    table = invoices_table if record_type == "purchases" else income_invoices_table
+    counterparty_column = table.c.supplier if record_type == "purchases" else table.c.client
+    valid_dates = [record["invoice_date"] for record in records if record.get("invoice_date")]
+    existing_keys = set()
+    if valid_dates:
+        rows = conn.execute(
+            select(
+                table.c.invoice_date,
+                counterparty_column,
+                table.c.base_amount,
+                table.c.total_amount,
+            )
+            .where(table.c.user_id == data_owner_id)
+            .where(table.c.company_id == company_id)
+            .where(table.c.invoice_date >= min(valid_dates))
+            .where(table.c.invoice_date <= max(valid_dates))
+        ).all()
+        for row in rows:
+            existing_keys.add(
+                (
+                    row[0] or "",
+                    normalize_entity_name(row[1] or ""),
+                    round(float(row[2] or 0), 2),
+                    round(float(row[3] or 0), 2),
+                )
+            )
+
+    seen_keys = set(existing_keys)
+    for record in records:
+        if record.get("errors"):
+            record["duplicate"] = False
+            continue
+        key = _accounting_import_duplicate_key(record)
+        record["duplicate"] = key in seen_keys
+        seen_keys.add(key)
+    return records
+
+
+def serialize_accounting_import_preview(records, columns):
+    valid_records = [
+        record
+        for record in records
+        if not record.get("errors") and not record.get("duplicate")
+    ]
+    invalid_records = [record for record in records if record.get("errors")]
+    duplicate_records = [record for record in records if record.get("duplicate")]
+    return {
+        "summary": {
+            "rows": len(records),
+            "ready": len(valid_records),
+            "invalid": len(invalid_records),
+            "duplicates": len(duplicate_records),
+        },
+        "mapping": columns,
+        "records": [
+            {
+                "row": record["row_number"],
+                "date": record["invoice_date"],
+                "counterparty": record["counterparty"],
+                "concept": record["concept"],
+                "base": record["base_amount"],
+                "vatRate": record["vat_rate"],
+                "vatAmount": record["vat_amount"],
+                "vatBreakdown": record.get("vat_breakdown") or [],
+                "withholding": record["withholding_amount"],
+                "total": record["total_amount"],
+                "duplicate": bool(record.get("duplicate")),
+                "errors": record.get("errors") or [],
+            }
+            for record in records[:50]
+        ],
+        "issues": [
+            {
+                "row": record["row_number"],
+                "errors": record.get("errors") or [],
+            }
+            for record in invalid_records[:20]
+        ],
+    }
+
+
 def vat_rate_to_str(value):
     if value is None:
         return ""
@@ -4084,6 +4741,7 @@ def build_sales_export_rows(source_data):
                 "concepto": row.get("original_filename"),
                 "base": float(row.get("base_amount") or 0),
                 "iva": float(row.get("vat_amount") or 0),
+                "retencion": float(row.get("withholding_amount") or 0),
                 "total": float(row.get("total_amount") or 0),
                 "tipo_iva": row.get("vat_rate") if row.get("vat_rate") is not None else "",
                 "vencimiento": row.get("payment_date") or "",
@@ -4179,6 +4837,22 @@ def build_journal_export_rows(source_data):
         base_amount = round(float(row.get("base_amount") or 0), 2)
         vat_amount = round(float(row.get("vat_amount") or 0), 2)
         total_amount = round(float(row.get("total_amount") or 0), 2)
+        withholding_amount = round(abs(float(row.get("withholding_amount") or 0)), 2)
+        lines = [{"cuenta": "430", "descripcion_cuenta": "Clientes", "debe": total_amount}]
+        if withholding_amount:
+            lines.append(
+                {
+                    "cuenta": "473",
+                    "descripcion_cuenta": "Hacienda Pública, retenciones y pagos a cuenta",
+                    "debe": withholding_amount,
+                }
+            )
+        lines.extend(
+            [
+                {"cuenta": "700", "descripcion_cuenta": "Ventas de mercaderías / servicios", "haber": base_amount},
+                {"cuenta": "477", "descripcion_cuenta": "Hacienda Pública, IVA repercutido", "haber": vat_amount},
+            ]
+        )
         append_journal_lines(
             rows,
             entry_key,
@@ -4187,11 +4861,7 @@ def build_journal_export_rows(source_data):
             "income_invoice",
             row.get("id"),
             row.get("client"),
-            [
-                {"cuenta": "430", "descripcion_cuenta": "Clientes", "debe": total_amount},
-                {"cuenta": "700", "descripcion_cuenta": "Ventas de mercaderías / servicios", "haber": base_amount},
-                {"cuenta": "477", "descripcion_cuenta": "Hacienda Pública, IVA repercutido", "haber": vat_amount},
-            ],
+            lines,
         )
 
     for row in source_data.get("manual_sales", []):
@@ -5231,6 +5901,222 @@ def _analyze_invoice_with_timeout(
         return _empty_extracted(fallback_status or "ok")
 
     return result
+
+
+def async_invoice_analysis_is_available():
+    """Persistent analysis needs explicit opt-in and shared private storage."""
+    return ASYNC_INVOICE_ANALYSIS_ENABLED and has_private_object_storage()
+
+
+def _async_invoice_analysis_storage_key(filename):
+    extension = os.path.splitext(filename or "")[1].lower()
+    if extension not in ALLOWED_EXTENSIONS:
+        extension = ""
+    return f"private/invoice-analysis/{secrets.token_hex(24)}{extension}"
+
+
+def _async_invoice_analysis_fallback_status(file_bytes, mime_type):
+    mime_lower = (mime_type or "").lower()
+    if mime_lower.startswith("image/"):
+        return "low_quality_scan"
+    if mime_lower == "application/pdf" and not _pdf_has_text(file_bytes, min_chars=100):
+        return "low_quality_scan"
+    return None
+
+
+def serialize_invoice_analysis_job(row, include_result=True):
+    result = None
+    if include_result and row.get("status") == "completed" and row.get("result_json"):
+        try:
+            parsed = json.loads(row["result_json"])
+            result = parsed if isinstance(parsed, dict) else None
+        except (TypeError, json.JSONDecodeError):
+            result = None
+    return {
+        "id": int(row["id"]),
+        "companyId": int(row["company_id"]),
+        "documentType": row["document_type"],
+        "originalFilename": row["original_filename"],
+        "status": row["status"],
+        "result": result,
+        "error": row.get("error_message") if row.get("status") == "failed" else None,
+        "createdAt": row.get("created_at"),
+        "startedAt": row.get("started_at"),
+        "completedAt": row.get("completed_at"),
+        "expiresAt": row.get("expires_at"),
+    }
+
+
+def _requeue_expired_invoice_analysis_leases(conn, now_iso):
+    conn.execute(
+        invoice_analysis_jobs_table.update()
+        .where(invoice_analysis_jobs_table.c.status == "processing")
+        .where(invoice_analysis_jobs_table.c.lease_expires_at.is_not(None))
+        .where(invoice_analysis_jobs_table.c.lease_expires_at < now_iso)
+        .values(
+            status="queued",
+            lease_expires_at=None,
+            started_at=None,
+            updated_at=now_iso,
+            error_message=None,
+        )
+    )
+
+
+def claim_next_invoice_analysis_job():
+    """Claim one queued job. Conditional update keeps multiple workers safe."""
+    now = datetime.utcnow()
+    now_iso = now.isoformat()
+    lease_expires_at = (now + timedelta(seconds=ASYNC_INVOICE_ANALYSIS_LEASE_SECONDS)).isoformat()
+    with engine.begin() as conn:
+        _requeue_expired_invoice_analysis_leases(conn, now_iso)
+        row = conn.execute(
+            select(invoice_analysis_jobs_table)
+            .where(invoice_analysis_jobs_table.c.status == "queued")
+            .where(invoice_analysis_jobs_table.c.expires_at > now_iso)
+            .order_by(invoice_analysis_jobs_table.c.created_at.asc(), invoice_analysis_jobs_table.c.id.asc())
+            .limit(1)
+        ).mappings().first()
+        if not row:
+            return None
+        claim = conn.execute(
+            invoice_analysis_jobs_table.update()
+            .where(invoice_analysis_jobs_table.c.id == row["id"])
+            .where(invoice_analysis_jobs_table.c.status == "queued")
+            .values(
+                status="processing",
+                started_at=now_iso,
+                lease_expires_at=lease_expires_at,
+                updated_at=now_iso,
+                attempt_count=int(row.get("attempt_count") or 0) + 1,
+                error_message=None,
+            )
+        )
+        if claim.rowcount != 1:
+            return None
+        claimed = dict(row)
+        claimed["status"] = "processing"
+        claimed["lease_expires_at"] = lease_expires_at
+        return claimed
+
+
+def cleanup_expired_invoice_analysis_jobs():
+    """Purge expired results and any source object left by an interrupted worker."""
+    now_iso = datetime.utcnow().isoformat()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            select(invoice_analysis_jobs_table.c.id, invoice_analysis_jobs_table.c.storage_key)
+            .where(invoice_analysis_jobs_table.c.expires_at <= now_iso)
+            .where(invoice_analysis_jobs_table.c.status != "processing")
+        ).mappings().all()
+        if rows:
+            conn.execute(
+                invoice_analysis_jobs_table.delete().where(
+                    invoice_analysis_jobs_table.c.id.in_([row["id"] for row in rows])
+                )
+            )
+    for row in rows:
+        if row.get("storage_key"):
+            try:
+                delete_private_object(row["storage_key"])
+            except Exception:
+                app.logger.exception("No se pudo limpiar un documento temporal de análisis.")
+    return len(rows)
+
+
+def run_invoice_analysis_worker_once():
+    """Process one queued document and return whether any work was claimed."""
+    cleanup_expired_invoice_analysis_jobs()
+    job = claim_next_invoice_analysis_job()
+    if not job:
+        return False
+
+    job_id = job["id"]
+    storage_key = job.get("storage_key")
+    try:
+        if not storage_key:
+            raise RuntimeError("El documento temporal ya no está disponible.")
+        file_bytes = download_private_bytes(storage_key)
+        with engine.connect() as conn:
+            company_names = get_company_names_for_analysis(conn, job["company_id"])
+            known_suppliers = fetch_known_suppliers(
+                conn, job["user_id"], job["company_id"]
+            )
+        extracted = _analyze_invoice_with_timeout(
+            file_bytes=file_bytes,
+            filename=job["original_filename"],
+            stored_name=job["original_filename"],
+            mime_type=job.get("mime_type"),
+            document_type=job["document_type"],
+            company_names=company_names,
+            known_suppliers=known_suppliers,
+            fallback_status=_async_invoice_analysis_fallback_status(
+                file_bytes, job.get("mime_type")
+            ),
+        )
+        completed_at = datetime.utcnow()
+        completed_at_iso = completed_at.isoformat()
+        result_expires_at = (
+            completed_at + timedelta(seconds=ASYNC_INVOICE_ANALYSIS_RESULT_TTL_SECONDS)
+        ).isoformat()
+        with engine.begin() as conn:
+            conn.execute(
+                invoice_analysis_jobs_table.update()
+                .where(invoice_analysis_jobs_table.c.id == job_id)
+                .where(invoice_analysis_jobs_table.c.status == "processing")
+                .values(
+                    status="completed",
+                    result_json=json.dumps(extracted),
+                    completed_at=completed_at_iso,
+                    updated_at=completed_at_iso,
+                    lease_expires_at=None,
+                    storage_key=None,
+                    expires_at=result_expires_at,
+                )
+            )
+    except Exception:
+        app.logger.exception("Error procesando el trabajo persistente de factura %s.", job_id)
+        completed_at = datetime.utcnow()
+        completed_at_iso = completed_at.isoformat()
+        result_expires_at = (
+            completed_at + timedelta(seconds=ASYNC_INVOICE_ANALYSIS_RESULT_TTL_SECONDS)
+        ).isoformat()
+        with engine.begin() as conn:
+            conn.execute(
+                invoice_analysis_jobs_table.update()
+                .where(invoice_analysis_jobs_table.c.id == job_id)
+                .where(invoice_analysis_jobs_table.c.status == "processing")
+                .values(
+                    status="failed",
+                    error_message="No se ha podido analizar el documento. Puedes completar los datos manualmente.",
+                    completed_at=completed_at_iso,
+                    updated_at=completed_at_iso,
+                    lease_expires_at=None,
+                    storage_key=None,
+                    expires_at=result_expires_at,
+                )
+            )
+    finally:
+        if storage_key:
+            try:
+                delete_private_object(storage_key)
+            except Exception:
+                app.logger.exception("No se pudo borrar el documento temporal del trabajo %s.", job_id)
+    return True
+
+
+def run_invoice_analysis_worker(stop_event=None):
+    """Long-running Render worker entry point for persistent invoice analysis."""
+    app.logger.info("Worker de análisis persistente iniciado.")
+    while not stop_event or not stop_event.is_set():
+        processed = run_invoice_analysis_worker_once()
+        if not processed:
+            if stop_event:
+                stop_event.wait(ASYNC_INVOICE_ANALYSIS_POLL_SECONDS)
+            else:
+                import time
+
+                time.sleep(ASYNC_INVOICE_ANALYSIS_POLL_SECONDS)
 
 
 def _normalize_email(value):
@@ -7791,6 +8677,199 @@ def analyze_invoice_api():
     )
 
 
+def _get_invoice_analysis_job_for_request(conn, job_id, data_owner_id, company_id):
+    return conn.execute(
+        select(invoice_analysis_jobs_table)
+        .where(invoice_analysis_jobs_table.c.id == job_id)
+        .where(invoice_analysis_jobs_table.c.user_id == data_owner_id)
+        .where(invoice_analysis_jobs_table.c.company_id == company_id)
+    ).mappings().first()
+
+
+@app.route("/api/invoice-analysis-jobs", methods=["POST"])
+def create_invoice_analysis_job():
+    if not async_invoice_analysis_is_available():
+        return jsonify(
+            {
+                "ok": False,
+                "asyncAnalysisUnavailable": True,
+                "errors": [
+                    "El análisis en segundo plano no está configurado todavía."
+                ],
+            }
+        ), 503
+
+    data_owner_id = get_data_owner_id()
+    current_user_id = get_current_user_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+    uploaded_file = request.files.get("file")
+    if not uploaded_file or not uploaded_file.filename:
+        return jsonify({"ok": False, "errors": ["Archivo no recibido."]}), 400
+
+    original_name = os.path.basename(uploaded_file.filename)
+    if not allowed_file(original_name):
+        return jsonify({"ok": False, "errors": ["Tipo de archivo no permitido."]}), 400
+    document_type = (request.form.get("document_type") or "expense").strip().lower()
+    if document_type not in ASYNC_INVOICE_ANALYSIS_DOCUMENT_TYPES:
+        return jsonify({"ok": False, "errors": ["Tipo de documento no soportado."]}), 400
+    try:
+        file_bytes = read_uploaded_file_limited(uploaded_file)
+    except ValueError as exc:
+        return jsonify({"ok": False, "errors": [str(exc)]}), 413
+
+    storage_key = _async_invoice_analysis_storage_key(original_name)
+    now = datetime.utcnow()
+    now_iso = now.isoformat()
+    expires_at = (now + timedelta(seconds=ASYNC_INVOICE_ANALYSIS_RESULT_TTL_SECONDS)).isoformat()
+    try:
+        upload_private_bytes(file_bytes, storage_key, uploaded_file.mimetype)
+        with engine.begin() as conn:
+            result = conn.execute(
+                invoice_analysis_jobs_table.insert().values(
+                    user_id=data_owner_id,
+                    company_id=company_id,
+                    submitted_by_user_id=current_user_id,
+                    document_type=document_type,
+                    original_filename=original_name,
+                    mime_type=uploaded_file.mimetype,
+                    storage_key=storage_key,
+                    status="queued",
+                    result_json=None,
+                    error_message=None,
+                    attempt_count=0,
+                    lease_expires_at=None,
+                    created_at=now_iso,
+                    started_at=None,
+                    completed_at=None,
+                    updated_at=now_iso,
+                    expires_at=expires_at,
+                )
+            )
+            job_id = result.inserted_primary_key[0]
+    except Exception:
+        try:
+            delete_private_object(storage_key)
+        except Exception:
+            app.logger.exception("No se pudo limpiar una carga temporal fallida.")
+        app.logger.exception("No se pudo crear el trabajo persistente de factura.")
+        return jsonify({"ok": False, "errors": ["No se pudo encolar el documento."]}), 500
+
+    app.logger.info("Trabajo persistente de factura creado: job_id=%s", job_id)
+    return jsonify(
+        {
+            "ok": True,
+            "job": {
+                "id": job_id,
+                "status": "queued",
+                "originalFilename": original_name,
+                "documentType": document_type,
+            },
+        }
+    ), 202
+
+
+@app.route("/api/invoice-analysis-jobs")
+def list_invoice_analysis_jobs():
+    data_owner_id = get_data_owner_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+    now_iso = datetime.utcnow().isoformat()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(invoice_analysis_jobs_table)
+            .where(invoice_analysis_jobs_table.c.user_id == data_owner_id)
+            .where(invoice_analysis_jobs_table.c.company_id == company_id)
+            .where(invoice_analysis_jobs_table.c.status.in_(["queued", "processing", "completed", "failed"]))
+            .where(invoice_analysis_jobs_table.c.expires_at > now_iso)
+            .order_by(invoice_analysis_jobs_table.c.created_at.asc(), invoice_analysis_jobs_table.c.id.asc())
+            .limit(100)
+        ).mappings().all()
+    return jsonify({"ok": True, "jobs": [serialize_invoice_analysis_job(row) for row in rows]})
+
+
+@app.route("/api/invoice-analysis-jobs/<int:job_id>")
+def get_invoice_analysis_job(job_id):
+    data_owner_id = get_data_owner_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+    with engine.connect() as conn:
+        row = _get_invoice_analysis_job_for_request(conn, job_id, data_owner_id, company_id)
+    if not row:
+        return jsonify({"ok": False, "errors": ["Trabajo no encontrado."]}), 404
+    return jsonify({"ok": True, "job": serialize_invoice_analysis_job(row)})
+
+
+@app.route("/api/invoice-analysis-jobs/<int:job_id>", methods=["DELETE"])
+def cancel_invoice_analysis_job(job_id):
+    data_owner_id = get_data_owner_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+    now_iso = datetime.utcnow().isoformat()
+    with engine.begin() as conn:
+        row = _get_invoice_analysis_job_for_request(conn, job_id, data_owner_id, company_id)
+        if not row:
+            return jsonify({"ok": False, "errors": ["Trabajo no encontrado."]}), 404
+        conn.execute(
+            invoice_analysis_jobs_table.update()
+            .where(invoice_analysis_jobs_table.c.id == job_id)
+            .where(
+                invoice_analysis_jobs_table.c.status.in_(
+                    ["queued", "processing", "completed", "failed"]
+                )
+            )
+            .values(
+                status="cancelled",
+                result_json=None,
+                error_message=None,
+                storage_key=None,
+                completed_at=now_iso,
+                updated_at=now_iso,
+                lease_expires_at=None,
+                expires_at=now_iso,
+            )
+        )
+    if row.get("storage_key"):
+        try:
+            delete_private_object(row["storage_key"])
+        except Exception:
+            app.logger.exception("No se pudo borrar un documento temporal cancelado.")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/invoice-analysis-jobs/consume", methods=["POST"])
+def consume_invoice_analysis_jobs():
+    data_owner_id = get_data_owner_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+    payload = request.get_json(silent=True) or {}
+    raw_ids = payload.get("job_ids") or payload.get("jobIds") or []
+    job_ids = [int(job_id) for job_id in raw_ids if str(job_id).isdigit()]
+    if not job_ids:
+        return jsonify({"ok": True, "consumed": 0})
+    now_iso = datetime.utcnow().isoformat()
+    with engine.begin() as conn:
+        result = conn.execute(
+            invoice_analysis_jobs_table.update()
+            .where(invoice_analysis_jobs_table.c.id.in_(job_ids))
+            .where(invoice_analysis_jobs_table.c.user_id == data_owner_id)
+            .where(invoice_analysis_jobs_table.c.company_id == company_id)
+            .where(invoice_analysis_jobs_table.c.status == "completed")
+            .values(
+                status="consumed",
+                result_json=None,
+                updated_at=now_iso,
+                expires_at=now_iso,
+            )
+        )
+    return jsonify({"ok": True, "consumed": result.rowcount})
+
+
 @app.route("/api/billing", methods=["POST"])
 def create_billing():
     data_owner_id = get_data_owner_id()
@@ -8126,6 +9205,7 @@ def list_payments():
                 income_invoices_table.c.vat_amount,
                 income_invoices_table.c.total_amount,
                 income_invoices_table.c.vat_breakdown,
+                income_invoices_table.c.withholding_amount,
                 income_invoices_table.c.original_filename,
             )
             .where(
@@ -8870,12 +9950,15 @@ def update_invoice(invoice_id):
     vat_rate_raw = vat_rate_to_str(payload.get("vat_rate"))
     vat_amount = parse_amount(str(payload.get("vat_amount") or ""))
     total_amount = parse_amount(str(payload.get("total_amount") or ""))
-    withholding_amount = parse_amount(
-        str(payload.get("withholding_amount") or payload.get("withholdingAmount") or "")
+    withholding_amount = abs(
+        parse_amount(
+            str(payload.get("withholding_amount") or payload.get("withholdingAmount") or "")
+        )
+        or 0.0
     )
-    withholding_amount = abs(withholding_amount or 0.0)
-    is_rectificativa = bool(payload.get("is_rectificativa") or payload.get("isRectificativa"))
-    is_rectificativa = bool(payload.get("is_rectificativa") or payload.get("isRectificativa"))
+    is_rectificativa = bool(
+        payload.get("is_rectificativa") or payload.get("isRectificativa")
+    )
     vat_breakdown = parse_vat_breakdown(
         payload.get("vat_breakdown") or payload.get("vatBreakdown")
     )
@@ -9056,6 +10139,7 @@ def list_income_invoices():
                 income_invoices_table.c.vat_amount,
                 income_invoices_table.c.total_amount,
                 income_invoices_table.c.vat_breakdown,
+                income_invoices_table.c.withholding_amount,
                 income_invoices_table.c.extraction_source,
                 income_invoices_table.c.confidence_score,
                 income_invoices_table.c.original_filename,
@@ -9081,6 +10165,7 @@ def list_income_invoices():
             "vat_amount": float(row["vat_amount"]) if row["vat_amount"] is not None else None,
             "total_amount": float(row["total_amount"]),
             "vat_breakdown": row.get("vat_breakdown"),
+            "withholding_amount": float(row.get("withholding_amount") or 0),
             "extraction_source": row.get("extraction_source"),
             "confidence_score": float(row["confidence_score"]) if row["confidence_score"] is not None else None,
             "original_filename": row["original_filename"],
@@ -9114,6 +10199,12 @@ def create_income_invoices():
             vat_rate_raw = vat_rate_to_str(entry.get("vat"))
             vat_amount = parse_amount(str(entry.get("vatAmount") or ""))
             total_amount = parse_amount(str(entry.get("total") or ""))
+            withholding_amount = abs(
+                parse_amount(
+                    str(entry.get("withholdingAmount") or entry.get("withholding_amount") or "")
+                )
+                or 0.0
+            )
             is_rectificativa = bool(entry.get("isRectificativa"))
             vat_breakdown = parse_vat_breakdown(
                 entry.get("vatBreakdown") or entry.get("vat_breakdown")
@@ -9147,7 +10238,8 @@ def create_income_invoices():
                 vat_rate_int = infer_vat_rate_from_breakdown(vat_breakdown)
                 summary = summarize_vat_breakdown(vat_breakdown)
                 if summary:
-                    base_amount, vat_amount, total_amount = summary
+                    base_amount, vat_amount, gross_total = summary
+                    total_amount = round(gross_total - withholding_amount, 2)
             else:
                 try:
                     vat_rate_int = int(vat_rate_raw)
@@ -9168,8 +10260,8 @@ def create_income_invoices():
                     continue
 
             if vat_rate_int is not None and vat_rate_int >= 0:
-                base_amount, vat_amount, total_amount = normalize_vat_amounts(
-                    base_amount, vat_rate_int, vat_amount, total_amount
+                base_amount, vat_amount, total_amount = normalize_income_invoice_amounts(
+                    base_amount, vat_rate_int, vat_amount, total_amount, withholding_amount
                 )
 
             created_at = datetime.utcnow().isoformat()
@@ -9187,6 +10279,7 @@ def create_income_invoices():
                     vat_amount=vat_amount,
                     total_amount=total_amount,
                     vat_breakdown=vat_breakdown_json,
+                    withholding_amount=withholding_amount,
                     payment_date=payment_date,
                     payment_dates=json.dumps(payment_dates) if payment_dates else None,
                     ocr_text=None,
@@ -9287,6 +10380,12 @@ def update_income_invoice(invoice_id):
     vat_rate_raw = vat_rate_to_str(payload.get("vat_rate"))
     vat_amount = parse_amount(str(payload.get("vat_amount") or ""))
     total_amount = parse_amount(str(payload.get("total_amount") or ""))
+    withholding_amount = abs(
+        parse_amount(str(payload.get("withholding_amount") or "")) or 0.0
+    )
+    is_rectificativa = bool(
+        payload.get("is_rectificativa") or payload.get("isRectificativa")
+    )
     vat_breakdown = parse_vat_breakdown(
         payload.get("vat_breakdown") or payload.get("vatBreakdown")
     )
@@ -9310,7 +10409,8 @@ def update_income_invoice(invoice_id):
         vat_rate = infer_vat_rate_from_breakdown(vat_breakdown)
         summary = summarize_vat_breakdown(vat_breakdown)
         if summary:
-            base_amount, vat_amount, total_amount = summary
+            base_amount, vat_amount, gross_total = summary
+            total_amount = round(gross_total - withholding_amount, 2)
     else:
         try:
             vat_rate = int(vat_rate_raw)
@@ -9323,8 +10423,8 @@ def update_income_invoice(invoice_id):
         return jsonify({"ok": False, "errors": errors}), 400
 
     if vat_rate is not None and vat_rate >= 0:
-        base_amount, vat_amount, total_amount = normalize_vat_amounts(
-            base_amount, vat_rate, vat_amount, total_amount
+        base_amount, vat_amount, total_amount = normalize_income_invoice_amounts(
+            base_amount, vat_rate, vat_amount, total_amount, withholding_amount
         )
 
     updates = {
@@ -9336,6 +10436,7 @@ def update_income_invoice(invoice_id):
         "vat_amount": vat_amount,
         "total_amount": total_amount,
         "vat_breakdown": vat_breakdown_json,
+        "withholding_amount": withholding_amount,
     }
     if payment_dates_payload is not None:
         updates["payment_dates"] = serialize_payment_dates(payment_dates)
@@ -10562,6 +11663,236 @@ def accounting_integrations_summary():
     )
 
 
+@app.route("/api/accounting-integrations/import-template")
+def accounting_integrations_import_template():
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    record_type = (request.args.get("record_type") or "purchases").strip().lower()
+    if record_type not in {"purchases", "sales"}:
+        return jsonify({"ok": False, "errors": ["Tipo de registro no soportado."]}), 400
+
+    counterparty_label = "Proveedor" if record_type == "purchases" else "Cliente"
+    sample_counterparty = (
+        "Proveedor de ejemplo" if record_type == "purchases" else "Cliente de ejemplo"
+    )
+    headers = [
+        "Fecha",
+        counterparty_label,
+        "Concepto",
+        "Número factura",
+        "Base imponible",
+        "Tipo IVA",
+        "Cuota IVA",
+        "Retención IRPF",
+        "Total",
+        "Vencimiento",
+        "Rectificativa",
+    ]
+    sample = [
+        "2026-01-31",
+        sample_counterparty,
+        "Servicio profesional",
+        "F-2026-001",
+        "1000,00",
+        "21",
+        "210,00",
+        "0,00",
+        "1210,00",
+        "2026-03-02",
+        "No",
+    ]
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter=";")
+    writer.writerow(headers)
+    writer.writerow(sample)
+    filename = "plantilla_ledged_compras.csv" if record_type == "purchases" else "plantilla_ledged_ventas.csv"
+    return app.response_class(
+        "\ufeff" + output.getvalue(),
+        mimetype="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.route("/api/accounting-integrations/import", methods=["POST"])
+def accounting_integrations_import():
+    data_owner_id = get_data_owner_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+
+    uploaded_file = request.files.get("file")
+    if not uploaded_file or not uploaded_file.filename:
+        return jsonify({"ok": False, "errors": ["Selecciona un archivo CSV o XLSX."]}), 400
+
+    filename = secure_filename(uploaded_file.filename or "")
+    extension = os.path.splitext(filename.lower())[1]
+    if extension not in ACCOUNTING_IMPORT_ALLOWED_EXTENSIONS:
+        return jsonify({"ok": False, "errors": ["Formato no soportado. Usa CSV o XLSX."]}), 400
+
+    record_type = (request.form.get("record_type") or "purchases").strip().lower()
+    if record_type not in {"purchases", "sales"}:
+        return jsonify({"ok": False, "errors": ["Tipo de registro no soportado."]}), 400
+    source = (request.form.get("source") or "generic").strip().lower()
+    if source not in ACCOUNTING_IMPORT_SOURCE_LABELS:
+        source = "generic"
+
+    try:
+        file_bytes = read_uploaded_file_limited(uploaded_file)
+        parsed = parse_accounting_import_file(file_bytes, filename, record_type, source)
+    except ValueError as exc:
+        return jsonify({"ok": False, "errors": [str(exc)]}), 400
+
+    records = parsed["records"]
+    with engine.connect() as conn:
+        mark_accounting_import_duplicates(
+            conn, records, record_type, data_owner_id, company_id
+        )
+    preview = serialize_accounting_import_preview(records, parsed["columns"])
+
+    is_preview = (request.form.get("preview") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    if is_preview:
+        return jsonify({"ok": True, **preview})
+
+    if preview["summary"]["invalid"]:
+        return jsonify(
+            {
+                "ok": False,
+                "errors": [
+                    "Corrige las filas inválidas antes de registrar la importación."
+                ],
+                **preview,
+            }
+        ), 400
+    records_to_insert = [
+        record
+        for record in records
+        if not record.get("errors") and not record.get("duplicate")
+    ]
+    if not records_to_insert:
+        return jsonify(
+            {
+                "ok": False,
+                "errors": ["No hay filas nuevas para registrar."],
+                **preview,
+            }
+        ), 400
+
+    created_at = datetime.utcnow().isoformat()
+    with engine.begin() as conn:
+        # Recheck immediately before writing; a second concurrent import must
+        # never create a silent duplicate after the preview was generated.
+        mark_accounting_import_duplicates(
+            conn, records, record_type, data_owner_id, company_id
+        )
+        records_to_insert = [
+            record
+            for record in records
+            if not record.get("errors") and not record.get("duplicate")
+        ]
+        if not records_to_insert:
+            return jsonify(
+                {
+                    "ok": False,
+                    "errors": ["Los registros ya existen o han cambiado durante la importación."],
+                }
+            ), 409
+
+        counterparty_kind = "proveedor" if record_type == "purchases" else "cliente"
+        for record in records_to_insert:
+            if is_supplier_same_as_company(record["counterparty"], company_id, conn):
+                return jsonify(
+                    {
+                        "ok": False,
+                        "errors": [
+                            f"El {counterparty_kind} de la fila {record['row_number']} coincide con la empresa activa."
+                        ],
+                    }
+                ), 400
+
+        if record_type == "purchases":
+            for record in records_to_insert:
+                expense_profile = derive_invoice_profile(
+                    "with_invoice",
+                    vat_deductible=True,
+                    vat_amount=record["vat_amount"],
+                    withholding_amount=record["withholding_amount"],
+                )
+                conn.execute(
+                    invoices_table.insert().values(
+                        user_id=data_owner_id,
+                        company_id=company_id,
+                        original_filename=record["original_filename"],
+                        stored_filename="",
+                        invoice_date=record["invoice_date"],
+                        supplier=record["counterparty"],
+                        base_amount=record["base_amount"],
+                        vat_deductible=True,
+                        vat_rate=record["vat_rate"],
+                        vat_amount=record["vat_amount"],
+                        total_amount=record["total_amount"],
+                        vat_breakdown=json.dumps(record["vat_breakdown"])
+                        if record.get("vat_breakdown")
+                        else None,
+                        withholding_amount=record["withholding_amount"],
+                        payment_date=record["payment_date"],
+                        payment_dates=json.dumps(record["payment_dates"])
+                        if record["payment_dates"]
+                        else None,
+                        ocr_text=None,
+                        extraction_source=f"accounting_import:{source}",
+                        confidence_score=1.0,
+                        expense_category="with_invoice",
+                        **expense_profile,
+                        created_at=created_at,
+                    )
+                )
+                store_known_supplier(
+                    conn, data_owner_id, company_id, record["counterparty"]
+                )
+        else:
+            for record in records_to_insert:
+                conn.execute(
+                    income_invoices_table.insert().values(
+                        user_id=data_owner_id,
+                        company_id=company_id,
+                        original_filename=record["original_filename"],
+                        stored_filename="",
+                        invoice_date=record["invoice_date"],
+                        client=record["counterparty"],
+                        base_amount=record["base_amount"],
+                        vat_rate=record["vat_rate"],
+                        vat_amount=record["vat_amount"],
+                        total_amount=record["total_amount"],
+                        vat_breakdown=json.dumps(record["vat_breakdown"])
+                        if record.get("vat_breakdown")
+                        else None,
+                        withholding_amount=record["withholding_amount"],
+                        payment_date=record["payment_date"],
+                        payment_dates=json.dumps(record["payment_dates"])
+                        if record["payment_dates"]
+                        else None,
+                        ocr_text=None,
+                        extraction_source=f"accounting_import:{source}",
+                        confidence_score=1.0,
+                        created_at=created_at,
+                    )
+                )
+
+    return jsonify(
+        {
+            "ok": True,
+            "inserted": len(records_to_insert),
+            "duplicates": preview["summary"]["duplicates"],
+        }
+    )
+
+
 @app.route("/api/accounting-integrations/export/<export_kind>")
 def accounting_integrations_export(export_kind):
     data_owner_id = get_data_owner_id()
@@ -10633,6 +11964,7 @@ def accounting_integrations_export(export_kind):
             "concepto",
             "base",
             "iva",
+            "retencion",
             "total",
             "tipo_iva",
             "vencimiento",

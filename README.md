@@ -30,6 +30,8 @@ export STORAGE_ENDPOINT_URL="https://s3.eu-west-1.amazonaws.com"
 export STORAGE_ACCESS_KEY_ID="..."
 export STORAGE_SECRET_ACCESS_KEY="..."
 export STORAGE_PUBLIC_BASE_URL="https://mi-bucket.s3.eu-west-1.amazonaws.com"
+# Bucket privado independiente, solo necesario para la cola persistente.
+export PRIVATE_STORAGE_BUCKET="ledged-invoice-analysis-private"
 ```
 
 Opcionales:
@@ -45,6 +47,12 @@ export OPENAI_INVOICE_AUDIT_REASONING_EFFORT="high"
 export OPENAI_MAX_OUTPUT_TOKENS="500"
 export ANALYSIS_TIMEOUT_SECONDS="600"
 export GUNICORN_TIMEOUT_SECONDS="660"
+export MAX_UPLOAD_SIZE_MB="12"
+export ACCOUNTING_IMPORT_MAX_ROWS="5000"
+# Activalo solo despues de crear el worker descrito mas abajo.
+export ASYNC_INVOICE_ANALYSIS_ENABLED="false"
+export ASYNC_INVOICE_ANALYSIS_LEASE_SECONDS="720"
+export ASYNC_INVOICE_ANALYSIS_RESULT_TTL_SECONDS="86400"
 ```
 
 ## Inicializar base de datos
@@ -71,6 +79,22 @@ Abre `http://127.0.0.1:5000` en el navegador.
 
 El proceso de OCR + IA esta limitado por timeout para evitar bloqueos.
 
+### Cola persistente de facturas
+
+La cola persistente permite seleccionar varias facturas: el navegador entrega los
+documentos y un worker los analiza en segundo plano, incluso si se cierra la
+pestaña. Esta desactivada por defecto para que el despliegue actual conserve el
+comportamiento existente hasta que se provisionen sus recursos.
+
+Para activarla en Render, crea un **Background Worker** con el comando
+`python worker.py`. Debe usar la misma `DATABASE_URL`, credenciales del bucket y
+variables `OPENAI_*` que el servicio web. Configura en ambos servicios
+`ASYNC_INVOICE_ANALYSIS_ENABLED=true`. El bucket debe tener el acceso publico
+bloqueado y configurarse como `PRIVATE_STORAGE_BUCKET`; no se reutiliza el bucket
+de adjuntos. Los originales se almacenan con una clave aleatoria, no se publica
+ninguna URL y se borran al terminar el analisis; el resultado temporal se elimina
+como maximo al cabo de 24 horas.
+
 ## Docker (produccion)
 
 ```bash
@@ -83,4 +107,5 @@ docker run -p 8000:8000 --env-file .env lector-facturas
 1. Arrastra facturas o selecciona archivos/carpeta.
 2. Completa fecha, proveedor, base imponible y tipo de IVA.
 3. Pulsa **Guardar facturas** para registrar todo en PostgreSQL.
-4. Filtra por periodo para ver resumenes y graficos.
+4. En **Integraciones**, importa compras o ventas desde CSV/XLSX. El archivo se procesa de forma transitoria, se valida antes de registrar y no se conserva.
+5. Filtra por periodo para ver resumenes y graficos.
