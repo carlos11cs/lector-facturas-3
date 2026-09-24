@@ -11,7 +11,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from difflib import SequenceMatcher
 from html import unescape
 from itertools import combinations
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple, Union
 
 import mimetypes
 try:
@@ -3917,7 +3917,44 @@ def _log_invoice_response_usage(
     )
 
 
-def _call_invoice_responses(client, *, file_bytes: bytes, filename: str, mime_type: str, extracted_text: str, prompt: str, audit_issues: Optional[List[str]] = None) -> Dict[str, Any]:
+def _record_invoice_response_telemetry(
+    telemetry: Optional[Dict[str, Any]],
+    *,
+    response: Any = None,
+    model: Optional[str] = None,
+    elapsed_ms: int,
+    audit: bool,
+) -> None:
+    """Accumulate only operational metadata from an existing Responses call."""
+    if telemetry is None:
+        return
+
+    telemetry["openai_ms"] = int(telemetry.get("openai_ms") or 0) + max(int(elapsed_ms), 0)
+    if model:
+        telemetry["openai_model"] = str(
+            _response_value(response, "model") or model
+        )[:255]
+    if audit:
+        # The current pipeline calls this limited audit as its second review.
+        telemetry["audit_used"] = True
+        telemetry["second_review_used"] = True
+    if response is None:
+        return
+
+    for field, value in _response_usage_values(response).items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            telemetry[field] = int(telemetry.get(field) or 0) + max(int(value), 0)
+
+
+def _invoice_analysis_telemetry_result(
+    result: Dict[str, Any], telemetry: Dict[str, Any], return_telemetry: bool
+):
+    if return_telemetry:
+        return result, telemetry
+    return result
+
+
+def _call_invoice_responses(client, *, file_bytes: bytes, filename: str, mime_type: str, extracted_text: str, prompt: str, audit_issues: Optional[List[str]] = None, telemetry: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     audit = bool(audit_issues)
     if audit_issues:
         prompt += "\n\nREVISIÓN LIMITADA: corrige solo estas discrepancias: " + " | ".join(audit_issues)
@@ -3937,18 +3974,33 @@ def _call_invoice_responses(client, *, file_bytes: bytes, filename: str, mime_ty
             timeout=timeout_seconds,
         )
     except Exception as exc:
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        _record_invoice_response_telemetry(
+            telemetry,
+            model=model,
+            elapsed_ms=elapsed_ms,
+            audit=audit,
+        )
         status = "timeout" if openai is not None and isinstance(exc, openai.APITimeoutError) else "api_error"
         logger.warning(
             "OpenAI Responses invoice API error: status=%s type=%s audit=%s openai_response_elapsed_ms=%s timeout_seconds=%s reasoning_effort=%s",
             status,
             type(exc).__name__,
             audit,
-            round((time.monotonic() - started) * 1000),
+            elapsed_ms,
             timeout_seconds,
             reasoning_effort,
         )
         raise InvoiceAnalysisResponseError(status, type(exc).__name__) from exc
     status = _response_value(response, "status")
+    elapsed_ms = round((time.monotonic() - started) * 1000)
+    _record_invoice_response_telemetry(
+        telemetry,
+        response=response,
+        model=model,
+        elapsed_ms=elapsed_ms,
+        audit=audit,
+    )
     _log_invoice_response_usage(
         response,
         status=status,
@@ -3985,7 +4037,7 @@ def _call_invoice_responses(client, *, file_bytes: bytes, filename: str, mime_ty
         getattr(response, "model", model),
         bool(file_bytes),
         audit,
-        round((time.monotonic() - started) * 1000),
+        elapsed_ms,
         request_id,
         getattr(client, "max_retries", None),
         timeout_seconds,
@@ -4023,14 +4075,35 @@ def analyze_invoice(
     document_type: str = "expense",
     company_names: Optional[list] = None,
     known_suppliers: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+    return_telemetry: bool = False,
+) -> Union[Dict[str, Any], Tuple[Dict[str, Any], Dict[str, Any]]]:
     analysis_started = time.monotonic()
+    telemetry: Dict[str, Any] = {
+        "preprocessing_ms": None,
+        "ocr_ms": None,
+        "openai_ms": 0,
+        "openai_model": None,
+        # Usage can be absent on an API response; retain that as unknown rather
+        # than recording a false zero-cost analysis.
+        "input_tokens": None,
+        "output_tokens": None,
+        "reasoning_tokens": None,
+        "total_tokens": None,
+        "ocr_used": False,
+        "audit_used": False,
+        "second_review_used": False,
+        "processing_type": None,
+    }
     try:
         _get_invoice_model()
     except RuntimeError as exc:
         logger.warning("Invoice analysis configuration error: %s", exc)
         logger.info("Invoice analysis total: status=configuration_error audit=false ocr=false invoice_total_elapsed_ms=%s", round((time.monotonic() - analysis_started) * 1000))
-        return _invoice_analysis_failure("configuration_error", str(exc))
+        return _invoice_analysis_telemetry_result(
+            _invoice_analysis_failure("configuration_error", str(exc)),
+            telemetry,
+            return_telemetry,
+        )
     client = _get_client()
     company_names = company_names or []
     if file_bytes is None:
@@ -4077,12 +4150,15 @@ def analyze_invoice(
         logger.info("Longitud texto extraido (%s): %s", filename, text_length)
         logger.info("Texto significativo (%s): %s", filename, is_significant)
         logger.info("OCR diferido (%s): %s", filename, is_scanned)
+        telemetry["processing_type"] = "pdf_embedded_text" if is_significant else "pdf_direct_document"
     elif is_image:
         # Images are native multimodal inputs. OCR remains a later fallback.
         pdf_kind = "image"
         logger.info("OCR diferido para imagen (%s).", filename)
+        telemetry["processing_type"] = "image_direct"
     else:
         logger.warning("Tipo de archivo no soportado (%s). Texto vacio enviado.", filename)
+        telemetry["processing_type"] = "unknown"
 
     logger.info(
         "OCR usado (%s): %s | Longitud texto final: %s",
@@ -4216,6 +4292,7 @@ def analyze_invoice(
         round((time.monotonic() - analysis_started) * 1000),
         used_ocr,
     )
+    telemetry["preprocessing_ms"] = round((time.monotonic() - analysis_started) * 1000)
     try:
         response_data = _call_invoice_responses(
             client,
@@ -4224,16 +4301,23 @@ def analyze_invoice(
             mime_type=mime_type,
             extracted_text=extracted_text,
             prompt=prompt,
+            telemetry=telemetry,
         )
     except InvoiceAnalysisResponseError as exc:
         logger.warning("Invoice analysis stopped before parsing: status=%s detail=%s", exc.status, exc.detail)
         logger.info("Invoice analysis total: status=%s audit=false ocr=false invoice_total_elapsed_ms=%s", exc.status, round((time.monotonic() - analysis_started) * 1000))
-        return _invoice_analysis_failure(exc.status, exc.detail)
+        return _invoice_analysis_telemetry_result(
+            _invoice_analysis_failure(exc.status, exc.detail), telemetry, return_telemetry
+        )
     except RuntimeError as exc:
         # Configuration errors must be explicit, not disguised as ambiguity.
         logger.warning("Invoice analysis configuration error: %s", exc)
         logger.info("Invoice analysis total: status=configuration_error audit=false ocr=false invoice_total_elapsed_ms=%s", round((time.monotonic() - analysis_started) * 1000))
-        return _invoice_analysis_failure("configuration_error", str(exc))
+        return _invoice_analysis_telemetry_result(
+            _invoice_analysis_failure("configuration_error", str(exc)),
+            telemetry,
+            return_telemetry,
+        )
 
     structured_data = response_data
     validation_started = time.monotonic()
@@ -4250,10 +4334,13 @@ def analyze_invoice(
     audit_elapsed_ms = 0
     if audit_performed and (is_pdf or is_image) and not extracted_text:
         ocr_function = _extract_pdf_text_ocr_from_bytes if is_pdf else _extract_image_text_ocr_from_bytes
+        ocr_started = time.monotonic()
         ocr_text, ocr_timed_out = _run_with_timeout(ocr_function, OCR_TIMEOUT_SECONDS, file_bytes)
+        telemetry["ocr_ms"] = round((time.monotonic() - ocr_started) * 1000)
         if not ocr_timed_out and ocr_text:
             extracted_text = _normalize_ocr_amount_text(ocr_text)
             used_ocr = True
+            telemetry["processing_type"] = f"{file_kind}_ocr_fallback"
             logger.info("OCR usado como fallback de auditoría (%s).", filename)
     if audit_performed:
         audit_started = time.monotonic()
@@ -4266,6 +4353,7 @@ def analyze_invoice(
                 extracted_text=extracted_text,
                 prompt=prompt,
                 audit_issues=validation_issues,
+                telemetry=telemetry,
             )
         except InvoiceAnalysisResponseError as exc:
             logger.warning("Invoice audit failed safely: status=%s", exc.status)
@@ -4283,6 +4371,9 @@ def analyze_invoice(
         used_ocr,
         validation_elapsed_ms,
     )
+    telemetry["ocr_used"] = used_ocr
+    telemetry["audit_used"] = audit_performed
+    telemetry["second_review_used"] = audit_performed
     logger.info(
         "Validacion estructurada de factura (%s): valid=%s incidencias=%s segunda_revision=%s",
         filename,
@@ -4745,7 +4836,7 @@ def analyze_invoice(
         used_ocr,
         round((time.monotonic() - analysis_started) * 1000),
     )
-    return result
+    return _invoice_analysis_telemetry_result(result, telemetry, return_telemetry)
 
 
 def extract_loan_schedule(text: str) -> List[Dict[str, Any]]:

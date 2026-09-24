@@ -32,6 +32,7 @@ from sqlalchemy import (
     Column,
     Float,
     Integer,
+    Index,
     MetaData,
     String,
     Text,
@@ -396,6 +397,44 @@ invoice_analysis_jobs_table = Table(
     Column("completed_at", String),
     Column("updated_at", String, nullable=False),
     Column("expires_at", String, nullable=False),
+)
+
+# Jobs are deliberately short-lived because they can reference temporary results.
+# Metrics live separately so operational history never retains document data.
+invoice_analysis_metrics_table = Table(
+    "invoice_analysis_metrics",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("job_id", Integer, nullable=False, unique=True),
+    Column("user_id", Integer, nullable=False),
+    Column("company_id", Integer, nullable=False),
+    Column("document_type", String, nullable=False),
+    Column("mime_type", String),
+    Column("file_size_bytes", Integer),
+    Column("queued_at", String, nullable=False),
+    Column("started_at", String),
+    Column("completed_at", String),
+    Column("queue_wait_ms", Integer),
+    Column("processing_ms", Integer),
+    Column("preprocessing_ms", Integer),
+    Column("ocr_ms", Integer),
+    Column("openai_ms", Integer),
+    Column("openai_model", String),
+    Column("input_tokens", Integer),
+    Column("output_tokens", Integer),
+    Column("reasoning_tokens", Integer),
+    Column("total_tokens", Integer),
+    Column("ocr_used", Boolean),
+    Column("audit_used", Boolean),
+    Column("second_review_used", Boolean),
+    Column("processing_type", String),
+    Column("status", String, nullable=False),
+    Column("error_type", String),
+    Column("worker_instance_id", String),
+    Column("updated_at", String, nullable=False),
+    Index("ix_invoice_analysis_metrics_company_queued_at", "company_id", "queued_at"),
+    Index("ix_invoice_analysis_metrics_status_completed_at", "status", "completed_at"),
+    Index("ix_invoice_analysis_metrics_worker_completed_at", "worker_instance_id", "completed_at"),
 )
 
 facturacion_table = Table(
@@ -5824,6 +5863,7 @@ def _analysis_worker(
     company_names,
     known_suppliers,
     queue,
+    capture_telemetry,
 ):
     try:
         result = analyze_invoice(
@@ -5833,8 +5873,18 @@ def _analysis_worker(
             document_type=document_type,
             company_names=company_names,
             known_suppliers=known_suppliers,
+            return_telemetry=capture_telemetry,
         )
-        queue.put(result)
+        if capture_telemetry:
+            extracted, telemetry = result
+            queue.put(
+                {
+                    "__analysis_result__": extracted,
+                    "__analysis_telemetry__": telemetry,
+                }
+            )
+        else:
+            queue.put(result)
     except Exception as exc:
         queue.put({"__error__": str(exc)})
 
@@ -5848,7 +5898,12 @@ def _analyze_invoice_with_timeout(
     company_names=None,
     known_suppliers=None,
     fallback_status=None,
+    capture_telemetry=False,
 ):
+    def fallback_result():
+        extracted = _empty_extracted(fallback_status or "ok")
+        return (extracted, None) if capture_telemetry else extracted
+
     ctx = mp.get_context("spawn")
     queue = ctx.Queue(1)
     process = ctx.Process(
@@ -5861,6 +5916,7 @@ def _analyze_invoice_with_timeout(
             company_names or [],
             known_suppliers or [],
             queue,
+            capture_telemetry,
         ),
     )
     process.start()
@@ -5874,7 +5930,7 @@ def _analyze_invoice_with_timeout(
             stored_name,
             ANALYSIS_TIMEOUT_SECONDS,
         )
-        return _empty_extracted(fallback_status or "ok")
+        return fallback_result()
 
     if process.exitcode != 0:
         app.logger.warning(
@@ -5882,7 +5938,7 @@ def _analyze_invoice_with_timeout(
             stored_name,
             process.exitcode,
         )
-        return _empty_extracted(fallback_status or "ok")
+        return fallback_result()
 
     try:
         result = queue.get_nowait()
@@ -5891,15 +5947,23 @@ def _analyze_invoice_with_timeout(
             "Analisis sin resultado para %s. Se pasa a modo manual.",
             stored_name,
         )
-        return _empty_extracted(fallback_status or "ok")
+        return fallback_result()
 
     if not isinstance(result, dict) or result.get("__error__"):
         app.logger.warning(
             "Analisis con error para %s. Se pasa a modo manual.",
             stored_name,
         )
-        return _empty_extracted(fallback_status or "ok")
+        return fallback_result()
 
+    if capture_telemetry:
+        if not isinstance(result, dict) or "__analysis_result__" not in result:
+            return fallback_result()
+        extracted = result.get("__analysis_result__")
+        if not isinstance(extracted, dict):
+            return fallback_result()
+        telemetry = result.get("__analysis_telemetry__")
+        return extracted, telemetry if isinstance(telemetry, dict) else None
     return result
 
 
@@ -5947,7 +6011,174 @@ def serialize_invoice_analysis_job(row, include_result=True):
     }
 
 
+def _invoice_analysis_elapsed_ms(started_at, completed_at):
+    """Return a non-negative wall-clock duration for persisted ISO timestamps."""
+    if not started_at or not completed_at:
+        return None
+    try:
+        elapsed = (datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    return max(0, round(elapsed * 1000))
+
+
+def _render_worker_instance_id():
+    """Render supplies this identifier at runtime; local workers intentionally remain anonymous."""
+    value = (os.getenv("RENDER_INSTANCE_ID") or "").strip()
+    return value[:255] or None
+
+
+def _create_invoice_analysis_metrics(
+    conn,
+    *,
+    job_id,
+    user_id,
+    company_id,
+    document_type,
+    mime_type,
+    file_size_bytes,
+    queued_at,
+):
+    conn.execute(
+        invoice_analysis_metrics_table.insert().values(
+            job_id=job_id,
+            user_id=user_id,
+            company_id=company_id,
+            document_type=document_type,
+            mime_type=mime_type or None,
+            file_size_bytes=max(int(file_size_bytes or 0), 0),
+            queued_at=queued_at,
+            started_at=None,
+            completed_at=None,
+            queue_wait_ms=None,
+            processing_ms=None,
+            preprocessing_ms=None,
+            ocr_ms=None,
+            openai_ms=None,
+            openai_model=None,
+            input_tokens=None,
+            output_tokens=None,
+            reasoning_tokens=None,
+            total_tokens=None,
+            ocr_used=None,
+            audit_used=None,
+            second_review_used=None,
+            processing_type=None,
+            status="queued",
+            error_type=None,
+            worker_instance_id=None,
+            updated_at=queued_at,
+        )
+    )
+
+
+def _mark_invoice_analysis_metrics_processing(conn, job_id, started_at):
+    row = conn.execute(
+        select(invoice_analysis_metrics_table.c.queued_at).where(
+            invoice_analysis_metrics_table.c.job_id == job_id
+        )
+    ).mappings().first()
+    if not row:
+        return
+    conn.execute(
+        invoice_analysis_metrics_table.update()
+        .where(invoice_analysis_metrics_table.c.job_id == job_id)
+        .values(
+            status="processing",
+            started_at=started_at,
+            completed_at=None,
+            queue_wait_ms=_invoice_analysis_elapsed_ms(row.get("queued_at"), started_at),
+            processing_ms=None,
+            error_type=None,
+            worker_instance_id=_render_worker_instance_id(),
+            updated_at=started_at,
+        )
+    )
+
+
+def _mark_invoice_analysis_metrics_queued(conn, job_ids, queued_at):
+    if not job_ids:
+        return
+    conn.execute(
+        invoice_analysis_metrics_table.update()
+        .where(invoice_analysis_metrics_table.c.job_id.in_(job_ids))
+        .values(
+            status="queued",
+            started_at=None,
+            completed_at=None,
+            queue_wait_ms=None,
+            processing_ms=None,
+            error_type=None,
+            worker_instance_id=None,
+            updated_at=queued_at,
+        )
+    )
+
+
+def _complete_invoice_analysis_metrics(
+    conn,
+    *,
+    job_id,
+    status,
+    completed_at,
+    telemetry=None,
+    error_type=None,
+):
+    row = conn.execute(
+        select(invoice_analysis_metrics_table.c.started_at).where(
+            invoice_analysis_metrics_table.c.job_id == job_id
+        )
+    ).mappings().first()
+    if not row:
+        return
+
+    values = {
+        "status": status,
+        "completed_at": completed_at,
+        "processing_ms": _invoice_analysis_elapsed_ms(row.get("started_at"), completed_at),
+        "error_type": (str(error_type)[:255] if error_type else None),
+        "updated_at": completed_at,
+    }
+    if isinstance(telemetry, dict):
+        for field in (
+            "preprocessing_ms",
+            "ocr_ms",
+            "openai_ms",
+            "input_tokens",
+            "output_tokens",
+            "reasoning_tokens",
+            "total_tokens",
+        ):
+            value = telemetry.get(field)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                values[field] = max(int(value), 0)
+        for field in ("ocr_used", "audit_used", "second_review_used"):
+            if isinstance(telemetry.get(field), bool):
+                values[field] = telemetry[field]
+        model = telemetry.get("openai_model")
+        if model:
+            values["openai_model"] = str(model)[:255]
+        processing_type = telemetry.get("processing_type")
+        if processing_type:
+            values["processing_type"] = str(processing_type)[:255]
+
+    conn.execute(
+        invoice_analysis_metrics_table.update()
+        .where(invoice_analysis_metrics_table.c.job_id == job_id)
+        .values(**values)
+    )
+
+
 def _requeue_expired_invoice_analysis_leases(conn, now_iso):
+    expired_job_ids = [
+        row[0]
+        for row in conn.execute(
+            select(invoice_analysis_jobs_table.c.id)
+            .where(invoice_analysis_jobs_table.c.status == "processing")
+            .where(invoice_analysis_jobs_table.c.lease_expires_at.is_not(None))
+            .where(invoice_analysis_jobs_table.c.lease_expires_at < now_iso)
+        ).all()
+    ]
     conn.execute(
         invoice_analysis_jobs_table.update()
         .where(invoice_analysis_jobs_table.c.status == "processing")
@@ -5961,6 +6192,7 @@ def _requeue_expired_invoice_analysis_leases(conn, now_iso):
             error_message=None,
         )
     )
+    return expired_job_ids
 
 
 def claim_next_invoice_analysis_job():
@@ -5968,8 +6200,10 @@ def claim_next_invoice_analysis_job():
     now = datetime.utcnow()
     now_iso = now.isoformat()
     lease_expires_at = (now + timedelta(seconds=ASYNC_INVOICE_ANALYSIS_LEASE_SECONDS)).isoformat()
+    expired_job_ids = []
+    claimed = None
     with engine.begin() as conn:
-        _requeue_expired_invoice_analysis_leases(conn, now_iso)
+        expired_job_ids = _requeue_expired_invoice_analysis_leases(conn, now_iso)
         row = conn.execute(
             select(invoice_analysis_jobs_table)
             .where(invoice_analysis_jobs_table.c.status == "queued")
@@ -5977,27 +6211,36 @@ def claim_next_invoice_analysis_job():
             .order_by(invoice_analysis_jobs_table.c.created_at.asc(), invoice_analysis_jobs_table.c.id.asc())
             .limit(1)
         ).mappings().first()
-        if not row:
-            return None
-        claim = conn.execute(
-            invoice_analysis_jobs_table.update()
-            .where(invoice_analysis_jobs_table.c.id == row["id"])
-            .where(invoice_analysis_jobs_table.c.status == "queued")
-            .values(
-                status="processing",
-                started_at=now_iso,
-                lease_expires_at=lease_expires_at,
-                updated_at=now_iso,
-                attempt_count=int(row.get("attempt_count") or 0) + 1,
-                error_message=None,
+        if row:
+            claim = conn.execute(
+                invoice_analysis_jobs_table.update()
+                .where(invoice_analysis_jobs_table.c.id == row["id"])
+                .where(invoice_analysis_jobs_table.c.status == "queued")
+                .values(
+                    status="processing",
+                    started_at=now_iso,
+                    lease_expires_at=lease_expires_at,
+                    updated_at=now_iso,
+                    attempt_count=int(row.get("attempt_count") or 0) + 1,
+                    error_message=None,
+                )
             )
-        )
-        if claim.rowcount != 1:
-            return None
-        claimed = dict(row)
-        claimed["status"] = "processing"
-        claimed["lease_expires_at"] = lease_expires_at
-        return claimed
+            if claim.rowcount == 1:
+                claimed = dict(row)
+                claimed["status"] = "processing"
+                claimed["started_at"] = now_iso
+                claimed["lease_expires_at"] = lease_expires_at
+
+    # Observability must never make a queue claim fail after its job is committed.
+    try:
+        if expired_job_ids or claimed:
+            with engine.begin() as conn:
+                _mark_invoice_analysis_metrics_queued(conn, expired_job_ids, now_iso)
+                if claimed:
+                    _mark_invoice_analysis_metrics_processing(conn, claimed["id"], now_iso)
+    except Exception:
+        app.logger.exception("No se pudo actualizar la telemetría del trabajo de factura.")
+    return claimed
 
 
 def cleanup_expired_invoice_analysis_jobs():
@@ -6042,7 +6285,7 @@ def run_invoice_analysis_worker_once():
             known_suppliers = fetch_known_suppliers(
                 conn, job["user_id"], job["company_id"]
             )
-        extracted = _analyze_invoice_with_timeout(
+        extracted, telemetry = _analyze_invoice_with_timeout(
             file_bytes=file_bytes,
             filename=job["original_filename"],
             stored_name=job["original_filename"],
@@ -6053,6 +6296,7 @@ def run_invoice_analysis_worker_once():
             fallback_status=_async_invoice_analysis_fallback_status(
                 file_bytes, job.get("mime_type")
             ),
+            capture_telemetry=True,
         )
         completed_at = datetime.utcnow()
         completed_at_iso = completed_at.isoformat()
@@ -6060,7 +6304,7 @@ def run_invoice_analysis_worker_once():
             completed_at + timedelta(seconds=ASYNC_INVOICE_ANALYSIS_RESULT_TTL_SECONDS)
         ).isoformat()
         with engine.begin() as conn:
-            conn.execute(
+            result = conn.execute(
                 invoice_analysis_jobs_table.update()
                 .where(invoice_analysis_jobs_table.c.id == job_id)
                 .where(invoice_analysis_jobs_table.c.status == "processing")
@@ -6074,7 +6318,26 @@ def run_invoice_analysis_worker_once():
                     expires_at=result_expires_at,
                 )
             )
-    except Exception:
+        if result.rowcount == 1:
+            try:
+                with engine.begin() as conn:
+                    analysis_error = extracted.get("analysis_error")
+                    if not isinstance(analysis_error, dict):
+                        analysis_error = {}
+                    _complete_invoice_analysis_metrics(
+                        conn,
+                        job_id=job_id,
+                        status="completed",
+                        completed_at=completed_at_iso,
+                        telemetry=telemetry,
+                        error_type=analysis_error.get("status"),
+                    )
+            except Exception:
+                app.logger.exception(
+                    "No se pudo registrar la telemetría final del trabajo de factura %s.",
+                    job_id,
+                )
+    except Exception as exc:
         app.logger.exception("Error procesando el trabajo persistente de factura %s.", job_id)
         completed_at = datetime.utcnow()
         completed_at_iso = completed_at.isoformat()
@@ -6082,7 +6345,7 @@ def run_invoice_analysis_worker_once():
             completed_at + timedelta(seconds=ASYNC_INVOICE_ANALYSIS_RESULT_TTL_SECONDS)
         ).isoformat()
         with engine.begin() as conn:
-            conn.execute(
+            result = conn.execute(
                 invoice_analysis_jobs_table.update()
                 .where(invoice_analysis_jobs_table.c.id == job_id)
                 .where(invoice_analysis_jobs_table.c.status == "processing")
@@ -6096,6 +6359,21 @@ def run_invoice_analysis_worker_once():
                     expires_at=result_expires_at,
                 )
             )
+        if result.rowcount == 1:
+            try:
+                with engine.begin() as conn:
+                    _complete_invoice_analysis_metrics(
+                        conn,
+                        job_id=job_id,
+                        status="failed",
+                        completed_at=completed_at_iso,
+                        error_type=type(exc).__name__,
+                    )
+            except Exception:
+                app.logger.exception(
+                    "No se pudo registrar la telemetría fallida del trabajo de factura %s.",
+                    job_id,
+                )
     finally:
         if storage_key:
             try:
@@ -8756,6 +9034,21 @@ def create_invoice_analysis_job():
         app.logger.exception("No se pudo crear el trabajo persistente de factura.")
         return jsonify({"ok": False, "errors": ["No se pudo encolar el documento."]}), 500
 
+    try:
+        with engine.begin() as conn:
+            _create_invoice_analysis_metrics(
+                conn,
+                job_id=job_id,
+                user_id=data_owner_id,
+                company_id=company_id,
+                document_type=document_type,
+                mime_type=uploaded_file.mimetype,
+                file_size_bytes=len(file_bytes),
+                queued_at=now_iso,
+            )
+    except Exception:
+        app.logger.exception("No se pudo registrar la telemetría de un trabajo de factura.")
+
     app.logger.info("Trabajo persistente de factura creado: job_id=%s", job_id)
     return jsonify(
         {
@@ -8814,7 +9107,7 @@ def cancel_invoice_analysis_job(job_id):
         row = _get_invoice_analysis_job_for_request(conn, job_id, data_owner_id, company_id)
         if not row:
             return jsonify({"ok": False, "errors": ["Trabajo no encontrado."]}), 404
-        conn.execute(
+        result = conn.execute(
             invoice_analysis_jobs_table.update()
             .where(invoice_analysis_jobs_table.c.id == job_id)
             .where(
@@ -8833,6 +9126,17 @@ def cancel_invoice_analysis_job(job_id):
                 expires_at=now_iso,
             )
         )
+    if result.rowcount == 1:
+        try:
+            with engine.begin() as conn:
+                _complete_invoice_analysis_metrics(
+                    conn,
+                    job_id=job_id,
+                    status="cancelled",
+                    completed_at=now_iso,
+                )
+        except Exception:
+            app.logger.exception("No se pudo registrar la cancelación de un trabajo de factura.")
     if row.get("storage_key"):
         try:
             delete_private_object(row["storage_key"])
