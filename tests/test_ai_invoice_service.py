@@ -1,6 +1,7 @@
 import unittest
 import json
 import os
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from services import ai_invoice_service as svc
@@ -1427,6 +1428,86 @@ N° intracommunautaire : ESB05410667"""
                 "Cliente: KALOS HEALTH AND BEAUTY S.L.",
             )
         )
+
+    def test_rate_limit_error_is_classified_with_safe_metadata_and_no_sdk_retry(self):
+        class SyntheticRateLimitError(Exception):
+            status_code = 429
+            code = "rate_limit_exceeded"
+            type = "requests"
+            param = None
+            request_id = "req_rate_limit_123"
+            response = SimpleNamespace(
+                headers={
+                    "retry-after": "17",
+                    "x-ratelimit-limit-requests": "100",
+                    "x-ratelimit-remaining-requests": "0",
+                    "x-ratelimit-reset-requests": "1s",
+                }
+            )
+
+        class SyntheticTimeoutError(Exception):
+            pass
+
+        class FakeResponses:
+            def create(self, **_kwargs):
+                raise SyntheticRateLimitError()
+
+        class FakeClient:
+            max_retries = 2
+
+            def __init__(self):
+                self.responses = FakeResponses()
+                self.retry_options = []
+
+            def with_options(self, *, max_retries):
+                self.retry_options.append(max_retries)
+                self.max_retries = max_retries
+                return self
+
+        client = FakeClient()
+        fake_openai = type(
+            "FakeOpenAI",
+            (),
+            {
+                "RateLimitError": SyntheticRateLimitError,
+                "APITimeoutError": SyntheticTimeoutError,
+            },
+        )()
+        with patch.object(svc, "openai", fake_openai), patch.dict(
+            os.environ, {"OPENAI_INVOICE_MODEL": "invoice-test-model"}
+        ), self.assertRaises(svc.InvoiceAnalysisResponseError) as context:
+            svc._call_invoice_responses(
+                client,
+                file_bytes=b"%PDF-test",
+                filename="factura.pdf",
+                mime_type="application/pdf",
+                extracted_text="",
+                prompt="Extrae",
+                queue_managed_rate_limits=True,
+            )
+
+        error = context.exception
+        self.assertEqual(error.status, "rate_limited")
+        self.assertEqual(client.retry_options, [0])
+        self.assertEqual(error.metadata["http_status"], 429)
+        self.assertEqual(error.metadata["request_id"], "req_rate_limit_123")
+        self.assertEqual(error.metadata["retry_after_seconds"], 17)
+        self.assertEqual(error.metadata["rate_limit_kind"], "rpm")
+        self.assertTrue(error.metadata["retryable"])
+        self.assertNotIn("body", error.metadata)
+
+    def test_spend_and_quota_rate_limits_are_not_retryable(self):
+        kind, retryable = svc._classify_rate_limit(
+            {"error_code": "project_spend_limit_exceeded"}
+        )
+        self.assertEqual(kind, "project_spend_limit_exceeded")
+        self.assertFalse(retryable)
+
+        kind, retryable = svc._classify_rate_limit(
+            {"error_type": "credit_balance_exhausted"}
+        )
+        self.assertEqual(kind, "credit_balance_exhausted")
+        self.assertFalse(retryable)
 
     def _responses_client(self, response):
         class FakeResponses:

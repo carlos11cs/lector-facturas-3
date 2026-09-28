@@ -2,13 +2,15 @@ import base64
 import gc
 import json
 import logging
+import math
 import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from difflib import SequenceMatcher
+from email.utils import parsedate_to_datetime
 from html import unescape
 from itertools import combinations
 from typing import Any, Dict, Optional, List, Tuple, Union
@@ -59,10 +61,122 @@ _EU_THOUSANDS_RE = re.compile(r"^\d{1,3}\.\d{3},\d{2}$")
 class InvoiceAnalysisResponseError(RuntimeError):
     """A terminal API or response-contract failure for invoice extraction."""
 
-    def __init__(self, status: str, detail: Optional[str] = None):
+    def __init__(
+        self,
+        status: str,
+        detail: Optional[str] = None,
+        *,
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
         self.status = status
         self.detail = detail or ""
+        # Metadata is explicitly whitelisted operational data. It must never
+        # contain a request body, document content, prompt, or credentials.
+        self.metadata = metadata or {}
         super().__init__(f"Invoice analysis response is not usable: {status}")
+
+
+_RATE_LIMIT_HEADER_FIELDS = {
+    "x-ratelimit-limit-requests": "requests_limit",
+    "x-ratelimit-remaining-requests": "requests_remaining",
+    "x-ratelimit-reset-requests": "requests_reset",
+    "x-ratelimit-limit-tokens": "tokens_limit",
+    "x-ratelimit-remaining-tokens": "tokens_remaining",
+    "x-ratelimit-reset-tokens": "tokens_reset",
+}
+_NON_RETRYABLE_RATE_LIMIT_CODES = {
+    "insufficient_quota",
+    "project_spend_limit_exceeded",
+    "organization_spend_limit_exceeded",
+    "credit_balance_exhausted",
+    "billing_hard_limit_reached",
+}
+
+
+def _safe_error_text(value: Any, limit: int = 255) -> Optional[str]:
+    if value is None:
+        return None
+    text_value = str(value).strip()
+    return text_value[:limit] if text_value else None
+
+
+def _retry_after_seconds(headers: Any) -> Optional[int]:
+    """Read a server-directed retry delay without retaining raw headers."""
+    if not headers:
+        return None
+    retry_after_ms = headers.get("retry-after-ms")
+    if retry_after_ms:
+        try:
+            return max(1, math.ceil(float(retry_after_ms) / 1000))
+        except (TypeError, ValueError):
+            pass
+    retry_after = headers.get("retry-after")
+    if not retry_after:
+        return None
+    try:
+        return max(1, math.ceil(float(retry_after)))
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(str(retry_after))
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(
+                1,
+                math.ceil(
+                    (retry_at.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()
+                ),
+            )
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
+
+
+def _classify_rate_limit(metadata: Dict[str, Any]) -> Tuple[str, bool]:
+    """Classify a 429 using only documented error fields and rate-limit headers."""
+    error_code = (metadata.get("error_code") or "").lower()
+    error_type = (metadata.get("error_type") or "").lower()
+    combined = f"{error_code} {error_type}"
+    for code in _NON_RETRYABLE_RATE_LIMIT_CODES:
+        if code in combined:
+            return code, False
+    if "spend_limit" in combined:
+        return "spend_limit_exceeded", False
+    if "credit" in combined and ("exhaust" in combined or "balance" in combined):
+        return "credit_balance_exhausted", False
+    if "quota" in combined:
+        return "insufficient_quota", False
+    if "token" in combined:
+        return "tpm", True
+    if "request" in combined or "rpm" in combined:
+        return "rpm", True
+    if metadata.get("tokens_remaining") == "0":
+        return "tpm", True
+    if metadata.get("requests_remaining") == "0":
+        return "rpm", True
+    return "burst_or_unknown", True
+
+
+def _safe_openai_error_metadata(exc: Exception) -> Dict[str, Any]:
+    """Return only whitelisted API-error metadata suitable for logs and metrics."""
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None) or {}
+    metadata: Dict[str, Any] = {
+        "http_status": getattr(exc, "status_code", None),
+        "error_class": type(exc).__name__,
+        "error_code": _safe_error_text(getattr(exc, "code", None)),
+        "error_type": _safe_error_text(getattr(exc, "type", None)),
+        "error_param": _safe_error_text(getattr(exc, "param", None)),
+        "request_id": _safe_error_text(
+            getattr(exc, "request_id", None) or headers.get("x-request-id")
+        ),
+        "retry_after_seconds": _retry_after_seconds(headers),
+    }
+    for header_name, field_name in _RATE_LIMIT_HEADER_FIELDS.items():
+        header_value = _safe_error_text(headers.get(header_name), limit=64)
+        if header_value is not None:
+            metadata[field_name] = header_value
+    if not isinstance(metadata["http_status"], int):
+        metadata["http_status"] = None
+    return {key: value for key, value in metadata.items() if value is not None}
 
 
 def _get_invoice_model() -> str:
@@ -3954,7 +4068,7 @@ def _invoice_analysis_telemetry_result(
     return result
 
 
-def _call_invoice_responses(client, *, file_bytes: bytes, filename: str, mime_type: str, extracted_text: str, prompt: str, audit_issues: Optional[List[str]] = None, telemetry: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _call_invoice_responses(client, *, file_bytes: bytes, filename: str, mime_type: str, extracted_text: str, prompt: str, audit_issues: Optional[List[str]] = None, telemetry: Optional[Dict[str, Any]] = None, queue_managed_rate_limits: bool = False) -> Dict[str, Any]:
     audit = bool(audit_issues)
     if audit_issues:
         prompt += "\n\nREVISIÓN LIMITADA: corrige solo estas discrepancias: " + " | ".join(audit_issues)
@@ -3963,8 +4077,19 @@ def _call_invoice_responses(client, *, file_bytes: bytes, filename: str, mime_ty
     max_output_tokens = _get_invoice_max_output_tokens()
     timeout_seconds = _get_invoice_timeout_seconds()
     reasoning_effort = _get_invoice_reasoning_effort(audit)
+    # Only persistent jobs own rate-limit retries. The direct fallback keeps
+    # the SDK policy because it has no durable queue for a later retry.
+    request_client = (
+        client.with_options(max_retries=0)
+        if queue_managed_rate_limits and hasattr(client, "with_options")
+        else client
+    )
+    logger.info(
+        "OpenAI invoice request retry policy: max_retries=%s",
+        getattr(request_client, "max_retries", None),
+    )
     try:
-        response = client.responses.create(
+        response = request_client.responses.create(
             model=model,
             reasoning={"effort": reasoning_effort},
             max_output_tokens=max_output_tokens,
@@ -3981,17 +4106,41 @@ def _call_invoice_responses(client, *, file_bytes: bytes, filename: str, mime_ty
             elapsed_ms=elapsed_ms,
             audit=audit,
         )
-        status = "timeout" if openai is not None and isinstance(exc, openai.APITimeoutError) else "api_error"
+        rate_limit_error = getattr(openai, "RateLimitError", None) if openai is not None else None
+        is_rate_limited = rate_limit_error is not None and isinstance(exc, rate_limit_error)
+        metadata = _safe_openai_error_metadata(exc)
+        if is_rate_limited:
+            rate_limit_kind, retryable = _classify_rate_limit(metadata)
+            metadata["rate_limit_kind"] = rate_limit_kind
+            metadata["retryable"] = retryable
+            status = "rate_limited"
+        else:
+            status = "timeout" if openai is not None and isinstance(exc, openai.APITimeoutError) else "api_error"
         logger.warning(
-            "OpenAI Responses invoice API error: status=%s type=%s audit=%s openai_response_elapsed_ms=%s timeout_seconds=%s reasoning_effort=%s",
+            "OpenAI Responses invoice API error: status=%s error_class=%s http_status=%s error_code=%s error_type=%s error_param=%s request_id=%s retry_after_seconds=%s rate_limit_kind=%s retryable=%s requests_limit=%s requests_remaining=%s requests_reset=%s tokens_limit=%s tokens_remaining=%s tokens_reset=%s audit=%s openai_response_elapsed_ms=%s timeout_seconds=%s reasoning_effort=%s",
             status,
-            type(exc).__name__,
+            metadata.get("error_class"),
+            metadata.get("http_status"),
+            metadata.get("error_code"),
+            metadata.get("error_type"),
+            metadata.get("error_param"),
+            metadata.get("request_id"),
+            metadata.get("retry_after_seconds"),
+            metadata.get("rate_limit_kind"),
+            metadata.get("retryable"),
+            metadata.get("requests_limit"),
+            metadata.get("requests_remaining"),
+            metadata.get("requests_reset"),
+            metadata.get("tokens_limit"),
+            metadata.get("tokens_remaining"),
+            metadata.get("tokens_reset"),
             audit,
             elapsed_ms,
             timeout_seconds,
             reasoning_effort,
         )
-        raise InvoiceAnalysisResponseError(status, type(exc).__name__) from exc
+        detail = metadata.get("error_code") or metadata.get("error_type") or type(exc).__name__
+        raise InvoiceAnalysisResponseError(status, detail, metadata=metadata) from exc
     status = _response_value(response, "status")
     elapsed_ms = round((time.monotonic() - started) * 1000)
     _record_invoice_response_telemetry(
@@ -4039,17 +4188,26 @@ def _call_invoice_responses(client, *, file_bytes: bytes, filename: str, mime_ty
         audit,
         elapsed_ms,
         request_id,
-        getattr(client, "max_retries", None),
+        getattr(request_client, "max_retries", None),
         timeout_seconds,
         reasoning_effort,
     )
     return data
 
 
-def _invoice_analysis_failure(status: str, detail: Optional[str] = None) -> Dict[str, Any]:
+def _invoice_analysis_failure(
+    status: str,
+    detail: Optional[str] = None,
+    *,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     return {
         "analysis_status": "failed",
-        "analysis_error": {"status": status, "detail": detail or None},
+        "analysis_error": {
+            "status": status,
+            "detail": detail or None,
+            "metadata": metadata or None,
+        },
         "supplier": None,
         "provider_name": None,
         "client_name": None,
@@ -4077,6 +4235,7 @@ def analyze_invoice(
     known_suppliers: Optional[List[str]] = None,
     return_telemetry: bool = False,
     ocr_semaphore: Any = None,
+    queue_managed_rate_limits: bool = False,
 ) -> Union[Dict[str, Any], Tuple[Dict[str, Any], Dict[str, Any]]]:
     analysis_started = time.monotonic()
     telemetry: Dict[str, Any] = {
@@ -4304,12 +4463,17 @@ def analyze_invoice(
             extracted_text=extracted_text,
             prompt=prompt,
             telemetry=telemetry,
+            queue_managed_rate_limits=queue_managed_rate_limits,
         )
     except InvoiceAnalysisResponseError as exc:
         logger.warning("Invoice analysis stopped before parsing: status=%s detail=%s", exc.status, exc.detail)
         logger.info("Invoice analysis total: status=%s audit=false ocr=false invoice_total_elapsed_ms=%s", exc.status, round((time.monotonic() - analysis_started) * 1000))
         return _invoice_analysis_telemetry_result(
-            _invoice_analysis_failure(exc.status, exc.detail), telemetry, return_telemetry
+            _invoice_analysis_failure(
+                exc.status, exc.detail, metadata=exc.metadata
+            ),
+            telemetry,
+            return_telemetry,
         )
     except RuntimeError as exc:
         # Configuration errors must be explicit, not disguised as ambiguity.
@@ -4372,9 +4536,24 @@ def analyze_invoice(
                 prompt=prompt,
                 audit_issues=validation_issues,
                 telemetry=telemetry,
+                queue_managed_rate_limits=queue_managed_rate_limits,
             )
         except InvoiceAnalysisResponseError as exc:
             logger.warning("Invoice audit failed safely: status=%s", exc.status)
+            if exc.status == "rate_limited":
+                logger.info(
+                    "Invoice analysis total: status=%s audit=true ocr=%s invoice_total_elapsed_ms=%s",
+                    exc.status,
+                    used_ocr,
+                    round((time.monotonic() - analysis_started) * 1000),
+                )
+                return _invoice_analysis_telemetry_result(
+                    _invoice_analysis_failure(
+                        exc.status, exc.detail, metadata=exc.metadata
+                    ),
+                    telemetry,
+                    return_telemetry,
+                )
             audited_data = None
         if audited_data:
             structured_data = audited_data

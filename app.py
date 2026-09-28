@@ -8,6 +8,7 @@ import json
 import logging
 import multiprocessing as mp
 import os
+import random
 import re
 import secrets
 import sys
@@ -43,6 +44,7 @@ from sqlalchemy import (
     create_engine,
     func,
     inspect,
+    or_,
     select,
     text,
 )
@@ -104,6 +106,8 @@ FULL_DOCUMENT_CONCURRENCY = max(
 )
 OCR_CONCURRENCY = max(1, int(os.getenv("OCR_CONCURRENCY", "1")))
 COMPANY_CONCURRENCY = max(1, int(os.getenv("COMPANY_CONCURRENCY", "2")))
+RATE_LIMIT_RETRY_DELAYS_SECONDS = (30, 60, 120, 300)
+MAX_RATE_LIMIT_DEFERRED_RETRIES = len(RATE_LIMIT_RETRY_DELAYS_SECONDS)
 ASYNC_INVOICE_ANALYSIS_LEASE_RENEWAL_SECONDS = max(
     1,
     min(
@@ -408,6 +412,8 @@ invoice_analysis_jobs_table = Table(
     Column("result_json", Text),
     Column("error_message", Text),
     Column("attempt_count", Integer, nullable=False, server_default=text("0")),
+    Column("next_attempt_at", String),
+    Column("deferred_retry_count", Integer, nullable=False, server_default=text("0")),
     Column("lease_expires_at", String),
     # A fresh token is generated on every claim. It fences a worker that lost
     # its lease from writing a result after another worker recovered the job.
@@ -457,6 +463,10 @@ invoice_analysis_metrics_table = Table(
     Column("analysis_route", String),
     Column("lease_renewal_count", Integer, nullable=False, server_default=text("0")),
     Column("concurrency_limit_reason", String),
+    Column("next_attempt_at", String),
+    Column("deferred_retry_count", Integer, nullable=False, server_default=text("0")),
+    # This contains only the whitelisted operational fields from a 429.
+    Column("rate_limit_metadata_json", Text),
     Column("status", String, nullable=False),
     Column("error_type", String),
     Column("worker_instance_id", String),
@@ -1404,6 +1414,10 @@ def init_db():
     add_column_if_missing(
         "invoice_analysis_jobs", "lease_renewal_count", "INTEGER DEFAULT 0"
     )
+    add_column_if_missing("invoice_analysis_jobs", "next_attempt_at", "VARCHAR")
+    add_column_if_missing(
+        "invoice_analysis_jobs", "deferred_retry_count", "INTEGER DEFAULT 0"
+    )
     add_column_if_missing("invoice_analysis_jobs", "batch_id", "VARCHAR")
     add_column_if_missing("invoice_analysis_jobs", "batch_position", "INTEGER")
     add_column_if_missing("invoice_analysis_metrics", "batch_id", "VARCHAR")
@@ -1416,12 +1430,26 @@ def init_db():
     add_column_if_missing(
         "invoice_analysis_metrics", "concurrency_limit_reason", "VARCHAR"
     )
+    add_column_if_missing(
+        "invoice_analysis_metrics", "next_attempt_at", "VARCHAR"
+    )
+    add_column_if_missing(
+        "invoice_analysis_metrics", "deferred_retry_count", "INTEGER DEFAULT 0"
+    )
+    add_column_if_missing(
+        "invoice_analysis_metrics", "rate_limit_metadata_json", "TEXT"
+    )
     # The queue uses status/expiry/age to claim work, company/status/age to
     # enforce fairness, and the batch index for progressive client polling.
     create_index_if_missing(
         "ix_invoice_analysis_jobs_queue",
         "invoice_analysis_jobs",
         "status, expires_at, created_at, id",
+    )
+    create_index_if_missing(
+        "ix_invoice_analysis_jobs_ready_queue",
+        "invoice_analysis_jobs",
+        "status, next_attempt_at, expires_at, created_at, id",
     )
     create_index_if_missing(
         "ix_invoice_analysis_jobs_company_queue",
@@ -5914,8 +5942,8 @@ def _report_period_label(year, months, quarter=None):
     return str(year)
 
 
-def _empty_extracted(analysis_status="ok"):
-    return {
+def _empty_extracted(analysis_status="ok", analysis_error=None):
+    extracted = {
         "analysis_status": analysis_status,
         "provider_name": None,
         "invoice_date": None,
@@ -5928,6 +5956,9 @@ def _empty_extracted(analysis_status="ok"):
         "analysis_text": "",
         "validation": {"is_consistent": None, "difference": None},
     }
+    if analysis_error:
+        extracted["analysis_error"] = analysis_error
+    return extracted
 
 
 def _pdf_has_text(data: bytes, min_chars: int = 100) -> bool:
@@ -5968,6 +5999,7 @@ def _analysis_worker(
             known_suppliers=known_suppliers,
             return_telemetry=capture_telemetry,
             ocr_semaphore=ocr_semaphore,
+            queue_managed_rate_limits=capture_telemetry,
         )
         if capture_telemetry:
             extracted, telemetry = result
@@ -5995,8 +6027,16 @@ def _analyze_invoice_with_timeout(
     capture_telemetry=False,
     ocr_semaphore=None,
 ):
-    def fallback_result():
-        extracted = _empty_extracted(fallback_status or "ok")
+    def fallback_result(status, detail):
+        analysis_status = fallback_status or status
+        extracted = _empty_extracted(
+            analysis_status,
+            {
+                "status": status,
+                "detail": detail,
+                "metadata": None,
+            },
+        )
         return (extracted, None) if capture_telemetry else extracted
 
     ctx = mp.get_context("spawn")
@@ -6026,7 +6066,7 @@ def _analyze_invoice_with_timeout(
             stored_name,
             ANALYSIS_TIMEOUT_SECONDS,
         )
-        return fallback_result()
+        return fallback_result("timeout", "El análisis superó el tiempo máximo.")
 
     if process.exitcode != 0:
         app.logger.warning(
@@ -6034,7 +6074,7 @@ def _analyze_invoice_with_timeout(
             stored_name,
             process.exitcode,
         )
-        return fallback_result()
+        return fallback_result("worker_error", "El proceso de análisis terminó inesperadamente.")
 
     try:
         result = queue.get_nowait()
@@ -6043,21 +6083,21 @@ def _analyze_invoice_with_timeout(
             "Analisis sin resultado para %s. Se pasa a modo manual.",
             stored_name,
         )
-        return fallback_result()
+        return fallback_result("worker_error", "El proceso de análisis no devolvió un resultado.")
 
     if not isinstance(result, dict) or result.get("__error__"):
         app.logger.warning(
             "Analisis con error para %s. Se pasa a modo manual.",
             stored_name,
         )
-        return fallback_result()
+        return fallback_result("worker_error", "El proceso de análisis devolvió un error.")
 
     if capture_telemetry:
         if not isinstance(result, dict) or "__analysis_result__" not in result:
-            return fallback_result()
+            return fallback_result("worker_error", "El proceso de análisis devolvió un resultado inválido.")
         extracted = result.get("__analysis_result__")
         if not isinstance(extracted, dict):
-            return fallback_result()
+            return fallback_result("worker_error", "El proceso de análisis devolvió un resultado inválido.")
         telemetry = result.get("__analysis_telemetry__")
         return extracted, telemetry if isinstance(telemetry, dict) else None
     return result
@@ -6124,6 +6164,8 @@ def serialize_invoice_analysis_job(row, include_result=True):
         "documentType": row["document_type"],
         "originalFilename": row["original_filename"],
         "status": row["status"],
+        "nextAttemptAt": row.get("next_attempt_at"),
+        "deferredRetryCount": max(int(row.get("deferred_retry_count") or 0), 0),
         "result": result,
         "error": row.get("error_message") if row.get("status") == "failed" else None,
         "createdAt": row.get("created_at"),
@@ -6194,6 +6236,9 @@ def _create_invoice_analysis_metrics(
             analysis_route=None,
             lease_renewal_count=0,
             concurrency_limit_reason=None,
+            next_attempt_at=None,
+            deferred_retry_count=0,
+            rate_limit_metadata_json=None,
             status="queued",
             error_type=None,
             worker_instance_id=None,
@@ -6225,6 +6270,7 @@ def _mark_invoice_analysis_metrics_processing(conn, job_id, started_at):
             analysis_route="current_full_document",
             lease_renewal_count=0,
             concurrency_limit_reason=None,
+            next_attempt_at=None,
             updated_at=started_at,
         )
     )
@@ -6248,6 +6294,7 @@ def _mark_invoice_analysis_metrics_queued(conn, job_ids, queued_at):
             analysis_route=None,
             lease_renewal_count=0,
             concurrency_limit_reason=None,
+            next_attempt_at=None,
             updated_at=queued_at,
         )
     )
@@ -6261,6 +6308,7 @@ def _complete_invoice_analysis_metrics(
     completed_at,
     telemetry=None,
     error_type=None,
+    rate_limit_metadata=None,
     lease_renewal_count=None,
 ):
     row = conn.execute(
@@ -6281,10 +6329,17 @@ def _complete_invoice_analysis_metrics(
         "processing_ms": _invoice_analysis_elapsed_ms(row.get("started_at"), completed_at),
         "total_elapsed_ms": _invoice_analysis_elapsed_ms(row.get("queued_at"), completed_at),
         "error_type": (str(error_type)[:255] if error_type else None),
+        "next_attempt_at": None,
         "updated_at": completed_at,
     }
     if lease_renewal_count is not None:
         values["lease_renewal_count"] = max(int(lease_renewal_count), 0)
+    if rate_limit_metadata is not None:
+        values["rate_limit_metadata_json"] = json.dumps(
+            _safe_rate_limit_metadata(rate_limit_metadata),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     if isinstance(telemetry, dict):
         for field in (
             "preprocessing_ms",
@@ -6319,6 +6374,136 @@ def _complete_invoice_analysis_metrics(
         invoice_analysis_metrics_table.update()
         .where(invoice_analysis_metrics_table.c.job_id == job_id)
         .values(**values)
+    )
+
+
+_RATE_LIMIT_METADATA_STRING_FIELDS = {
+    "error_class": 255,
+    "error_code": 255,
+    "error_type": 255,
+    "error_param": 255,
+    "request_id": 255,
+    "requests_limit": 64,
+    "requests_remaining": 64,
+    "requests_reset": 64,
+    "tokens_limit": 64,
+    "tokens_remaining": 64,
+    "tokens_reset": 64,
+    "rate_limit_kind": 64,
+}
+
+
+def _safe_rate_limit_metadata(metadata):
+    """Keep operational 429 facts without retaining document or API payload data."""
+    if not isinstance(metadata, dict):
+        return {}
+    safe = {}
+    http_status = metadata.get("http_status")
+    if isinstance(http_status, int) and not isinstance(http_status, bool):
+        safe["http_status"] = http_status
+    retry_after_seconds = metadata.get("retry_after_seconds")
+    if isinstance(retry_after_seconds, (int, float)) and not isinstance(
+        retry_after_seconds, bool
+    ):
+        safe["retry_after_seconds"] = max(0, int(retry_after_seconds))
+    if isinstance(metadata.get("retryable"), bool):
+        safe["retryable"] = metadata["retryable"]
+    for field, limit in _RATE_LIMIT_METADATA_STRING_FIELDS.items():
+        value = metadata.get(field)
+        if value is not None and str(value).strip():
+            safe[field] = str(value).strip()[:limit]
+    return safe
+
+
+def _invoice_analysis_error_details(extracted):
+    if not isinstance(extracted, dict):
+        return "worker_error", {}, ""
+    analysis_error = extracted.get("analysis_error")
+    if not isinstance(analysis_error, dict):
+        analysis_error = {}
+    status = str(analysis_error.get("status") or "worker_error")[:255]
+    detail = str(analysis_error.get("detail") or "")[:255]
+    return status, _safe_rate_limit_metadata(analysis_error.get("metadata")), detail
+
+
+def _is_valid_invoice_analysis_result(extracted):
+    """Only successful structured results may enter the completed queue state."""
+    if not isinstance(extracted, dict):
+        return False
+    return str(extracted.get("analysis_status") or "ok").lower() in {
+        "ok",
+        "needs_review",
+    }
+
+
+def _rate_limit_retry_delay_seconds(retry_count, metadata):
+    """Use OpenAI's delay when supplied, otherwise controlled jittered backoff."""
+    retry_after_seconds = (metadata or {}).get("retry_after_seconds")
+    if isinstance(retry_after_seconds, (int, float)) and not isinstance(
+        retry_after_seconds, bool
+    ):
+        return max(1, int(retry_after_seconds))
+    index = min(max(int(retry_count) - 1, 0), len(RATE_LIMIT_RETRY_DELAYS_SECONDS) - 1)
+    base_delay = RATE_LIMIT_RETRY_DELAYS_SECONDS[index]
+    return max(1, round(base_delay * random.uniform(0.8, 1.2)))
+
+
+def _rate_limit_terminal_error_type(metadata):
+    kind = str((metadata or {}).get("rate_limit_kind") or "").strip()
+    if kind in {
+        "insufficient_quota",
+        "project_spend_limit_exceeded",
+        "organization_spend_limit_exceeded",
+        "credit_balance_exhausted",
+        "billing_hard_limit_reached",
+        "spend_limit_exceeded",
+    }:
+        return kind
+    return "rate_limited"
+
+
+def _invoice_analysis_failure_message(analysis_status, error_status, metadata):
+    if analysis_status == "low_quality_scan":
+        return "La calidad del documento no permite analizarlo automáticamente. Puedes completar los datos manualmente."
+    if analysis_status == "timeout" or error_status == "timeout":
+        return "El análisis tardó demasiado. Puedes completar los datos manualmente."
+    if error_status == "rate_limited":
+        if not (metadata or {}).get("retryable", False):
+            return "El servicio de análisis no está disponible por un límite de cuota. Puedes completar los datos manualmente."
+        return "El servicio de análisis sigue temporalmente ocupado. Puedes completar los datos manualmente."
+    return "No se ha podido analizar el documento. Puedes completar los datos manualmente."
+
+
+def _mark_invoice_analysis_metrics_retrying(
+    conn,
+    *,
+    job_id,
+    queued_at,
+    next_attempt_at,
+    deferred_retry_count,
+    metadata,
+):
+    safe_metadata = _safe_rate_limit_metadata(metadata)
+    safe_metadata["deferred_retry_count"] = max(int(deferred_retry_count), 0)
+    safe_metadata["next_attempt_at"] = next_attempt_at
+    conn.execute(
+        invoice_analysis_metrics_table.update()
+        .where(invoice_analysis_metrics_table.c.job_id == job_id)
+        .values(
+            status="retrying",
+            started_at=None,
+            completed_at=None,
+            queue_wait_ms=None,
+            processing_ms=None,
+            total_elapsed_ms=None,
+            error_type="rate_limited",
+            next_attempt_at=next_attempt_at,
+            deferred_retry_count=max(int(deferred_retry_count), 0),
+            rate_limit_metadata_json=json.dumps(
+                safe_metadata, sort_keys=True, separators=(",", ":")
+            ),
+            updated_at=queued_at,
+        )
     )
 
 
@@ -6377,6 +6562,12 @@ def _invoice_analysis_claim_statement(now_iso):
             .label("company_queue_position"),
         )
         .where(invoice_analysis_jobs_table.c.status == "queued")
+        .where(
+            or_(
+                invoice_analysis_jobs_table.c.next_attempt_at.is_(None),
+                invoice_analysis_jobs_table.c.next_attempt_at <= now_iso,
+            )
+        )
         .where(invoice_analysis_jobs_table.c.expires_at > now_iso)
         .subquery()
     )
@@ -6427,6 +6618,7 @@ def claim_next_invoice_analysis_job():
                 .values(
                     status="processing",
                     started_at=now_iso,
+                    next_attempt_at=None,
                     lease_expires_at=lease_expires_at,
                     lease_token=lease_token,
                     lease_renewal_count=0,
@@ -6600,6 +6792,82 @@ def _invoice_analysis_completion_conditions(job_id, lease_token, completed_at_is
     return conditions
 
 
+def _defer_rate_limited_invoice_analysis_job(job, *, metadata, now=None):
+    """Release a fenced lease and delay a transient 429 without losing its source."""
+    now = now or datetime.utcnow()
+    now_iso = now.isoformat()
+    current_retry_count = max(int(job.get("deferred_retry_count") or 0), 0)
+    retry_count = current_retry_count + 1
+    delay_seconds = _rate_limit_retry_delay_seconds(retry_count, metadata)
+    next_attempt_at = (now + timedelta(seconds=delay_seconds)).isoformat()
+    safe_metadata = _safe_rate_limit_metadata(metadata)
+
+    with engine.begin() as conn:
+        result = conn.execute(
+            invoice_analysis_jobs_table.update()
+            .where(
+                *_invoice_analysis_completion_conditions(
+                    job["id"], job.get("lease_token"), now_iso
+                )
+            )
+            .values(
+                status="queued",
+                result_json=None,
+                error_message=None,
+                next_attempt_at=next_attempt_at,
+                deferred_retry_count=retry_count,
+                started_at=None,
+                completed_at=None,
+                updated_at=now_iso,
+                lease_expires_at=None,
+                lease_token=None,
+            )
+        )
+    if result.rowcount != 1:
+        app.logger.warning(
+            "Reintento rate-limited descartado para trabajo de factura %s: lease ya no vigente.",
+            job["id"],
+        )
+        return False
+    try:
+        with engine.begin() as conn:
+            _mark_invoice_analysis_metrics_retrying(
+                conn,
+                job_id=job["id"],
+                queued_at=now_iso,
+                next_attempt_at=next_attempt_at,
+                deferred_retry_count=retry_count,
+                metadata=safe_metadata,
+            )
+    except Exception:
+        app.logger.exception(
+            "No se pudo registrar la telemetría del reintento rate-limited para el trabajo %s.",
+            job["id"],
+        )
+    app.logger.warning(
+        "Invoice analysis rate limit deferred: job_id=%s retry_count=%s next_attempt_at=%s delay_seconds=%s http_status=%s error_class=%s error_code=%s error_type=%s error_param=%s request_id=%s rate_limit_kind=%s retry_after_seconds=%s requests_limit=%s requests_remaining=%s requests_reset=%s tokens_limit=%s tokens_remaining=%s tokens_reset=%s",
+        job["id"],
+        retry_count,
+        next_attempt_at,
+        delay_seconds,
+        safe_metadata.get("http_status"),
+        safe_metadata.get("error_class"),
+        safe_metadata.get("error_code"),
+        safe_metadata.get("error_type"),
+        safe_metadata.get("error_param"),
+        safe_metadata.get("request_id"),
+        safe_metadata.get("rate_limit_kind"),
+        safe_metadata.get("retry_after_seconds"),
+        safe_metadata.get("requests_limit"),
+        safe_metadata.get("requests_remaining"),
+        safe_metadata.get("requests_reset"),
+        safe_metadata.get("tokens_limit"),
+        safe_metadata.get("tokens_remaining"),
+        safe_metadata.get("tokens_reset"),
+    )
+    return True
+
+
 def _set_invoice_analysis_concurrency_limit(job_id, reason):
     try:
         with engine.begin() as conn:
@@ -6624,6 +6892,8 @@ def _finish_invoice_analysis_job(
     completed_at_iso,
     telemetry=None,
     error_type=None,
+    error_message=None,
+    rate_limit_metadata=None,
     extracted=None,
     lease_renewal_count=0,
 ):
@@ -6635,6 +6905,7 @@ def _finish_invoice_analysis_job(
         "updated_at": completed_at_iso,
         "lease_expires_at": None,
         "lease_token": None,
+        "next_attempt_at": None,
         "storage_key": None,
         "expires_at": (
             datetime.fromisoformat(completed_at_iso)
@@ -6646,7 +6917,7 @@ def _finish_invoice_analysis_job(
         values["error_message"] = None
     else:
         values["result_json"] = None
-        values["error_message"] = (
+        values["error_message"] = error_message or (
             "No se ha podido analizar el documento. Puedes completar los datos manualmente."
         )
     with engine.begin() as conn:
@@ -6673,6 +6944,7 @@ def _finish_invoice_analysis_job(
                 completed_at=completed_at_iso,
                 telemetry=telemetry,
                 error_type=error_type,
+                rate_limit_metadata=rate_limit_metadata,
                 lease_renewal_count=lease_renewal_count,
             )
     except Exception:
@@ -6729,18 +7001,64 @@ def _run_claimed_invoice_analysis_job(
 
         renewer.stop()
         completed_at_iso = datetime.utcnow().isoformat()
-        analysis_error = extracted.get("analysis_error")
-        if not isinstance(analysis_error, dict):
-            analysis_error = {}
-        source_can_be_deleted = _finish_invoice_analysis_job(
-            job,
-            status="completed",
-            completed_at_iso=completed_at_iso,
-            telemetry=telemetry,
-            error_type=analysis_error.get("status"),
-            extracted=extracted,
-            lease_renewal_count=renewer.renewal_count,
+        analysis_status = str(extracted.get("analysis_status") or "ok").lower()
+        error_status, error_metadata, _error_detail = _invoice_analysis_error_details(
+            extracted
         )
+        is_retryable_rate_limit = (
+            analysis_status == "failed"
+            and error_status == "rate_limited"
+            and error_metadata.get("retryable") is True
+        )
+        current_retry_count = max(int(job.get("deferred_retry_count") or 0), 0)
+        if (
+            is_retryable_rate_limit
+            and current_retry_count < MAX_RATE_LIMIT_DEFERRED_RETRIES
+        ):
+            # The temporary object belongs to the requeued job and must remain
+            # available for the next fenced worker claim.
+            _defer_rate_limited_invoice_analysis_job(
+                job, metadata=error_metadata
+            )
+        elif _is_valid_invoice_analysis_result(extracted):
+            source_can_be_deleted = _finish_invoice_analysis_job(
+                job,
+                status="completed",
+                completed_at_iso=completed_at_iso,
+                telemetry=telemetry,
+                error_type=None,
+                extracted=extracted,
+                lease_renewal_count=renewer.renewal_count,
+            )
+        else:
+            terminal_error_type = (
+                _rate_limit_terminal_error_type(error_metadata)
+                if error_status == "rate_limited"
+                else error_status
+            )
+            if is_retryable_rate_limit:
+                app.logger.warning(
+                    "Invoice analysis rate limit exhausted: job_id=%s retry_count=%s max_retries=%s request_id=%s rate_limit_kind=%s",
+                    job_id,
+                    current_retry_count,
+                    MAX_RATE_LIMIT_DEFERRED_RETRIES,
+                    error_metadata.get("request_id"),
+                    error_metadata.get("rate_limit_kind"),
+                )
+            source_can_be_deleted = _finish_invoice_analysis_job(
+                job,
+                status="failed",
+                completed_at_iso=completed_at_iso,
+                telemetry=telemetry,
+                error_type=terminal_error_type,
+                error_message=_invoice_analysis_failure_message(
+                    analysis_status, error_status, error_metadata
+                ),
+                rate_limit_metadata=(
+                    error_metadata if error_status == "rate_limited" else None
+                ),
+                lease_renewal_count=renewer.renewal_count,
+            )
     except Exception as exc:
         app.logger.exception("Error procesando el trabajo persistente de factura %s.", job_id)
         renewer.stop()
@@ -9466,6 +9784,8 @@ def create_invoice_analysis_job():
                     result_json=None,
                     error_message=None,
                     attempt_count=0,
+                    next_attempt_at=None,
+                    deferred_retry_count=0,
                     lease_expires_at=None,
                     lease_token=None,
                     lease_renewal_count=0,
@@ -9511,6 +9831,8 @@ def create_invoice_analysis_job():
             "job": {
                 "id": job_id,
                 "status": "queued",
+                "nextAttemptAt": None,
+                "deferredRetryCount": 0,
                 "originalFilename": original_name,
                 "documentType": document_type,
                 "batchId": batch_id,
@@ -9644,6 +9966,7 @@ def cancel_invoice_analysis_job(job_id):
                 updated_at=now_iso,
                 lease_expires_at=None,
                 lease_token=None,
+                next_attempt_at=None,
                 expires_at=now_iso,
             )
         )

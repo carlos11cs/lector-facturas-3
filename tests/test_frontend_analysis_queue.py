@@ -24,6 +24,15 @@ class TestFrontendAnalysisQueue(unittest.TestCase):
         self.assertIn('formData.append("batch_id", item.analysisBatchId);', script)
         self.assertIn("/api/invoice-analysis-batches/${encodeURIComponent(batchId)}", script)
 
+    def test_failed_or_deferred_persistent_jobs_are_not_applied_as_invoices(self):
+        script = (PROJECT_ROOT / "static/js/app.js").read_text(encoding="utf-8")
+
+        self.assertIn('if (item.analysisStatus === "failed")', script)
+        self.assertIn("item.analysisRetryAt = job.nextAttemptAt || null;", script)
+        self.assertIn("const RETRYING_ANALYSIS_MESSAGE", script)
+        self.assertIn("getAnalysisQueueMessage(", script)
+        self.assertIn("retryAtMs - Date.now() + ANALYSIS_PENDING_TIMEOUT_MS", script)
+
 
 if __name__ == "__main__":
     unittest.main()

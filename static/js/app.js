@@ -101,6 +101,8 @@ const LOW_QUALITY_SCAN_MESSAGE =
   "La calidad de la factura escaneada no es óptima. No se puede leer correctamente. Por favor, introduce los datos manualmente.";
 const TIMEOUT_MESSAGE =
   "El análisis tardó demasiado y se detuvo. Puedes introducir los datos manualmente.";
+const RETRYING_ANALYSIS_MESSAGE =
+  "El servicio de análisis está temporalmente ocupado. Se reintentará automáticamente.";
 const VAT_WARNING_MESSAGE =
   "Puede que la calidad de la imagen o la información sea dudosa. Por favor, revisa siempre las cantidades y los tipos de IVA.";
 const REVIEW_REQUIRED_MESSAGE =
@@ -117,6 +119,11 @@ const ANALYSIS_PENDING_TIMEOUT_MS = 610 * 1000;
 const analysisTaskQueue = [];
 let activeAnalysisTasks = 0;
 const analysisBatchPolls = new Map();
+
+function getAnalysisQueueMessage(item, queuedMessage, processingMessage) {
+  if (item.analysisRetryAt) return RETRYING_ANALYSIS_MESSAGE;
+  return item.analysisQueued ? queuedMessage : processingMessage;
+}
 
 function isPendingUploadItemPresent(item) {
   return (
@@ -159,6 +166,13 @@ function scheduleAnalysisTimeout(item, render) {
   if (item._analysisTimeoutId) {
     clearTimeout(item._analysisTimeoutId);
   }
+  const retryAtMs = Date.parse(item.analysisRetryAt || "");
+  const timeoutMs = Number.isFinite(retryAtMs)
+    ? Math.max(
+        ANALYSIS_PENDING_TIMEOUT_MS,
+        retryAtMs - Date.now() + ANALYSIS_PENDING_TIMEOUT_MS
+      )
+    : ANALYSIS_PENDING_TIMEOUT_MS;
   item._analysisTimeoutId = window.setTimeout(() => {
     if (item._analysisCancelled || !isPendingUploadItemPresent(item) || !item.analysisPending) {
       return;
@@ -175,7 +189,7 @@ function scheduleAnalysisTimeout(item, render) {
     if (typeof render === "function") {
       render();
     }
-  }, ANALYSIS_PENDING_TIMEOUT_MS);
+  }, timeoutMs);
 }
 
 function processAnalysisQueue() {
@@ -4478,9 +4492,11 @@ function appendPendingStatusRow(item) {
     ? item.analysisErrorMessage || ANALYSIS_ERROR_MESSAGE
     : item.analysisWarning
       ? item.analysisWarning
-      : item.analysisQueued
-        ? "Documento en cola… Se analiza de una en una para evitar bloqueos."
-        : "Analizando documento… Puede tardar hasta 1 minuto.";
+      : getAnalysisQueueMessage(
+          item,
+          "Documento en cola… Se analiza de una en una para evitar bloqueos.",
+          "Analizando documento… Puede tardar hasta 1 minuto."
+        );
   statusWrapper.appendChild(message);
   statusTd.appendChild(statusWrapper);
   statusRow.appendChild(statusTd);
@@ -5240,9 +5256,11 @@ function renderTable() {
         ? item.analysisErrorMessage || ANALYSIS_ERROR_MESSAGE
         : item.analysisWarning
           ? item.analysisWarning
-          : item.analysisQueued
-            ? "Factura en cola… Se analiza de una en una para evitar bloqueos con escaneadas."
-            : "Analizando factura… Las facturas escaneadas pueden tardar hasta 1 minuto.";
+          : getAnalysisQueueMessage(
+              item,
+              "Factura en cola… Se analiza de una en una para evitar bloqueos con escaneadas.",
+              "Analizando factura… Las facturas escaneadas pueden tardar hasta 1 minuto."
+            );
       statusWrapper.appendChild(message);
       statusTd.appendChild(statusWrapper);
       statusRow.appendChild(statusTd);
@@ -5757,9 +5775,11 @@ function renderIncomeTable() {
         ? item.analysisErrorMessage || ANALYSIS_ERROR_MESSAGE
         : item.analysisWarning
           ? item.analysisWarning
-          : item.analysisQueued
-            ? "Factura en cola… Se analiza de una en una para evitar bloqueos con escaneadas."
-            : "Analizando factura… Las facturas escaneadas pueden tardar hasta 1 minuto.";
+          : getAnalysisQueueMessage(
+              item,
+              "Factura en cola… Se analiza de una en una para evitar bloqueos con escaneadas.",
+              "Analizando factura… Las facturas escaneadas pueden tardar hasta 1 minuto."
+            );
       statusWrapper.appendChild(message);
       statusTd.appendChild(statusWrapper);
       statusRow.appendChild(statusTd);
@@ -5783,6 +5803,15 @@ function applyIncomeAnalysisResult(item, data) {
   const extracted = data.extracted || {};
   item.analysisText = extracted.analysis_text || "";
   item.analysisStatus = extracted.analysis_status || "ok";
+  if (item.analysisStatus === "failed") {
+    item.analysisPending = false;
+    item.analysisQueued = false;
+    item.analysisRetryAt = null;
+    item.analysisError = true;
+    item.analysisErrorMessage = ANALYSIS_ERROR_MESSAGE;
+    renderIncomeTable();
+    return;
+  }
   const extractedBreakdown = parseVatBreakdown(
     extracted.vat_breakdown || extracted.vatBreakdown
   );
@@ -6261,6 +6290,15 @@ function applyInvoiceAnalysisResult(item, data) {
       const extracted = data.extracted || {};
       item.analysisText = extracted.analysis_text || "";
       item.analysisStatus = extracted.analysis_status || "ok";
+      if (item.analysisStatus === "failed") {
+        item.analysisPending = false;
+        item.analysisQueued = false;
+        item.analysisRetryAt = null;
+        item.analysisError = true;
+        item.analysisErrorMessage = ANALYSIS_ERROR_MESSAGE;
+        renderTable();
+        return;
+      }
       const extractedBreakdown = parseVatBreakdown(
         extracted.vat_breakdown || extracted.vatBreakdown
       );
@@ -6494,6 +6532,8 @@ function getAnalysisBatchItems(batchId) {
 }
 
 function applyPersistentAnalysisJob(item, job) {
+  item.analysisRetryAt = job.nextAttemptAt || null;
+  item.analysisRetryCount = Number(job.deferredRetryCount || 0) || 0;
   if (job.status === "completed") {
     const payload = { ok: true, extracted: job.result || {} };
     if (item.isIncome) applyIncomeAnalysisResult(item, payload);
@@ -6509,6 +6549,12 @@ function applyPersistentAnalysisJob(item, job) {
     return;
   }
   item.analysisQueued = job.status === "queued";
+  if (item.analysisQueued && item.analysisRetryAt) {
+    scheduleAnalysisTimeout(
+      item,
+      item.isIncome ? renderIncomeTable : renderTable
+    );
+  }
 }
 
 function fetchPersistentAnalysisBatch(batchId, page = 1, jobs = []) {
@@ -6591,19 +6637,8 @@ function pollPersistentAnalysisJob(item, render) {
         return;
       }
       const job = data.job;
-      if (job.status === "completed") {
-        if (item.isIncome) {
-          applyIncomeAnalysisResult(item, { ok: true, extracted: job.result || {} });
-        } else {
-          applyInvoiceAnalysisResult(item, { ok: true, extracted: job.result || {} });
-        }
-        return;
-      }
-      if (job.status === "failed") {
-        markPersistentAnalysisError(item, render, job.error || ANALYSIS_ERROR_MESSAGE);
-        return;
-      }
-      item.analysisQueued = job.status === "queued";
+      applyPersistentAnalysisJob(item, job);
+      if (!item.analysisPending) return;
       if (typeof render === "function") render();
       schedulePersistentAnalysisPoll(item, render);
     })
@@ -6692,6 +6727,8 @@ function buildRecoveredAnalysisItem(job) {
     analysisJobId: job.id,
     analysisBatchId: job.batchId || null,
     analysisBatchPosition: job.batchPosition || null,
+    analysisRetryAt: job.nextAttemptAt || null,
+    analysisRetryCount: Number(job.deferredRetryCount || 0) || 0,
     file: { name: job.originalFilename || "Documento" },
     originalFilename: job.originalFilename || "Documento",
     isIncome,
