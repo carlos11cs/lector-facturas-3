@@ -365,13 +365,31 @@ class TestInvoiceV2ShadowQueue(unittest.TestCase):
             "vat_breakdown": [{"rate": 21.0, "base": 100.0, "vat_amount": 21.0}],
         }
 
-    def _v2_result(self):
+    def _v1_production_result(self, invoice_number):
+        """Match the persisted V1 shape used by production shadow runs."""
+        result = self._v1_result()
+        result.pop("invoice_number")
+        result["structured_extraction"] = {
+            "supplier": {"legal_name": "Proveedor Demo, S.L.", "tax_id": "B12345678"},
+            "invoice": {"invoice_number": invoice_number, "issue_date": "2026-09-01"},
+            "totals": {
+                "taxable_base": 100.0,
+                "vat_amount": 21.0,
+                "withholding": 0.0,
+                "total": 121.0,
+            },
+            "taxes": [{"taxable_base": 100.0, "vat_rate": 21.0, "vat_amount": 21.0}],
+            "installments": [{"due_date": "2026-10-01"}],
+        }
+        return result
+
+    def _v2_result(self, invoice_number="F001"):
         return {
             "analysis_status": "ok",
             "validation_status": "passed",
             "provider_name": "Proveedor Demo SL",
             "supplier_tax_id": "B12345678",
-            "invoice_number": "F001",
+            "invoice_number": invoice_number,
             "invoice_date": "2026-09-01",
             "payment_dates": ["2026-10-01"],
             "currency": "EUR",
@@ -646,6 +664,115 @@ class TestInvoiceV2ShadowQueue(unittest.TestCase):
         self.assertTrue(comparison["vat_match"])
         self.assertTrue(comparison["overall_match"])
 
+    def test_shadow_comparison_reads_invoice_number_and_supplier_tax_id_from_real_v1_shape(self):
+        v1 = self._v1_production_result("Q000144/2026")
+        v2 = self._v2_result("Q000144/2026")
+
+        canonical_v1 = ledger_app._canonical_v1_shadow_result(v1)
+        comparison = ledger_app._compare_invoice_v1_and_v2(v1, v2)
+
+        self.assertEqual(canonical_v1["invoice_number"], "Q000144/2026")
+        self.assertEqual(canonical_v1["supplier_tax_id"], "B12345678")
+        self.assertTrue(comparison["invoice_number_match"])
+        self.assertTrue(comparison["overall_match"])
+        self.assertTrue(comparison["strict_accounting_match"])
+        self.assertTrue(json.loads(comparison["comparison_json"])["supplier_tax_id_match"])
+
+    def test_shadow_supplier_tax_id_matches_equivalent_formatting(self):
+        v1 = self._v1_production_result("Q000144/2026")
+        v1["structured_extraction"]["supplier"]["tax_id"] = "B-123.45678"
+        v2 = self._v2_result("Q000144/2026")
+        v2["supplier_tax_id"] = "b 12345678"
+
+        comparison = ledger_app._compare_invoice_v1_and_v2(v1, v2)
+
+        self.assertTrue(json.loads(comparison["comparison_json"])["supplier_tax_id_match"])
+        self.assertTrue(comparison["strict_accounting_match"])
+
+    def test_shadow_supplier_tax_id_difference_fails_only_strict_match(self):
+        v1 = self._v1_production_result("Q000144/2026")
+        v2 = self._v2_result("Q000144/2026")
+        v2["supplier_tax_id"] = "B87654321"
+
+        comparison = ledger_app._compare_invoice_v1_and_v2(v1, v2)
+
+        self.assertFalse(json.loads(comparison["comparison_json"])["supplier_tax_id_match"])
+        self.assertTrue(comparison["overall_match"])
+        self.assertFalse(comparison["strict_accounting_match"])
+
+    def test_shadow_comparison_regression_for_jobs_47_48_and_49(self):
+        for invoice_number in ("Q000144/2026", "Q000147/2026", "Q000148/2026"):
+            with self.subTest(invoice_number=invoice_number):
+                comparison = ledger_app._compare_invoice_v1_and_v2(
+                    self._v1_production_result(invoice_number),
+                    self._v2_result(invoice_number),
+                )
+
+                self.assertTrue(comparison["invoice_number_match"])
+                self.assertTrue(comparison["provider_match"])
+                self.assertTrue(comparison["invoice_date_match"])
+                self.assertTrue(comparison["tax_base_match"])
+                self.assertTrue(comparison["vat_match"])
+                self.assertTrue(comparison["withholding_match"])
+                self.assertTrue(comparison["total_match"])
+                self.assertTrue(comparison["due_date_match"])
+                self.assertTrue(comparison["overall_match"])
+                self.assertTrue(comparison["strict_accounting_match"])
+
+    def test_shadow_comparison_recalculation_is_dry_run_by_default_and_never_calls_openai(self):
+        job_id = self._create_completed_job()
+        v1 = self._v1_production_result("Q000144/2026")
+        v2 = self._v2_result("Q000144/2026")
+        with self.engine.begin() as conn:
+            conn.execute(
+                ledger_app.invoice_analysis_jobs_table.update()
+                .where(ledger_app.invoice_analysis_jobs_table.c.id == job_id)
+                .values(result_json=json.dumps(v1))
+            )
+        self._enqueue_shadow(job_id)
+        with self.engine.begin() as conn:
+            conn.execute(
+                ledger_app.invoice_analysis_shadow_runs_table.update()
+                .where(ledger_app.invoice_analysis_shadow_runs_table.c.job_id == job_id)
+                .values(
+                    status="completed",
+                    validation_status="passed",
+                    result_json=json.dumps(v2),
+                    provider_match=True,
+                    invoice_number_match=False,
+                    invoice_date_match=True,
+                    tax_base_match=True,
+                    vat_match=True,
+                    withholding_match=True,
+                    total_match=True,
+                    due_date_match=True,
+                    overall_match=False,
+                    strict_accounting_match=False,
+                    comparison_json='{"different_fields":["invoice_number_match"]}',
+                )
+            )
+
+        dry_run = ledger_app.recalculate_invoice_v2_shadow_comparisons(job_ids=[job_id])
+        self.assertEqual(dry_run, {
+            "scanned": 1,
+            "recalculated": 1,
+            "skipped": 0,
+            "updated": 0,
+            "dry_run": True,
+        })
+        self.assertFalse(self._run(job_id)["overall_match"])
+
+        applied = ledger_app.recalculate_invoice_v2_shadow_comparisons(
+            job_ids=[job_id], apply=True
+        )
+        self.assertEqual(applied["updated"], 1)
+        self.assertTrue(self._run(job_id)["invoice_number_match"])
+        self.assertTrue(self._run(job_id)["overall_match"])
+        self.assertTrue(self._run(job_id)["strict_accounting_match"])
+        self.assertTrue(
+            json.loads(self._run(job_id)["comparison_json"])["supplier_tax_id_match"]
+        )
+
     def test_shadow_claim_is_fenced_and_only_one_worker_receives_it(self):
         job_id = self._create_completed_job()
         self._enqueue_shadow(job_id)
@@ -689,6 +816,7 @@ class TestInvoiceV2ShadowQueue(unittest.TestCase):
         self.assertNotIn("storage_key", ledger_app.invoice_analysis_shadow_runs_table.c)
         self.assertNotIn("original_filename", ledger_app.invoice_analysis_shadow_runs_table.c)
         self.assertIn("validation_errors_json", ledger_app.invoice_analysis_shadow_runs_table.c)
+        self.assertIn("strict_accounting_match", ledger_app.invoice_analysis_shadow_runs_table.c)
 
 
 if __name__ == "__main__":

@@ -535,6 +535,8 @@ invoice_analysis_shadow_runs_table = Table(
     Column("total_match", Boolean),
     Column("due_date_match", Boolean),
     Column("overall_match", Boolean),
+    # Strict rollout gate; unlike overall_match, this also requires the supplier tax ID.
+    Column("strict_accounting_match", Boolean),
     Column("comparison_json", Text),
     # Compact validation codes for benchmark diagnosis; never document evidence.
     Column("validation_errors_json", Text),
@@ -1523,6 +1525,9 @@ def init_db():
     )
     add_column_if_missing(
         "invoice_analysis_shadow_runs", "validation_errors_json", "TEXT"
+    )
+    add_column_if_missing(
+        "invoice_analysis_shadow_runs", "strict_accounting_match", "BOOLEAN"
     )
     # The queue uses status/expiry/age to claim work, company/status/age to
     # enforce fairness, and the batch index for progressive client polling.
@@ -6278,6 +6283,7 @@ def _create_invoice_v2_shadow_run(job, prepared_text):
         "total_match": None,
         "due_date_match": None,
         "overall_match": None,
+        "strict_accounting_match": None,
         "comparison_json": None,
         "validation_errors_json": None,
         "error_type": None,
@@ -7290,16 +7296,120 @@ def _shadow_vat_breakdown_matches(left, right):
     )
 
 
+def _shadow_mapping(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _shadow_first_value(*values):
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _normalize_shadow_tax_id(value):
+    """Normalize formatting only; distinct fiscal identifiers must stay distinct."""
+    if value is None:
+        return ""
+    return re.sub(r"[^A-Za-z0-9]", "", str(value)).upper()
+
+
+def _canonical_v1_shadow_result(v1_result):
+    """Read the persisted V1 result using its canonical and normalized paths.
+
+    V1 finalizes accounting values at the top level. The strict extraction is
+    retained under ``structured_extraction`` and is the canonical source for
+    identifiers that V1 does not flatten, notably ``invoice_number`` and the
+    supplier tax ID.
+    """
+    result = _shadow_mapping(v1_result)
+    structured = _shadow_mapping(result.get("structured_extraction"))
+    supplier = _shadow_mapping(structured.get("supplier"))
+    invoice = _shadow_mapping(structured.get("invoice"))
+    totals = _shadow_mapping(structured.get("totals"))
+    structured_taxes = structured.get("taxes") if isinstance(structured.get("taxes"), list) else []
+    structured_installments = (
+        structured.get("installments") if isinstance(structured.get("installments"), list) else []
+    )
+    structured_breakdown = [
+        {
+            "base": line.get("taxable_base"),
+            "rate": line.get("vat_rate"),
+            "vat_amount": line.get("vat_amount"),
+        }
+        for line in structured_taxes
+        if isinstance(line, dict)
+    ]
+    structured_due_dates = [
+        line.get("due_date") for line in structured_installments if isinstance(line, dict)
+    ]
+    return {
+        "provider_name": _shadow_first_value(
+            result.get("provider_name"),
+            result.get("supplier"),
+            supplier.get("legal_name"),
+            supplier.get("commercial_name"),
+        ),
+        "supplier_tax_id": _shadow_first_value(
+            result.get("supplier_tax_id"), supplier.get("tax_id")
+        ),
+        # The strict V1 extraction is authoritative: production V1 does not
+        # consistently flatten invoice_number to the final response object.
+        "invoice_number": _shadow_first_value(
+            invoice.get("invoice_number"), result.get("invoice_number")
+        ),
+        "invoice_date": _shadow_first_value(result.get("invoice_date"), invoice.get("issue_date")),
+        "base_amount": _shadow_first_value(
+            result.get("base_amount"), totals.get("taxable_base")
+        ),
+        "vat_amount": _shadow_first_value(result.get("vat_amount"), totals.get("vat_amount")),
+        "withholding_amount": _shadow_first_value(
+            result.get("withholding_amount"), totals.get("withholding")
+        ),
+        "total_amount": _shadow_first_value(result.get("total_amount"), totals.get("total")),
+        "vat_breakdown": (
+            result.get("vat_breakdown")
+            if result.get("vat_breakdown") is not None
+            else structured_breakdown
+        ),
+        "payment_dates": (
+            result.get("payment_dates")
+            if result.get("payment_dates") is not None
+            else structured_due_dates
+        ),
+    }
+
+
+def _canonical_v2_shadow_result(v2_result):
+    """Normalize the persisted, already-sanitized V2 benchmark result."""
+    result = _shadow_mapping(v2_result)
+    return {
+        "provider_name": result.get("provider_name"),
+        "supplier_tax_id": result.get("supplier_tax_id"),
+        "invoice_number": result.get("invoice_number"),
+        "invoice_date": result.get("invoice_date"),
+        "base_amount": result.get("base_amount"),
+        "vat_amount": result.get("vat_amount"),
+        "withholding_amount": result.get("withholding_amount"),
+        "total_amount": result.get("total_amount"),
+        "vat_breakdown": result.get("vat_breakdown"),
+        "payment_dates": result.get("payment_dates"),
+    }
+
+
 def _compare_invoice_v1_and_v2(v1_result, v2_result):
     """Compare normalized accounting fields without persisting either document text."""
-    v1_result = v1_result if isinstance(v1_result, dict) else {}
-    v2_result = v2_result if isinstance(v2_result, dict) else {}
+    v1_result = _canonical_v1_shadow_result(v1_result)
+    v2_result = _canonical_v2_shadow_result(v2_result)
     provider_match = _normalize_shadow_comparison_text(
-        v1_result.get("provider_name") or v1_result.get("supplier"), entity=True
+        v1_result.get("provider_name"), entity=True
     ) == _normalize_shadow_comparison_text(v2_result.get("provider_name"), entity=True)
     invoice_number_match = _normalize_shadow_comparison_text(
         v1_result.get("invoice_number")
     ) == _normalize_shadow_comparison_text(v2_result.get("invoice_number"))
+    supplier_tax_id_match = _normalize_shadow_tax_id(
+        v1_result.get("supplier_tax_id")
+    ) == _normalize_shadow_tax_id(v2_result.get("supplier_tax_id"))
     invoice_date_match = (v1_result.get("invoice_date") or None) == (
         v2_result.get("invoice_date") or None
     )
@@ -7318,8 +7428,8 @@ def _compare_invoice_v1_and_v2(v1_result, v2_result):
     total_match = _shadow_amount_matches(
         v1_result.get("total_amount"), v2_result.get("total_amount")
     )
-    due_date_match = sorted(v1_result.get("payment_dates") or []) == sorted(
-        v2_result.get("payment_dates") or []
+    due_date_match = parse_payment_dates(v1_result.get("payment_dates")) == parse_payment_dates(
+        v2_result.get("payment_dates")
     )
     matches = {
         "provider_match": provider_match,
@@ -7332,12 +7442,137 @@ def _compare_invoice_v1_and_v2(v1_result, v2_result):
         "due_date_match": due_date_match,
     }
     differences = [field for field, matches_value in matches.items() if not matches_value]
+    strict_accounting_match = all(
+        (
+            provider_match,
+            supplier_tax_id_match,
+            invoice_number_match,
+            invoice_date_match,
+            tax_base_match,
+            vat_match,
+            withholding_match,
+            total_match,
+            due_date_match,
+        )
+    )
     return {
         **matches,
         "overall_match": not differences,
+        "strict_accounting_match": strict_accounting_match,
         "comparison_json": json.dumps(
-            {"different_fields": differences}, separators=(",", ":"), sort_keys=True
+            {
+                "different_fields": differences,
+                "supplier_tax_id_match": supplier_tax_id_match,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
         ),
+    }
+
+
+_INVOICE_V2_SHADOW_COMPARISON_FIELDS = (
+    "provider_match",
+    "invoice_number_match",
+    "invoice_date_match",
+    "tax_base_match",
+    "vat_match",
+    "withholding_match",
+    "total_match",
+    "due_date_match",
+    "overall_match",
+    "strict_accounting_match",
+    "comparison_json",
+)
+
+
+def recalculate_invoice_v2_shadow_comparisons(
+    *,
+    job_ids=None,
+    shadow_version=None,
+    apply=False,
+    limit=None,
+):
+    """Rebuild historical V1/V2 comparison fields without calling OpenAI.
+
+    The function is dry-run by default. Set ``apply=True`` deliberately from a
+    controlled maintenance shell after reviewing the returned counts.
+    """
+    normalized_job_ids = []
+    for job_id in job_ids or []:
+        try:
+            normalized_job_ids.append(int(job_id))
+        except (TypeError, ValueError):
+            continue
+    query = (
+        select(
+            invoice_analysis_shadow_runs_table.c.id,
+            invoice_analysis_shadow_runs_table.c.job_id,
+            invoice_analysis_shadow_runs_table.c.result_json.label("v2_result_json"),
+            invoice_analysis_jobs_table.c.result_json.label("v1_result_json"),
+        )
+        .join(
+            invoice_analysis_jobs_table,
+            invoice_analysis_jobs_table.c.id == invoice_analysis_shadow_runs_table.c.job_id,
+        )
+        .where(invoice_analysis_shadow_runs_table.c.status == "completed")
+        .where(invoice_analysis_shadow_runs_table.c.validation_status == "passed")
+        .where(invoice_analysis_shadow_runs_table.c.result_json.is_not(None))
+        .where(invoice_analysis_jobs_table.c.result_json.is_not(None))
+        .order_by(invoice_analysis_shadow_runs_table.c.id.asc())
+    )
+    if normalized_job_ids:
+        query = query.where(invoice_analysis_shadow_runs_table.c.job_id.in_(normalized_job_ids))
+    if shadow_version:
+        query = query.where(
+            invoice_analysis_shadow_runs_table.c.shadow_version == str(shadow_version)
+        )
+    if limit is not None:
+        try:
+            query = query.limit(max(1, int(limit)))
+        except (TypeError, ValueError):
+            raise ValueError("limit must be a positive integer") from None
+
+    with engine.connect() as conn:
+        rows = conn.execute(query).mappings().all()
+    recalculated = []
+    skipped = 0
+    for row in rows:
+        try:
+            v1_result = json.loads(row.get("v1_result_json") or "{}")
+            v2_result = json.loads(row.get("v2_result_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            skipped += 1
+            continue
+        if not isinstance(v1_result, dict) or not isinstance(v2_result, dict):
+            skipped += 1
+            continue
+        recalculated.append((row["id"], _compare_invoice_v1_and_v2(v1_result, v2_result)))
+
+    updated = 0
+    if apply and recalculated:
+        now_iso = datetime.utcnow().isoformat()
+        with engine.begin() as conn:
+            for run_id, comparison in recalculated:
+                result = conn.execute(
+                    invoice_analysis_shadow_runs_table.update()
+                    .where(invoice_analysis_shadow_runs_table.c.id == run_id)
+                    .where(invoice_analysis_shadow_runs_table.c.status == "completed")
+                    .where(invoice_analysis_shadow_runs_table.c.validation_status == "passed")
+                    .values(
+                        **{
+                            field: comparison.get(field)
+                            for field in _INVOICE_V2_SHADOW_COMPARISON_FIELDS
+                        },
+                        updated_at=now_iso,
+                    )
+                )
+                updated += int(result.rowcount or 0)
+    return {
+        "scanned": len(rows),
+        "recalculated": len(recalculated),
+        "skipped": skipped,
+        "updated": updated,
+        "dry_run": not apply,
     }
 
 
@@ -7512,6 +7747,7 @@ def _finish_invoice_v2_shadow_run(
                     "total_match",
                     "due_date_match",
                     "overall_match",
+                    "strict_accounting_match",
                     "comparison_json",
                 )
             }
