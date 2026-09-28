@@ -127,7 +127,7 @@ prioridad. V2 solo se inicia cuando no hay trabajo V1 activo; no usa OCR ni env�
 el PDF, imágenes o texto completo a telemetría. Los resultados comparativos se
 guardan en `invoice_analysis_shadow_runs` y el PDF privado se borra tras V2 o al
 alcanzar el TTL ya existente.
-La variante actual queda identificada como `v2-sol-text-v2`; las ejecuciones
+La variante actual queda identificada como `v2-sol-text-v3`; las ejecuciones
 históricas conservan `v2-sol-text-v1` y la tabla permite
 comparar varias variantes del mismo trabajo mediante `job_id + shadow_version`.
 

@@ -70,6 +70,25 @@ def _fast_text_invoice_payload(
 
 @unittest.skipIf(fitz is None, "PyMuPDF no disponible")
 class TestInvoiceV2FastText(unittest.TestCase):
+    def _analyze_fast_text(self, structured, text):
+        prepared = {
+            "eligible": True,
+            "reason": "native_text_sufficient",
+            "page_count": 1,
+            "native_text_chars": len(text),
+            "sent_text_chars": len(text),
+            "text": "[PÁGINA 1]\n" + text,
+        }
+        with patch.object(invoice_service, "_get_client", return_value=object()), patch.object(
+            invoice_service, "_get_invoice_model", return_value="gpt-5.6-sol"
+        ), patch.object(invoice_service, "_call_invoice_responses", return_value=structured):
+            return invoice_service.analyze_invoice_v2_fast_text(
+                file_bytes=b"unused",
+                filename="factura.pdf",
+                mime_type="application/pdf",
+                prepared_text=prepared,
+            )
+
     def test_digital_pdf_is_eligible_and_keeps_page_boundaries(self):
         payload = _digital_pdf_bytes(
             [
@@ -189,6 +208,157 @@ class TestInvoiceV2FastText(unittest.TestCase):
         self.assertIn("supplier_tax_id_matches_registered_customer", issues)
         self.assertIn("supplier_matches_customer", issues)
         self.assertIn("inconsistent_accounting_equation", issues)
+
+    def test_v2_corrects_invoice_number_labeled_as_invoice_over_order_and_delivery_note(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Henry Schein Medical SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        structured["invoice"]["invoice_number"] = "17944113"
+        structured["due_dates"] = []
+        result = self._analyze_fast_text(
+            structured,
+            "Nº FACTURA A141949\nPEDIDO 17944113\nALBARÁN 681188\n"
+            "RECIBO 15 DIAS FECHA FACTURA",
+        )
+
+        self.assertEqual(result["invoice_number"], "A141949")
+        self.assertEqual(result["payment_dates"], ["2026-05-28"])
+        self.assertEqual(
+            result["deterministic_corrections"],
+            [
+                "invoice_number_corrected_from_explicit_label",
+                "due_date_derived_from_payment_terms",
+            ],
+        )
+        self.assertEqual(result["validation_status"], "passed")
+
+    def test_v2_does_not_correct_ambiguous_invoice_number_labels(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Proveedor Demo SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        structured["invoice"]["invoice_number"] = "17944113"
+        result = self._analyze_fast_text(
+            structured,
+            "Nº FACTURA A141949\nFACTURA Nº A141950\nPEDIDO 17944113",
+        )
+
+        self.assertEqual(result["invoice_number"], "17944113")
+        self.assertEqual(result["deterministic_corrections"], [])
+        self.assertIn("invoice_number_evidence_ambiguous", result["validation_issues"])
+        self.assertEqual(result["validation_status"], "failed")
+
+    def test_v2_rejects_an_order_number_when_no_invoice_label_exists(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Proveedor Demo SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        structured["invoice"]["invoice_number"] = "17944113"
+        result = self._analyze_fast_text(structured, "PEDIDO 17944113\nALBARÁN 681188")
+
+        self.assertIsNone(result["invoice_number"])
+        self.assertIn("invoice_number_is_non_invoice_reference", result["validation_issues"])
+        self.assertEqual(result["validation_status"], "failed")
+
+    def test_v2_keeps_explicit_due_date_over_relative_terms(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Proveedor Demo SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        result = self._analyze_fast_text(
+            structured,
+            "Nº FACTURA A141949\nRECIBO 15 DIAS FECHA FACTURA\n"
+            "FECHA DE VENCIMIENTO 01/06/2026",
+        )
+
+        self.assertEqual(result["payment_dates"], ["2026-06-01"])
+        self.assertNotIn("due_date_derived_from_payment_terms", result["deterministic_corrections"])
+
+    def test_v2_does_not_derive_due_date_from_ambiguous_payment_terms(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Proveedor Demo SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        structured["due_dates"] = []
+        result = self._analyze_fast_text(
+            structured,
+            "Nº FACTURA A141949\nPAGO 15/30 DIAS FECHA FACTURA",
+        )
+
+        self.assertEqual(result["payment_dates"], [])
+        self.assertNotIn("due_date_derived_from_payment_terms", result["deterministic_corrections"])
+
+    def test_v2_accepts_unambiguous_relative_terms_without_recibo_prefix(self):
+        self.assertEqual(
+            invoice_service._extract_fast_text_relative_payment_terms_days(
+                "30 DÍAS FECHA FACTURA"
+            ),
+            30,
+        )
+        self.assertEqual(
+            invoice_service._extract_fast_text_relative_payment_terms_days(
+                "60 DIAS FECHA FACTURA"
+            ),
+            60,
+        )
+
+    def test_v2_job_63_regression_matches_v1_after_label_and_terms_reconciliation(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Henry Schein Medical SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        structured["invoice"] = {
+            "invoice_number": "17944113",
+            "issue_date": "2026-07-16",
+            "currency": "EUR",
+        }
+        structured["due_dates"] = []
+        structured["taxes"] = [{"taxable_base": 44.23, "vat_rate": 21, "vat_amount": 7.26}]
+        structured["totals"] = {
+            "taxable_base": 44.23,
+            "vat_amount": 7.26,
+            "withholding": 0,
+            "other_taxes": 0,
+            "total": 51.49,
+        }
+        result = self._analyze_fast_text(
+            structured,
+            "Nº FACTURA A141949\nPEDIDO 17944113\nALBARÁN 681188\n"
+            "RECIBO 15 DIAS FECHA FACTURA",
+        )
+        v1_result = {
+            "provider_name": "Henry Schein Medical SL",
+            "invoice_date": "2026-07-16",
+            "payment_dates": ["2026-07-31"],
+            "base_amount": 44.23,
+            "vat_amount": 7.26,
+            "withholding_amount": 0.0,
+            "total_amount": 51.49,
+            "vat_breakdown": [{"base": 44.23, "rate": 21, "vat_amount": 7.26}],
+            "structured_extraction": {
+                "supplier": {"tax_id": "B12345678"},
+                "invoice": {"invoice_number": "A141949"},
+            },
+        }
+
+        comparison = ledger_app._compare_invoice_v1_and_v2(v1_result, result)
+
+        self.assertEqual(result["invoice_number"], "A141949")
+        self.assertEqual(result["payment_dates"], ["2026-07-31"])
+        self.assertTrue(comparison["strict_accounting_match"])
 
     def test_v2_context_keeps_known_recipient_separate_from_person_supplier(self):
         structured = _fast_text_invoice_payload(
@@ -514,7 +684,7 @@ class TestInvoiceV2ShadowQueue(unittest.TestCase):
                 .order_by(ledger_app.invoice_analysis_shadow_runs_table.c.shadow_version)
             ).scalars().all()
 
-        self.assertEqual(runs, ["v2-next-text-v1", "v2-sol-text-v2"])
+        self.assertEqual(runs, ["v2-next-text-v1", "v2-sol-text-v3"])
 
     def test_ineligible_shadow_is_recorded_without_retaining_source(self):
         job_id = self._create_completed_job()
@@ -799,10 +969,15 @@ class TestInvoiceV2ShadowQueue(unittest.TestCase):
     def test_shadow_result_persists_no_source_text_prompt_or_pdf(self):
         job_id = self._create_completed_job()
         self._enqueue_shadow(job_id)
+        v2_result = self._v2_result()
+        v2_result["deterministic_corrections"] = [
+            "invoice_number_corrected_from_explicit_label",
+            "due_date_derived_from_payment_terms",
+        ]
         with patch.object(ledger_app, "download_private_bytes", return_value=b"%PDF"), patch.object(
             ledger_app, "prepare_invoice_v2_fast_text", return_value=self._prepared()
         ), patch.object(ledger_app, "get_company_names_for_analysis", return_value=[]), patch.object(
-            ledger_app, "analyze_invoice_v2_fast_text", return_value=(self._v2_result(), {"openai_ms": 1})
+            ledger_app, "analyze_invoice_v2_fast_text", return_value=(v2_result, {"openai_ms": 1})
         ), patch.object(ledger_app, "delete_private_object"):
             self.assertTrue(ledger_app.run_invoice_v2_shadow_worker_once())
 
@@ -813,6 +988,13 @@ class TestInvoiceV2ShadowQueue(unittest.TestCase):
         self.assertNotIn("text", payload)
         self.assertNotIn("evidence", payload)
         self.assertNotIn("prompt", payload)
+        self.assertEqual(
+            payload["deterministic_corrections"],
+            [
+                "invoice_number_corrected_from_explicit_label",
+                "due_date_derived_from_payment_terms",
+            ],
+        )
         self.assertNotIn("storage_key", ledger_app.invoice_analysis_shadow_runs_table.c)
         self.assertNotIn("original_filename", ledger_app.invoice_analysis_shadow_runs_table.c)
         self.assertIn("validation_errors_json", ledger_app.invoice_analysis_shadow_runs_table.c)

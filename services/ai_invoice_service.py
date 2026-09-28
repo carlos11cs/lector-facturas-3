@@ -5406,8 +5406,160 @@ def _fast_text_invoice_prompt(company_context: Optional[Dict[str, Any]]) -> str:
         "asignar a la empresa registrada como proveedor. No inventes importes, IVA, retenciones, "
         "fechas o NIF. La retención se devuelve siempre como importe absoluto positivo. Verifica "
         "internamente: total = base + IVA + otros impuestos - retención. Incluye evidencia literal "
-        "breve y el número de página para proveedor, número, fecha, líneas fiscales y totales."
+        "breve y el número de página para proveedor, número, fecha, líneas fiscales y totales. "
+        "El número de factura debe ser exclusivamente el identificador etiquetado como número de "
+        "factura. Nunca uses como número de factura un pedido, referencia de pedido o cliente, "
+        "albarán, delivery note u otra referencia documental. Si no hay una etiqueta inequívoca de "
+        "factura, devuelve null en lugar de escoger otra referencia."
     )
+
+
+_FAST_TEXT_INVOICE_NUMBER_LABEL_PATTERN = re.compile(
+    r"(?<![A-Z0-9])(?:"
+    r"(?:N(?:[º°o.]|[ÚU]M(?:ERO)?\.?)\s*(?:DE\s+)?FACTURA)"
+    r"|(?:FACTURA\s*(?:N(?:[º°o.]|[ÚU]M(?:ERO)?\.?)))"
+    r"|(?:N[ÚU]MERO\s+(?:DE\s+)?FACTURA)"
+    r")(?![A-Z0-9])",
+    flags=re.IGNORECASE,
+)
+_FAST_TEXT_NON_INVOICE_REFERENCE_LABEL_PATTERN = re.compile(
+    r"(?<![A-Z0-9])(?:"
+    r"(?:N(?:[º°o.]|[ÚU]M(?:ERO)?\.?)\s*)?(?:PEDIDO|ALBAR[ÁA]N)"
+    r"|(?:REFERENCIA(?:\s+(?:DE\s+)?(?:PEDIDO|CLIENTE))?)"
+    r"|(?:ORDER\s+REFERENCE|DELIVERY\s+NOTE|CUSTOMER\s+REFERENCE)"
+    r")(?![A-Z0-9])",
+    flags=re.IGNORECASE,
+)
+_FAST_TEXT_IDENTIFIER_VALUE_PATTERN = re.compile(
+    r"^[\s:#\-]*([A-Za-z0-9][A-Za-z0-9._/\-]{0,127})"
+)
+_FAST_TEXT_RELATIVE_PAYMENT_TERMS_PATTERN = re.compile(
+    r"(?<![0-9/])(?:RECIBO\s+)?([1-9][0-9]{0,2})\s+D[IÍ]AS\s+(?:A\s+)?FECHA\s+FACTURA\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _normalize_fast_text_identifier(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = re.sub(r"[^A-Za-z0-9]", "", str(value)).upper()
+    return normalized or None
+
+
+def _extract_fast_text_labeled_identifiers(text: str, label_pattern: re.Pattern) -> List[str]:
+    """Read a nearby identifier only when an explicit document label precedes it."""
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    values: List[str] = []
+    for index, line in enumerate(lines):
+        match = label_pattern.search(line)
+        if not match:
+            continue
+        candidate_match = _FAST_TEXT_IDENTIFIER_VALUE_PATTERN.match(line[match.end() :])
+        if candidate_match is None and not line[match.end() :].strip() and index + 1 < len(lines):
+            candidate_match = _FAST_TEXT_IDENTIFIER_VALUE_PATTERN.match(lines[index + 1])
+        if candidate_match is None:
+            continue
+        candidate = candidate_match.group(1).strip()
+        if _normalize_fast_text_identifier(candidate):
+            values.append(candidate)
+
+    unique_values: List[str] = []
+    seen = set()
+    for value in values:
+        normalized = _normalize_fast_text_identifier(value)
+        if normalized and normalized not in seen:
+            unique_values.append(value)
+            seen.add(normalized)
+    return unique_values
+
+
+def _inspect_fast_text_invoice_number_evidence(text: str) -> Dict[str, Any]:
+    """Classify explicit invoice-number labels without inspecting arbitrary numbers."""
+    invoice_candidates = _extract_fast_text_labeled_identifiers(
+        text, _FAST_TEXT_INVOICE_NUMBER_LABEL_PATTERN
+    )
+    reference_candidates = _extract_fast_text_labeled_identifiers(
+        text, _FAST_TEXT_NON_INVOICE_REFERENCE_LABEL_PATTERN
+    )
+    reference_identifiers = {
+        value
+        for value in (
+            _normalize_fast_text_identifier(candidate) for candidate in reference_candidates
+        )
+        if value
+    }
+    if len(invoice_candidates) == 1:
+        return {
+            "status": "unambiguous",
+            "invoice_number": invoice_candidates[0],
+            "reference_identifiers": reference_identifiers,
+        }
+    if len(invoice_candidates) > 1:
+        return {
+            "status": "ambiguous",
+            "invoice_number": None,
+            "reference_identifiers": reference_identifiers,
+        }
+    return {
+        "status": "missing",
+        "invoice_number": None,
+        "reference_identifiers": reference_identifiers,
+    }
+
+
+def _reconcile_fast_text_invoice_number(
+    invoice_number: Optional[str], document_text: str
+) -> Tuple[Optional[str], List[str], List[str]]:
+    """Apply a labelled invoice-number correction only when the evidence is unique."""
+    evidence = _inspect_fast_text_invoice_number_evidence(document_text)
+    if evidence["status"] == "ambiguous":
+        return invoice_number, [], ["invoice_number_evidence_ambiguous"]
+    normalized_model_number = _normalize_fast_text_identifier(invoice_number)
+    if evidence["status"] == "missing":
+        if normalized_model_number in evidence["reference_identifiers"]:
+            return None, [], ["invoice_number_is_non_invoice_reference"]
+        return invoice_number, [], []
+
+    expected_number = evidence["invoice_number"]
+    normalized_expected_number = _normalize_fast_text_identifier(expected_number)
+    if normalized_model_number == normalized_expected_number:
+        return invoice_number, [], []
+    if (
+        normalized_model_number is None
+        or normalized_model_number in evidence["reference_identifiers"]
+    ):
+        return expected_number, ["invoice_number_corrected_from_explicit_label"], []
+    return invoice_number, [], ["invoice_number_conflicts_with_explicit_label"]
+
+
+def _extract_fast_text_relative_payment_terms_days(text: str) -> Optional[int]:
+    """Reuse the V1 rule first, then accept the same unambiguous phrase without RECIBO."""
+    v1_terms = extract_payment_terms_days(text)
+    if v1_terms is not None and 0 < v1_terms <= 365:
+        return v1_terms
+    matches = {
+        int(match.group(1))
+        for match in _FAST_TEXT_RELATIVE_PAYMENT_TERMS_PATTERN.finditer(text or "")
+        if 0 < int(match.group(1)) <= 365
+    }
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
+def _reconcile_fast_text_payment_dates(
+    payment_dates: List[str], invoice_date: Optional[str], document_text: str
+) -> Tuple[List[str], List[str]]:
+    """Prioritize explicit due dates, then derive only exact relative invoice terms."""
+    explicit_due_dates = _find_due_dates_in_due_context(document_text)
+    if explicit_due_dates:
+        return explicit_due_dates, []
+    payment_terms_days = _extract_fast_text_relative_payment_terms_days(document_text)
+    if payment_terms_days is None or not invoice_date:
+        return payment_dates, []
+    try:
+        due_date = (date.fromisoformat(invoice_date) + timedelta(days=payment_terms_days)).isoformat()
+    except ValueError:
+        return payment_dates, []
+    return [due_date], ["due_date_derived_from_payment_terms"]
 
 
 def _normalize_fast_text_invoice(structured_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -5594,24 +5746,40 @@ def analyze_invoice_v2_fast_text(
 
     validation_started = time.monotonic()
     normalized = _normalize_fast_text_invoice(response_data)
+    correction_codes: List[str] = []
+    (
+        normalized["invoice_number"],
+        invoice_number_corrections,
+        invoice_number_issues,
+    ) = _reconcile_fast_text_invoice_number(
+        normalized.get("invoice_number"), prepared["text"]
+    )
+    normalized["payment_dates"], due_date_corrections = _reconcile_fast_text_payment_dates(
+        normalized.get("payment_dates") or [], normalized.get("invoice_date"), prepared["text"]
+    )
+    correction_codes.extend(invoice_number_corrections)
+    correction_codes.extend(due_date_corrections)
     validation_issues = _validate_fast_text_invoice(
         response_data,
         normalized,
         validation_company_names,
         registered_company_tax_id=normalized_company_context.get("company_tax_id"),
     )
+    validation_issues = list(dict.fromkeys(invoice_number_issues + validation_issues))
     telemetry["validation_ms"] = round((time.monotonic() - validation_started) * 1000)
     result = {
         "analysis_status": "ok" if not validation_issues else "failed",
         "validation_status": "passed" if not validation_issues else "failed",
         "eligibility_reason": prepared.get("reason"),
         "validation_issues": validation_issues,
+        "deterministic_corrections": correction_codes,
         **normalized,
     }
     logger.info(
-        "Invoice V2 fast text: status=%s validation_status=%s pages=%s native_text_chars=%s sent_text_chars=%s total_elapsed_ms=%s",
+        "Invoice V2 fast text: status=%s validation_status=%s corrections=%s pages=%s native_text_chars=%s sent_text_chars=%s total_elapsed_ms=%s",
         result["analysis_status"],
         result["validation_status"],
+        correction_codes,
         prepared.get("page_count"),
         prepared.get("native_text_chars"),
         prepared.get("sent_text_chars"),

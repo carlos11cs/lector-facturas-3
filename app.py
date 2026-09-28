@@ -6222,7 +6222,7 @@ def async_invoice_analysis_is_available():
     return ASYNC_INVOICE_ANALYSIS_ENABLED and has_private_object_storage()
 
 
-INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v2"
+INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v3"
 INVOICE_V2_SHADOW_ROUTE = "v2_fast_text_native"
 
 
@@ -7217,6 +7217,7 @@ _INVOICE_V2_SHADOW_RESULT_FIELDS = (
     "other_taxes",
     "total_amount",
     "vat_breakdown",
+    "deterministic_corrections",
 )
 
 
@@ -7229,6 +7230,8 @@ def _safe_invoice_v2_shadow_result(result):
         value = result.get(field)
         if field == "payment_dates":
             safe[field] = [str(item)[:32] for item in value or [] if item]
+        elif field == "deterministic_corrections":
+            safe[field] = [str(item)[:128] for item in value or [] if str(item).strip()]
         elif field == "vat_breakdown":
             safe[field] = [
                 {
