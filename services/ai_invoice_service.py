@@ -4076,6 +4076,7 @@ def analyze_invoice(
     company_names: Optional[list] = None,
     known_suppliers: Optional[List[str]] = None,
     return_telemetry: bool = False,
+    ocr_semaphore: Any = None,
 ) -> Union[Dict[str, Any], Tuple[Dict[str, Any], Dict[str, Any]]]:
     analysis_started = time.monotonic()
     telemetry: Dict[str, Any] = {
@@ -4093,6 +4094,7 @@ def analyze_invoice(
         "audit_used": False,
         "second_review_used": False,
         "processing_type": None,
+        "ocr_concurrency_wait_ms": 0,
     }
     try:
         _get_invoice_model()
@@ -4334,8 +4336,24 @@ def analyze_invoice(
     audit_elapsed_ms = 0
     if audit_performed and (is_pdf or is_image) and not extracted_text:
         ocr_function = _extract_pdf_text_ocr_from_bytes if is_pdf else _extract_image_text_ocr_from_bytes
+        ocr_slot_acquired = False
+        ocr_slot_started = time.monotonic()
+        if ocr_semaphore is not None:
+            # OCR is the memory-heavy fallback. The shared worker semaphore
+            # serializes only this operation, not the model analysis itself.
+            ocr_semaphore.acquire()
+            ocr_slot_acquired = True
+        telemetry["ocr_concurrency_wait_ms"] = round(
+            (time.monotonic() - ocr_slot_started) * 1000
+        )
         ocr_started = time.monotonic()
-        ocr_text, ocr_timed_out = _run_with_timeout(ocr_function, OCR_TIMEOUT_SECONDS, file_bytes)
+        try:
+            ocr_text, ocr_timed_out = _run_with_timeout(
+                ocr_function, OCR_TIMEOUT_SECONDS, file_bytes
+            )
+        finally:
+            if ocr_slot_acquired:
+                ocr_semaphore.release()
         telemetry["ocr_ms"] = round((time.monotonic() - ocr_started) * 1000)
         if not ocr_timed_out and ocr_text:
             extracted_text = _normalize_ocr_amount_text(ocr_text)

@@ -53,6 +53,13 @@ export ACCOUNTING_IMPORT_MAX_ROWS="5000"
 export ASYNC_INVOICE_ANALYSIS_ENABLED="false"
 export ASYNC_INVOICE_ANALYSIS_LEASE_SECONDS="720"
 export ASYNC_INVOICE_ANALYSIS_RESULT_TTL_SECONDS="86400"
+export ANALYSIS_MAX_CONCURRENCY="2"
+# Keep these at one for the first production rollout, then evaluate metrics.
+export WORKER_CONCURRENCY="1"
+export FULL_DOCUMENT_CONCURRENCY="1"
+export OCR_CONCURRENCY="1"
+export COMPANY_CONCURRENCY="2"
+export ASYNC_INVOICE_ANALYSIS_LEASE_RENEWAL_SECONDS="60"
 ```
 
 ## Inicializar base de datos
@@ -94,6 +101,15 @@ bloqueado y configurarse como `PRIVATE_STORAGE_BUCKET`; no se reutiliza el bucke
 de adjuntos. Los originales se almacenan con una clave aleatoria, no se publica
 ninguna URL y se borran al terminar el analisis; el resultado temporal se elimina
 como maximo al cabo de 24 horas.
+
+La cola usa una reclamación PostgreSQL con `FOR UPDATE SKIP LOCKED`, un token de
+lease por intento y renovaciones periódicas. El resultado solo se acepta si el
+worker conserva el mismo token, por lo que un proceso retrasado no puede
+sobrescribir el trabajo recuperado por otro. Empieza con `WORKER_CONCURRENCY=1`,
+`FULL_DOCUMENT_CONCURRENCY=1` y `OCR_CONCURRENCY=1`. Tras revisar las métricas de
+cola, prueba `WORKER_CONCURRENCY=2` manteniendo inicialmente los otros límites en
+uno. `COMPANY_CONCURRENCY=2` limita la ocupación de cada empresa para preservar la
+equidad entre gestorías.
 
 ## Docker (produccion)
 

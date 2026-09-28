@@ -105,12 +105,18 @@ const VAT_WARNING_MESSAGE =
   "Puede que la calidad de la imagen o la información sea dudosa. Por favor, revisa siempre las cantidades y los tipos de IVA.";
 const REVIEW_REQUIRED_MESSAGE =
   "Revisión requerida antes de guardar: la lectura automática no tiene evidencia suficiente para todos los campos.";
-const ANALYSIS_MAX_CONCURRENCY = 1;
+// This only limits browser queue submissions. Document analysis stays on the
+// persistent worker, so results can arrive while the user keeps working.
+const ANALYSIS_MAX_CONCURRENCY = Math.max(
+  1,
+  Number(window.LEDGED_ANALYSIS_MAX_CONCURRENCY || 2) || 2
+);
 // Must outlive the server-side 600 s analysis limit and exclude queue time.
 const ANALYSIS_PENDING_TIMEOUT_MS = 610 * 1000;
 
 const analysisTaskQueue = [];
 let activeAnalysisTasks = 0;
+const analysisBatchPolls = new Map();
 
 function isPendingUploadItemPresent(item) {
   return (
@@ -4254,12 +4260,22 @@ function restoreFilters(now) {
   }
 }
 
+function createAnalysisBatchId() {
+  if (window.crypto?.randomUUID) {
+    return window.crypto.randomUUID().replace(/-/g, "");
+  }
+  return `batch${Date.now()}${Math.random().toString(16).slice(2)}`;
+}
+
 function addFiles(fileList) {
   const expenseUploadKind = getExpenseUploadKind();
+  const analysisBatchId = createAnalysisBatchId();
+  let analysisBatchPosition = 0;
   Array.from(fileList).forEach((file) => {
     if (!isAllowedFile(file.name)) {
       return;
     }
+    analysisBatchPosition += 1;
     const item = {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       file,
@@ -4281,6 +4297,8 @@ function addFiles(fileList) {
       payrollEmployerCostAmount: "",
       withholdingAmount: "",
       analysisText: "",
+      analysisBatchId,
+      analysisBatchPosition,
       analysisPending: true,
       analysisQueued: true,
       analysisError: false,
@@ -4304,10 +4322,13 @@ function addFiles(fileList) {
 }
 
 function addIncomeFiles(fileList) {
+  const analysisBatchId = createAnalysisBatchId();
+  let analysisBatchPosition = 0;
   Array.from(fileList).forEach((file) => {
     if (!isAllowedFile(file.name)) {
       return;
     }
+    analysisBatchPosition += 1;
     const item = {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       file,
@@ -4324,6 +4345,8 @@ function addIncomeFiles(fileList) {
       vatBreakdown: [],
       vatBreakdownOpen: false,
       analysisText: "",
+      analysisBatchId,
+      analysisBatchPosition,
       analysisPending: true,
       analysisQueued: true,
       analysisError: false,
@@ -6452,12 +6475,103 @@ function markPersistentAnalysisError(item, render, message = ANALYSIS_ERROR_MESS
 }
 
 function schedulePersistentAnalysisPoll(item, render) {
+  if (item.analysisBatchId) {
+    schedulePersistentBatchPoll(item.analysisBatchId, render);
+    return;
+  }
   if (item._analysisPollTimeoutId) {
     clearTimeout(item._analysisPollTimeoutId);
   }
   item._analysisPollTimeoutId = setTimeout(() => {
     pollPersistentAnalysisJob(item, render);
   }, 1800);
+}
+
+function getAnalysisBatchItems(batchId) {
+  return [...pendingFiles, ...pendingIncomeFiles].filter(
+    (item) => item.analysisBatchId === batchId && !item._analysisCancelled
+  );
+}
+
+function applyPersistentAnalysisJob(item, job) {
+  if (job.status === "completed") {
+    const payload = { ok: true, extracted: job.result || {} };
+    if (item.isIncome) applyIncomeAnalysisResult(item, payload);
+    else applyInvoiceAnalysisResult(item, payload);
+    return;
+  }
+  if (job.status === "failed") {
+    markPersistentAnalysisError(
+      item,
+      item.isIncome ? renderIncomeTable : renderTable,
+      job.error || ANALYSIS_ERROR_MESSAGE
+    );
+    return;
+  }
+  item.analysisQueued = job.status === "queued";
+}
+
+function fetchPersistentAnalysisBatch(batchId, page = 1, jobs = []) {
+  return fetch(
+    withCompanyParam(
+      `/api/invoice-analysis-batches/${encodeURIComponent(batchId)}?page=${page}&page_size=100`
+    )
+  )
+    .then((res) => res.json().then((data) => ({ res, data })))
+    .then(({ res, data }) => {
+      if (!res.ok || !data.ok || !Array.isArray(data.jobs)) {
+        throw new Error("batch poll failed");
+      }
+      const allJobs = jobs.concat(data.jobs);
+      return data.hasMore
+        ? fetchPersistentAnalysisBatch(batchId, page + 1, allJobs)
+        : allJobs;
+    });
+}
+
+function schedulePersistentBatchPoll(batchId, render) {
+  const existing = analysisBatchPolls.get(batchId);
+  if (existing?.timeoutId) return;
+  const state = existing || { timeoutId: null };
+  analysisBatchPolls.set(batchId, state);
+  state.timeoutId = setTimeout(() => {
+    state.timeoutId = null;
+    pollPersistentAnalysisBatch(batchId, render);
+  }, 1800);
+}
+
+function pollPersistentAnalysisBatch(batchId, render) {
+  const items = getAnalysisBatchItems(batchId);
+  if (!items.length) {
+    analysisBatchPolls.delete(batchId);
+    return;
+  }
+  fetchPersistentAnalysisBatch(batchId)
+    .then((jobs) => {
+      const byPosition = new Map(
+        items
+          .filter((item) => Number.isInteger(item.analysisBatchPosition))
+          .map((item) => [item.analysisBatchPosition, item])
+      );
+      const byJobId = new Map(
+        items
+          .filter((item) => Number.isInteger(item.analysisJobId))
+          .map((item) => [item.analysisJobId, item])
+      );
+      jobs.forEach((job) => {
+        const item = byJobId.get(job.id) || byPosition.get(job.batchPosition);
+        if (!item || item._analysisCancelled || !item.analysisPending) return;
+        item.analysisJobId = job.id;
+        applyPersistentAnalysisJob(item, job);
+      });
+      if (typeof render === "function") render();
+      if (getAnalysisBatchItems(batchId).some((item) => item.analysisPending)) {
+        schedulePersistentBatchPoll(batchId, render);
+      } else {
+        analysisBatchPolls.delete(batchId);
+      }
+    })
+    .catch(() => schedulePersistentBatchPoll(batchId, render));
 }
 
 function pollPersistentAnalysisJob(item, render) {
@@ -6507,6 +6621,10 @@ function submitPersistentAnalysisJob(item, documentType, render, directAnalysis)
   const formData = new FormData();
   formData.append("file", item.file);
   formData.append("document_type", documentType);
+  if (item.analysisBatchId) formData.append("batch_id", item.analysisBatchId);
+  if (Number.isInteger(item.analysisBatchPosition)) {
+    formData.append("batch_position", String(item.analysisBatchPosition));
+  }
   const companyId = getSelectedCompanyId();
   if (companyId) formData.append("company_id", companyId);
   const controller = new AbortController();
@@ -6572,6 +6690,8 @@ function buildRecoveredAnalysisItem(job) {
   return {
     id: `analysis-job-${job.id}`,
     analysisJobId: job.id,
+    analysisBatchId: job.batchId || null,
+    analysisBatchPosition: job.batchPosition || null,
     file: { name: job.originalFilename || "Documento" },
     originalFilename: job.originalFilename || "Documento",
     isIncome,

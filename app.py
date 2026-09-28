@@ -12,8 +12,11 @@ import re
 import secrets
 import sys
 import tempfile
+import threading
+import time
 import unicodedata
 import zipfile
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import date, datetime, timedelta
 from functools import wraps
 from urllib.parse import quote_plus
@@ -93,6 +96,20 @@ ASYNC_INVOICE_ANALYSIS_RESULT_TTL_SECONDS = int(
 )
 ASYNC_INVOICE_ANALYSIS_POLL_SECONDS = float(
     os.getenv("ASYNC_INVOICE_ANALYSIS_POLL_SECONDS", "1.5")
+)
+ANALYSIS_MAX_CONCURRENCY = max(1, int(os.getenv("ANALYSIS_MAX_CONCURRENCY", "2")))
+WORKER_CONCURRENCY = max(1, int(os.getenv("WORKER_CONCURRENCY", "1")))
+FULL_DOCUMENT_CONCURRENCY = max(
+    1, int(os.getenv("FULL_DOCUMENT_CONCURRENCY", "1"))
+)
+OCR_CONCURRENCY = max(1, int(os.getenv("OCR_CONCURRENCY", "1")))
+COMPANY_CONCURRENCY = max(1, int(os.getenv("COMPANY_CONCURRENCY", "2")))
+ASYNC_INVOICE_ANALYSIS_LEASE_RENEWAL_SECONDS = max(
+    1,
+    min(
+        int(os.getenv("ASYNC_INVOICE_ANALYSIS_LEASE_RENEWAL_SECONDS", "60")),
+        max(1, ASYNC_INVOICE_ANALYSIS_LEASE_SECONDS - 1),
+    ),
 )
 ASYNC_INVOICE_ANALYSIS_DOCUMENT_TYPES = {
     "expense",
@@ -392,6 +409,12 @@ invoice_analysis_jobs_table = Table(
     Column("error_message", Text),
     Column("attempt_count", Integer, nullable=False, server_default=text("0")),
     Column("lease_expires_at", String),
+    # A fresh token is generated on every claim. It fences a worker that lost
+    # its lease from writing a result after another worker recovered the job.
+    Column("lease_token", String),
+    Column("lease_renewal_count", Integer, nullable=False, server_default=text("0")),
+    Column("batch_id", String),
+    Column("batch_position", Integer),
     Column("created_at", String, nullable=False),
     Column("started_at", String),
     Column("completed_at", String),
@@ -411,11 +434,14 @@ invoice_analysis_metrics_table = Table(
     Column("document_type", String, nullable=False),
     Column("mime_type", String),
     Column("file_size_bytes", Integer),
+    Column("batch_id", String),
+    Column("batch_position", Integer),
     Column("queued_at", String, nullable=False),
     Column("started_at", String),
     Column("completed_at", String),
     Column("queue_wait_ms", Integer),
     Column("processing_ms", Integer),
+    Column("total_elapsed_ms", Integer),
     Column("preprocessing_ms", Integer),
     Column("ocr_ms", Integer),
     Column("openai_ms", Integer),
@@ -428,6 +454,9 @@ invoice_analysis_metrics_table = Table(
     Column("audit_used", Boolean),
     Column("second_review_used", Boolean),
     Column("processing_type", String),
+    Column("analysis_route", String),
+    Column("lease_renewal_count", Integer, nullable=False, server_default=text("0")),
+    Column("concurrency_limit_reason", String),
     Column("status", String, nullable=False),
     Column("error_type", String),
     Column("worker_instance_id", String),
@@ -1329,9 +1358,19 @@ def init_db():
         if column_name in columns:
             return
         with engine.begin() as conn:
-            conn.execute(
-                text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
-            )
+            if engine.dialect.name == "postgresql":
+                # Both Render services can start from the same commit. PostgreSQL
+                # makes this additive DDL safe when the other service wins first.
+                conn.execute(
+                    text(
+                        f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS "
+                        f"{column_name} {column_type}"
+                    )
+                )
+            else:
+                conn.execute(
+                    text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+                )
 
     def drop_not_null_if_needed(table_name, column_name):
         if table_name not in table_names:
@@ -1346,6 +1385,59 @@ def init_db():
             conn.execute(
                 text(f"ALTER TABLE {table_name} ALTER COLUMN {column_name} DROP NOT NULL")
             )
+
+    def create_index_if_missing(index_name, table_name, columns):
+        """Create additive queue indexes without racing concurrent service startups."""
+        if table_name not in table_names:
+            return
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"CREATE INDEX IF NOT EXISTS {index_name} "
+                    f"ON {table_name} ({columns})"
+                )
+            )
+
+    # These fields are nullable/defaulted so previously queued jobs and all
+    # historical metrics remain readable during a rolling deployment.
+    add_column_if_missing("invoice_analysis_jobs", "lease_token", "VARCHAR")
+    add_column_if_missing(
+        "invoice_analysis_jobs", "lease_renewal_count", "INTEGER DEFAULT 0"
+    )
+    add_column_if_missing("invoice_analysis_jobs", "batch_id", "VARCHAR")
+    add_column_if_missing("invoice_analysis_jobs", "batch_position", "INTEGER")
+    add_column_if_missing("invoice_analysis_metrics", "batch_id", "VARCHAR")
+    add_column_if_missing("invoice_analysis_metrics", "batch_position", "INTEGER")
+    add_column_if_missing("invoice_analysis_metrics", "total_elapsed_ms", "INTEGER")
+    add_column_if_missing("invoice_analysis_metrics", "analysis_route", "VARCHAR")
+    add_column_if_missing(
+        "invoice_analysis_metrics", "lease_renewal_count", "INTEGER DEFAULT 0"
+    )
+    add_column_if_missing(
+        "invoice_analysis_metrics", "concurrency_limit_reason", "VARCHAR"
+    )
+    # The queue uses status/expiry/age to claim work, company/status/age to
+    # enforce fairness, and the batch index for progressive client polling.
+    create_index_if_missing(
+        "ix_invoice_analysis_jobs_queue",
+        "invoice_analysis_jobs",
+        "status, expires_at, created_at, id",
+    )
+    create_index_if_missing(
+        "ix_invoice_analysis_jobs_company_queue",
+        "invoice_analysis_jobs",
+        "company_id, status, created_at, id",
+    )
+    create_index_if_missing(
+        "ix_invoice_analysis_jobs_processing_lease",
+        "invoice_analysis_jobs",
+        "status, lease_expires_at",
+    )
+    create_index_if_missing(
+        "ix_invoice_analysis_jobs_batch",
+        "invoice_analysis_jobs",
+        "user_id, company_id, batch_id, created_at, id",
+    )
 
     add_column_if_missing("invoices", "user_id", "INTEGER")
     add_column_if_missing("invoices", "company_id", "INTEGER")
@@ -5864,6 +5956,7 @@ def _analysis_worker(
     known_suppliers,
     queue,
     capture_telemetry,
+    ocr_semaphore,
 ):
     try:
         result = analyze_invoice(
@@ -5874,6 +5967,7 @@ def _analysis_worker(
             company_names=company_names,
             known_suppliers=known_suppliers,
             return_telemetry=capture_telemetry,
+            ocr_semaphore=ocr_semaphore,
         )
         if capture_telemetry:
             extracted, telemetry = result
@@ -5899,6 +5993,7 @@ def _analyze_invoice_with_timeout(
     known_suppliers=None,
     fallback_status=None,
     capture_telemetry=False,
+    ocr_semaphore=None,
 ):
     def fallback_result():
         extracted = _empty_extracted(fallback_status or "ok")
@@ -5917,6 +6012,7 @@ def _analyze_invoice_with_timeout(
             known_suppliers or [],
             queue,
             capture_telemetry,
+            ocr_semaphore,
         ),
     )
     process.start()
@@ -5979,6 +6075,30 @@ def _async_invoice_analysis_storage_key(filename):
     return f"private/invoice-analysis/{secrets.token_hex(24)}{extension}"
 
 
+_INVOICE_ANALYSIS_BATCH_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,96}$")
+
+
+def _normalize_invoice_analysis_batch_id(value):
+    batch_id = (value or "").strip()
+    if not batch_id:
+        return None
+    if not _INVOICE_ANALYSIS_BATCH_ID_RE.fullmatch(batch_id):
+        raise ValueError("Identificador de lote inválido.")
+    return batch_id
+
+
+def _parse_invoice_analysis_batch_position(value):
+    if value in (None, ""):
+        return None
+    try:
+        position = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Posición de lote inválida.") from exc
+    if position < 1 or position > 100000:
+        raise ValueError("Posición de lote inválida.")
+    return position
+
+
 def _async_invoice_analysis_fallback_status(file_bytes, mime_type):
     mime_lower = (mime_type or "").lower()
     if mime_lower.startswith("image/"):
@@ -5999,6 +6119,8 @@ def serialize_invoice_analysis_job(row, include_result=True):
     return {
         "id": int(row["id"]),
         "companyId": int(row["company_id"]),
+        "batchId": row.get("batch_id"),
+        "batchPosition": row.get("batch_position"),
         "documentType": row["document_type"],
         "originalFilename": row["original_filename"],
         "status": row["status"],
@@ -6038,6 +6160,8 @@ def _create_invoice_analysis_metrics(
     mime_type,
     file_size_bytes,
     queued_at,
+    batch_id=None,
+    batch_position=None,
 ):
     conn.execute(
         invoice_analysis_metrics_table.insert().values(
@@ -6047,11 +6171,14 @@ def _create_invoice_analysis_metrics(
             document_type=document_type,
             mime_type=mime_type or None,
             file_size_bytes=max(int(file_size_bytes or 0), 0),
+            batch_id=batch_id or None,
+            batch_position=batch_position,
             queued_at=queued_at,
             started_at=None,
             completed_at=None,
             queue_wait_ms=None,
             processing_ms=None,
+            total_elapsed_ms=None,
             preprocessing_ms=None,
             ocr_ms=None,
             openai_ms=None,
@@ -6064,6 +6191,9 @@ def _create_invoice_analysis_metrics(
             audit_used=None,
             second_review_used=None,
             processing_type=None,
+            analysis_route=None,
+            lease_renewal_count=0,
+            concurrency_limit_reason=None,
             status="queued",
             error_type=None,
             worker_instance_id=None,
@@ -6089,8 +6219,12 @@ def _mark_invoice_analysis_metrics_processing(conn, job_id, started_at):
             completed_at=None,
             queue_wait_ms=_invoice_analysis_elapsed_ms(row.get("queued_at"), started_at),
             processing_ms=None,
+            total_elapsed_ms=None,
             error_type=None,
             worker_instance_id=_render_worker_instance_id(),
+            analysis_route="current_full_document",
+            lease_renewal_count=0,
+            concurrency_limit_reason=None,
             updated_at=started_at,
         )
     )
@@ -6108,8 +6242,12 @@ def _mark_invoice_analysis_metrics_queued(conn, job_ids, queued_at):
             completed_at=None,
             queue_wait_ms=None,
             processing_ms=None,
+            total_elapsed_ms=None,
             error_type=None,
             worker_instance_id=None,
+            analysis_route=None,
+            lease_renewal_count=0,
+            concurrency_limit_reason=None,
             updated_at=queued_at,
         )
     )
@@ -6123,9 +6261,14 @@ def _complete_invoice_analysis_metrics(
     completed_at,
     telemetry=None,
     error_type=None,
+    lease_renewal_count=None,
 ):
     row = conn.execute(
-        select(invoice_analysis_metrics_table.c.started_at).where(
+        select(
+            invoice_analysis_metrics_table.c.queued_at,
+            invoice_analysis_metrics_table.c.started_at,
+            invoice_analysis_metrics_table.c.concurrency_limit_reason,
+        ).where(
             invoice_analysis_metrics_table.c.job_id == job_id
         )
     ).mappings().first()
@@ -6136,9 +6279,12 @@ def _complete_invoice_analysis_metrics(
         "status": status,
         "completed_at": completed_at,
         "processing_ms": _invoice_analysis_elapsed_ms(row.get("started_at"), completed_at),
+        "total_elapsed_ms": _invoice_analysis_elapsed_ms(row.get("queued_at"), completed_at),
         "error_type": (str(error_type)[:255] if error_type else None),
         "updated_at": completed_at,
     }
+    if lease_renewal_count is not None:
+        values["lease_renewal_count"] = max(int(lease_renewal_count), 0)
     if isinstance(telemetry, dict):
         for field in (
             "preprocessing_ms",
@@ -6161,6 +6307,13 @@ def _complete_invoice_analysis_metrics(
         processing_type = telemetry.get("processing_type")
         if processing_type:
             values["processing_type"] = str(processing_type)[:255]
+        if telemetry.get("ocr_concurrency_wait_ms", 0):
+            existing_reason = row.get("concurrency_limit_reason")
+            values["concurrency_limit_reason"] = (
+                f"{existing_reason},ocr_concurrency"
+                if existing_reason
+                else "ocr_concurrency"
+            )
 
     conn.execute(
         invoice_analysis_metrics_table.update()
@@ -6187,6 +6340,8 @@ def _requeue_expired_invoice_analysis_leases(conn, now_iso):
         .values(
             status="queued",
             lease_expires_at=None,
+            lease_token=None,
+            lease_renewal_count=0,
             started_at=None,
             updated_at=now_iso,
             error_message=None,
@@ -6195,8 +6350,66 @@ def _requeue_expired_invoice_analysis_leases(conn, now_iso):
     return expired_job_ids
 
 
+def _invoice_analysis_claim_statement(now_iso):
+    """Build the fair PostgreSQL candidate query with row-level skip locking."""
+    active_by_company = (
+        select(
+            invoice_analysis_jobs_table.c.company_id.label("company_id"),
+            func.count(invoice_analysis_jobs_table.c.id).label("active_count"),
+        )
+        .where(invoice_analysis_jobs_table.c.status == "processing")
+        .where(invoice_analysis_jobs_table.c.lease_expires_at > now_iso)
+        .group_by(invoice_analysis_jobs_table.c.company_id)
+        .subquery()
+    )
+    queued_rank = (
+        select(
+            invoice_analysis_jobs_table.c.id.label("job_id"),
+            invoice_analysis_jobs_table.c.company_id.label("company_id"),
+            func.row_number()
+            .over(
+                partition_by=invoice_analysis_jobs_table.c.company_id,
+                order_by=(
+                    invoice_analysis_jobs_table.c.created_at.asc(),
+                    invoice_analysis_jobs_table.c.id.asc(),
+                ),
+            )
+            .label("company_queue_position"),
+        )
+        .where(invoice_analysis_jobs_table.c.status == "queued")
+        .where(invoice_analysis_jobs_table.c.expires_at > now_iso)
+        .subquery()
+    )
+    available_company_slots = COMPANY_CONCURRENCY - func.coalesce(
+        active_by_company.c.active_count, 0
+    )
+    statement = (
+        select(invoice_analysis_jobs_table)
+        .join(queued_rank, queued_rank.c.job_id == invoice_analysis_jobs_table.c.id)
+        .outerjoin(
+            active_by_company,
+            active_by_company.c.company_id == invoice_analysis_jobs_table.c.company_id,
+        )
+        .where(queued_rank.c.company_queue_position <= available_company_slots)
+        .order_by(
+            invoice_analysis_jobs_table.c.created_at.asc(),
+            invoice_analysis_jobs_table.c.id.asc(),
+        )
+        .limit(1)
+        .with_for_update(skip_locked=True, of=invoice_analysis_jobs_table)
+    )
+    return statement
+
+
+def _invoice_analysis_claim_candidate(conn, now_iso):
+    """Lock one fair candidate without blocking competing PostgreSQL workers."""
+    return conn.execute(
+        _invoice_analysis_claim_statement(now_iso)
+    ).mappings().first()
+
+
 def claim_next_invoice_analysis_job():
-    """Claim one queued job. Conditional update keeps multiple workers safe."""
+    """Atomically claim one queue job with a per-claim fencing token."""
     now = datetime.utcnow()
     now_iso = now.isoformat()
     lease_expires_at = (now + timedelta(seconds=ASYNC_INVOICE_ANALYSIS_LEASE_SECONDS)).isoformat()
@@ -6204,14 +6417,9 @@ def claim_next_invoice_analysis_job():
     claimed = None
     with engine.begin() as conn:
         expired_job_ids = _requeue_expired_invoice_analysis_leases(conn, now_iso)
-        row = conn.execute(
-            select(invoice_analysis_jobs_table)
-            .where(invoice_analysis_jobs_table.c.status == "queued")
-            .where(invoice_analysis_jobs_table.c.expires_at > now_iso)
-            .order_by(invoice_analysis_jobs_table.c.created_at.asc(), invoice_analysis_jobs_table.c.id.asc())
-            .limit(1)
-        ).mappings().first()
+        row = _invoice_analysis_claim_candidate(conn, now_iso)
         if row:
+            lease_token = secrets.token_urlsafe(32)
             claim = conn.execute(
                 invoice_analysis_jobs_table.update()
                 .where(invoice_analysis_jobs_table.c.id == row["id"])
@@ -6220,6 +6428,8 @@ def claim_next_invoice_analysis_job():
                     status="processing",
                     started_at=now_iso,
                     lease_expires_at=lease_expires_at,
+                    lease_token=lease_token,
+                    lease_renewal_count=0,
                     updated_at=now_iso,
                     attempt_count=int(row.get("attempt_count") or 0) + 1,
                     error_message=None,
@@ -6230,6 +6440,8 @@ def claim_next_invoice_analysis_job():
                 claimed["status"] = "processing"
                 claimed["started_at"] = now_iso
                 claimed["lease_expires_at"] = lease_expires_at
+                claimed["lease_token"] = lease_token
+                claimed["lease_renewal_count"] = 0
 
     # Observability must never make a queue claim fail after its job is committed.
     try:
@@ -6241,6 +6453,112 @@ def claim_next_invoice_analysis_job():
     except Exception:
         app.logger.exception("No se pudo actualizar la telemetría del trabajo de factura.")
     return claimed
+
+
+def renew_invoice_analysis_lease(job_id, lease_token):
+    """Renew only the lease currently fenced by ``lease_token``.
+
+    Returning ``None`` means another worker, cancellation, or expiry won the
+    lease. A caller must then discard its local result and leave the source
+    document untouched for the current owner.
+    """
+    now = datetime.utcnow()
+    now_iso = now.isoformat()
+    lease_expires_at = (
+        now + timedelta(seconds=ASYNC_INVOICE_ANALYSIS_LEASE_SECONDS)
+    ).isoformat()
+    with engine.begin() as conn:
+        conditions = [
+            invoice_analysis_jobs_table.c.id == job_id,
+            invoice_analysis_jobs_table.c.status == "processing",
+            invoice_analysis_jobs_table.c.lease_token == lease_token,
+        ]
+        if lease_token is not None:
+            conditions.append(invoice_analysis_jobs_table.c.lease_expires_at > now_iso)
+        result = conn.execute(
+            invoice_analysis_jobs_table.update()
+            .where(*conditions)
+            .values(
+                lease_expires_at=lease_expires_at,
+                lease_renewal_count=func.coalesce(
+                    invoice_analysis_jobs_table.c.lease_renewal_count, 0
+                )
+                + 1,
+                updated_at=now_iso,
+            )
+        )
+        if result.rowcount != 1:
+            return None
+        row = conn.execute(
+            select(invoice_analysis_jobs_table.c.lease_renewal_count).where(
+                invoice_analysis_jobs_table.c.id == job_id
+            )
+        ).mappings().first()
+        renewal_count = int((row or {}).get("lease_renewal_count") or 0)
+        conn.execute(
+            invoice_analysis_metrics_table.update()
+            .where(invoice_analysis_metrics_table.c.job_id == job_id)
+            .values(lease_renewal_count=renewal_count, updated_at=now_iso)
+        )
+    return renewal_count
+
+
+class _InvoiceAnalysisLeaseRenewer:
+    """Keeps one fenced lease alive without delaying the document analysis."""
+
+    def __init__(self, job_id, lease_token):
+        self.job_id = job_id
+        self.lease_token = lease_token
+        self._stop_event = threading.Event()
+        self._thread = None
+        self._lock = threading.Lock()
+        self._renewal_count = 0
+        self.lost_lease = False
+
+    @property
+    def renewal_count(self):
+        with self._lock:
+            return self._renewal_count
+
+    def start(self):
+        # Legacy jobs created before this migration have no fence token. They
+        # are still allowed to finish once, but newly claimed jobs always have
+        # a token and are therefore renewed/fenced.
+        if self.lease_token is None:
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"invoice-lease-{self.job_id}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+
+    def _run(self):
+        while not self._stop_event.wait(ASYNC_INVOICE_ANALYSIS_LEASE_RENEWAL_SECONDS):
+            try:
+                renewal_count = renew_invoice_analysis_lease(
+                    self.job_id, self.lease_token
+                )
+            except Exception:
+                app.logger.exception(
+                    "No se pudo renovar el lease del trabajo de factura %s.",
+                    self.job_id,
+                )
+                continue
+            if renewal_count is None:
+                self.lost_lease = True
+                app.logger.warning(
+                    "Lease perdido para el trabajo de factura %s; se descarta su resultado local.",
+                    self.job_id,
+                )
+                return
+            with self._lock:
+                self._renewal_count = renewal_count
 
 
 def cleanup_expired_invoice_analysis_jobs():
@@ -6267,15 +6585,112 @@ def cleanup_expired_invoice_analysis_jobs():
     return len(rows)
 
 
-def run_invoice_analysis_worker_once():
-    """Process one queued document and return whether any work was claimed."""
-    cleanup_expired_invoice_analysis_jobs()
-    job = claim_next_invoice_analysis_job()
-    if not job:
-        return False
+def _invoice_analysis_completion_conditions(job_id, lease_token, completed_at_iso):
+    conditions = [
+        invoice_analysis_jobs_table.c.id == job_id,
+        invoice_analysis_jobs_table.c.status == "processing",
+        invoice_analysis_jobs_table.c.lease_token == lease_token,
+    ]
+    # A lease may not be finished after expiry. ``NULL`` is retained solely so
+    # a processing job created before this migration can complete safely.
+    if lease_token is not None:
+        conditions.append(invoice_analysis_jobs_table.c.lease_expires_at > completed_at_iso)
+    else:
+        conditions.append(invoice_analysis_jobs_table.c.lease_expires_at.is_(None))
+    return conditions
 
+
+def _set_invoice_analysis_concurrency_limit(job_id, reason):
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                invoice_analysis_metrics_table.update()
+                .where(invoice_analysis_metrics_table.c.job_id == job_id)
+                .values(
+                    concurrency_limit_reason=reason,
+                    updated_at=datetime.utcnow().isoformat(),
+                )
+            )
+    except Exception:
+        app.logger.exception(
+            "No se pudo actualizar el límite de concurrencia del trabajo %s.", job_id
+        )
+
+
+def _finish_invoice_analysis_job(
+    job,
+    *,
+    status,
+    completed_at_iso,
+    telemetry=None,
+    error_type=None,
+    extracted=None,
+    lease_renewal_count=0,
+):
+    """Persist a terminal state only while this worker still owns the lease."""
+    job_id = job["id"]
+    values = {
+        "status": status,
+        "completed_at": completed_at_iso,
+        "updated_at": completed_at_iso,
+        "lease_expires_at": None,
+        "lease_token": None,
+        "storage_key": None,
+        "expires_at": (
+            datetime.fromisoformat(completed_at_iso)
+            + timedelta(seconds=ASYNC_INVOICE_ANALYSIS_RESULT_TTL_SECONDS)
+        ).isoformat(),
+    }
+    if status == "completed":
+        values["result_json"] = json.dumps(extracted or {})
+        values["error_message"] = None
+    else:
+        values["result_json"] = None
+        values["error_message"] = (
+            "No se ha podido analizar el documento. Puedes completar los datos manualmente."
+        )
+    with engine.begin() as conn:
+        result = conn.execute(
+            invoice_analysis_jobs_table.update()
+            .where(
+                *_invoice_analysis_completion_conditions(
+                    job_id, job.get("lease_token"), completed_at_iso
+                )
+            )
+            .values(**values)
+        )
+    if result.rowcount != 1:
+        app.logger.warning(
+            "Resultado descartado para trabajo de factura %s: lease ya no vigente.", job_id
+        )
+        return False
+    try:
+        with engine.begin() as conn:
+            _complete_invoice_analysis_metrics(
+                conn,
+                job_id=job_id,
+                status=status,
+                completed_at=completed_at_iso,
+                telemetry=telemetry,
+                error_type=error_type,
+                lease_renewal_count=lease_renewal_count,
+            )
+    except Exception:
+        app.logger.exception(
+            "No se pudo registrar la telemetría final del trabajo de factura %s.", job_id
+        )
+    return True
+
+
+def _run_claimed_invoice_analysis_job(
+    job, *, full_document_semaphore=None, ocr_semaphore=None
+):
+    """Process a previously claimed job and preserve its source on lease loss."""
     job_id = job["id"]
     storage_key = job.get("storage_key")
+    renewer = _InvoiceAnalysisLeaseRenewer(job_id, job.get("lease_token"))
+    source_can_be_deleted = False
+    renewer.start()
     try:
         if not storage_key:
             raise RuntimeError("El documento temporal ya no está disponible.")
@@ -6285,115 +6700,137 @@ def run_invoice_analysis_worker_once():
             known_suppliers = fetch_known_suppliers(
                 conn, job["user_id"], job["company_id"]
             )
-        extracted, telemetry = _analyze_invoice_with_timeout(
-            file_bytes=file_bytes,
-            filename=job["original_filename"],
-            stored_name=job["original_filename"],
-            mime_type=job.get("mime_type"),
-            document_type=job["document_type"],
-            company_names=company_names,
-            known_suppliers=known_suppliers,
-            fallback_status=_async_invoice_analysis_fallback_status(
-                file_bytes, job.get("mime_type")
-            ),
-            capture_telemetry=True,
-        )
-        completed_at = datetime.utcnow()
-        completed_at_iso = completed_at.isoformat()
-        result_expires_at = (
-            completed_at + timedelta(seconds=ASYNC_INVOICE_ANALYSIS_RESULT_TTL_SECONDS)
-        ).isoformat()
-        with engine.begin() as conn:
-            result = conn.execute(
-                invoice_analysis_jobs_table.update()
-                .where(invoice_analysis_jobs_table.c.id == job_id)
-                .where(invoice_analysis_jobs_table.c.status == "processing")
-                .values(
-                    status="completed",
-                    result_json=json.dumps(extracted),
-                    completed_at=completed_at_iso,
-                    updated_at=completed_at_iso,
-                    lease_expires_at=None,
-                    storage_key=None,
-                    expires_at=result_expires_at,
-                )
+
+        full_document_slot = False
+        if full_document_semaphore is not None:
+            full_document_slot = full_document_semaphore.acquire(blocking=False)
+            if not full_document_slot:
+                _set_invoice_analysis_concurrency_limit(job_id, "full_document_concurrency")
+                full_document_semaphore.acquire()
+                full_document_slot = True
+        try:
+            extracted, telemetry = _analyze_invoice_with_timeout(
+                file_bytes=file_bytes,
+                filename=job["original_filename"],
+                stored_name=job["original_filename"],
+                mime_type=job.get("mime_type"),
+                document_type=job["document_type"],
+                company_names=company_names,
+                known_suppliers=known_suppliers,
+                fallback_status=_async_invoice_analysis_fallback_status(
+                    file_bytes, job.get("mime_type")
+                ),
+                capture_telemetry=True,
+                ocr_semaphore=ocr_semaphore,
             )
-        if result.rowcount == 1:
-            try:
-                with engine.begin() as conn:
-                    analysis_error = extracted.get("analysis_error")
-                    if not isinstance(analysis_error, dict):
-                        analysis_error = {}
-                    _complete_invoice_analysis_metrics(
-                        conn,
-                        job_id=job_id,
-                        status="completed",
-                        completed_at=completed_at_iso,
-                        telemetry=telemetry,
-                        error_type=analysis_error.get("status"),
-                    )
-            except Exception:
-                app.logger.exception(
-                    "No se pudo registrar la telemetría final del trabajo de factura %s.",
-                    job_id,
-                )
+        finally:
+            if full_document_slot:
+                full_document_semaphore.release()
+
+        renewer.stop()
+        completed_at_iso = datetime.utcnow().isoformat()
+        analysis_error = extracted.get("analysis_error")
+        if not isinstance(analysis_error, dict):
+            analysis_error = {}
+        source_can_be_deleted = _finish_invoice_analysis_job(
+            job,
+            status="completed",
+            completed_at_iso=completed_at_iso,
+            telemetry=telemetry,
+            error_type=analysis_error.get("status"),
+            extracted=extracted,
+            lease_renewal_count=renewer.renewal_count,
+        )
     except Exception as exc:
         app.logger.exception("Error procesando el trabajo persistente de factura %s.", job_id)
-        completed_at = datetime.utcnow()
-        completed_at_iso = completed_at.isoformat()
-        result_expires_at = (
-            completed_at + timedelta(seconds=ASYNC_INVOICE_ANALYSIS_RESULT_TTL_SECONDS)
-        ).isoformat()
-        with engine.begin() as conn:
-            result = conn.execute(
-                invoice_analysis_jobs_table.update()
-                .where(invoice_analysis_jobs_table.c.id == job_id)
-                .where(invoice_analysis_jobs_table.c.status == "processing")
-                .values(
-                    status="failed",
-                    error_message="No se ha podido analizar el documento. Puedes completar los datos manualmente.",
-                    completed_at=completed_at_iso,
-                    updated_at=completed_at_iso,
-                    lease_expires_at=None,
-                    storage_key=None,
-                    expires_at=result_expires_at,
-                )
-            )
-        if result.rowcount == 1:
-            try:
-                with engine.begin() as conn:
-                    _complete_invoice_analysis_metrics(
-                        conn,
-                        job_id=job_id,
-                        status="failed",
-                        completed_at=completed_at_iso,
-                        error_type=type(exc).__name__,
-                    )
-            except Exception:
-                app.logger.exception(
-                    "No se pudo registrar la telemetría fallida del trabajo de factura %s.",
-                    job_id,
-                )
+        renewer.stop()
+        source_can_be_deleted = _finish_invoice_analysis_job(
+            job,
+            status="failed",
+            completed_at_iso=datetime.utcnow().isoformat(),
+            error_type=type(exc).__name__,
+            lease_renewal_count=renewer.renewal_count,
+        )
     finally:
-        if storage_key:
+        renewer.stop()
+        # Only the worker whose fenced final update succeeded may remove the
+        # temporary object. A stale worker must leave it for the new owner.
+        if source_can_be_deleted and storage_key:
             try:
                 delete_private_object(storage_key)
             except Exception:
-                app.logger.exception("No se pudo borrar el documento temporal del trabajo %s.", job_id)
+                app.logger.exception(
+                    "No se pudo borrar el documento temporal del trabajo %s.", job_id
+                )
+    return True
+
+
+def run_invoice_analysis_worker_once(
+    *, full_document_semaphore=None, ocr_semaphore=None
+):
+    """Process one queue job; retained for the single-worker testable entry point."""
+    cleanup_expired_invoice_analysis_jobs()
+    job = claim_next_invoice_analysis_job()
+    if not job:
+        return False
+    _run_claimed_invoice_analysis_job(
+        job,
+        full_document_semaphore=full_document_semaphore,
+        ocr_semaphore=ocr_semaphore,
+    )
     return True
 
 
 def run_invoice_analysis_worker(stop_event=None):
-    """Long-running Render worker entry point for persistent invoice analysis."""
-    app.logger.info("Worker de análisis persistente iniciado.")
-    while not stop_event or not stop_event.is_set():
-        processed = run_invoice_analysis_worker_once()
-        if not processed:
-            if stop_event:
+    """Run concurrent, fenced queue consumers inside one Render worker instance."""
+    app.logger.info(
+        "Worker de análisis persistente iniciado: worker_concurrency=%s full_document_concurrency=%s ocr_concurrency=%s company_concurrency=%s",
+        WORKER_CONCURRENCY,
+        FULL_DOCUMENT_CONCURRENCY,
+        OCR_CONCURRENCY,
+        COMPANY_CONCURRENCY,
+    )
+    full_document_semaphore = threading.BoundedSemaphore(FULL_DOCUMENT_CONCURRENCY)
+    ocr_semaphore = mp.get_context("spawn").BoundedSemaphore(OCR_CONCURRENCY)
+    last_cleanup_at = 0.0
+    with ThreadPoolExecutor(max_workers=WORKER_CONCURRENCY) as executor:
+        futures = set()
+        while not stop_event or not stop_event.is_set():
+            now_monotonic = time.monotonic()
+            if now_monotonic - last_cleanup_at >= ASYNC_INVOICE_ANALYSIS_POLL_SECONDS:
+                cleanup_expired_invoice_analysis_jobs()
+                last_cleanup_at = now_monotonic
+
+            completed_futures = {future for future in futures if future.done()}
+            futures.difference_update(completed_futures)
+            for future in completed_futures:
+                try:
+                    future.result()
+                except Exception:
+                    app.logger.exception("Un worker de factura terminó inesperadamente.")
+
+            while len(futures) < WORKER_CONCURRENCY:
+                job = claim_next_invoice_analysis_job()
+                if not job:
+                    break
+                futures.add(
+                    executor.submit(
+                        _run_claimed_invoice_analysis_job,
+                        job,
+                        full_document_semaphore=full_document_semaphore,
+                        ocr_semaphore=ocr_semaphore,
+                    )
+                )
+
+            if futures:
+                wait(
+                    futures,
+                    timeout=ASYNC_INVOICE_ANALYSIS_POLL_SECONDS,
+                    return_when=FIRST_COMPLETED,
+                )
+            elif stop_event:
                 stop_event.wait(ASYNC_INVOICE_ANALYSIS_POLL_SECONDS)
             else:
-                import time
-
                 time.sleep(ASYNC_INVOICE_ANALYSIS_POLL_SECONDS)
 
 
@@ -6999,6 +7436,7 @@ def app_home():
         account_context=get_account_context_for_user(g.current_user),
         billing_context=get_billing_context_for_user(g.current_user),
         billing_message=get_billing_message(),
+        analysis_max_concurrency=ANALYSIS_MAX_CONCURRENCY,
     )
 
 
@@ -8993,6 +9431,17 @@ def create_invoice_analysis_job():
     if document_type not in ASYNC_INVOICE_ANALYSIS_DOCUMENT_TYPES:
         return jsonify({"ok": False, "errors": ["Tipo de documento no soportado."]}), 400
     try:
+        batch_id = _normalize_invoice_analysis_batch_id(request.form.get("batch_id"))
+        batch_position = _parse_invoice_analysis_batch_position(
+            request.form.get("batch_position")
+        )
+    except ValueError as exc:
+        return jsonify({"ok": False, "errors": [str(exc)]}), 400
+    if batch_position is not None and batch_id is None:
+        return jsonify(
+            {"ok": False, "errors": ["La posición requiere un identificador de lote."]}
+        ), 400
+    try:
         file_bytes = read_uploaded_file_limited(uploaded_file)
     except ValueError as exc:
         return jsonify({"ok": False, "errors": [str(exc)]}), 413
@@ -9018,6 +9467,10 @@ def create_invoice_analysis_job():
                     error_message=None,
                     attempt_count=0,
                     lease_expires_at=None,
+                    lease_token=None,
+                    lease_renewal_count=0,
+                    batch_id=batch_id,
+                    batch_position=batch_position,
                     created_at=now_iso,
                     started_at=None,
                     completed_at=None,
@@ -9045,6 +9498,8 @@ def create_invoice_analysis_job():
                 mime_type=uploaded_file.mimetype,
                 file_size_bytes=len(file_bytes),
                 queued_at=now_iso,
+                batch_id=batch_id,
+                batch_position=batch_position,
             )
     except Exception:
         app.logger.exception("No se pudo registrar la telemetría de un trabajo de factura.")
@@ -9058,6 +9513,8 @@ def create_invoice_analysis_job():
                 "status": "queued",
                 "originalFilename": original_name,
                 "documentType": document_type,
+                "batchId": batch_id,
+                "batchPosition": batch_position,
             },
         }
     ), 202
@@ -9081,6 +9538,69 @@ def list_invoice_analysis_jobs():
             .limit(100)
         ).mappings().all()
     return jsonify({"ok": True, "jobs": [serialize_invoice_analysis_job(row) for row in rows]})
+
+
+@app.route("/api/invoice-analysis-batches/<batch_id>")
+def get_invoice_analysis_batch(batch_id):
+    """Return one company's batch in pages, so the client never polls per file."""
+    try:
+        batch_id = _normalize_invoice_analysis_batch_id(batch_id)
+    except ValueError as exc:
+        return jsonify({"ok": False, "errors": [str(exc)]}), 400
+    if batch_id is None:
+        return jsonify({"ok": False, "errors": ["Identificador de lote inválido."]}), 400
+    data_owner_id = get_data_owner_id()
+    company_id = get_company_id(required=True)
+    if company_id is None:
+        return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
+    try:
+        page = max(1, int(request.args.get("page", "1")))
+        page_size = min(100, max(1, int(request.args.get("page_size", "50"))))
+    except ValueError:
+        return jsonify({"ok": False, "errors": ["Paginación inválida."]}), 400
+    now_iso = datetime.utcnow().isoformat()
+    filters = (
+        invoice_analysis_jobs_table.c.user_id == data_owner_id,
+        invoice_analysis_jobs_table.c.company_id == company_id,
+        invoice_analysis_jobs_table.c.batch_id == batch_id,
+        invoice_analysis_jobs_table.c.expires_at > now_iso,
+    )
+    with engine.connect() as conn:
+        total = conn.execute(
+            select(func.count(invoice_analysis_jobs_table.c.id)).where(*filters)
+        ).scalar_one()
+        rows = conn.execute(
+            select(invoice_analysis_jobs_table)
+            .where(*filters)
+            .order_by(
+                invoice_analysis_jobs_table.c.batch_position.asc(),
+                invoice_analysis_jobs_table.c.created_at.asc(),
+                invoice_analysis_jobs_table.c.id.asc(),
+            )
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        ).mappings().all()
+        status_rows = conn.execute(
+            select(
+                invoice_analysis_jobs_table.c.status,
+                func.count(invoice_analysis_jobs_table.c.id).label("count"),
+            )
+            .where(*filters)
+            .group_by(invoice_analysis_jobs_table.c.status)
+        ).mappings().all()
+    status_counts = {row["status"]: int(row["count"]) for row in status_rows}
+    return jsonify(
+        {
+            "ok": True,
+            "batchId": batch_id,
+            "page": page,
+            "pageSize": page_size,
+            "total": int(total),
+            "hasMore": page * page_size < int(total),
+            "statusCounts": status_counts,
+            "jobs": [serialize_invoice_analysis_job(row) for row in rows],
+        }
+    )
 
 
 @app.route("/api/invoice-analysis-jobs/<int:job_id>")
@@ -9123,6 +9643,7 @@ def cancel_invoice_analysis_job(job_id):
                 completed_at=now_iso,
                 updated_at=now_iso,
                 lease_expires_at=None,
+                lease_token=None,
                 expires_at=now_iso,
             )
         )

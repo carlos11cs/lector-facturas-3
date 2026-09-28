@@ -15,6 +15,15 @@ class TestFrontendAnalysisQueue(unittest.TestCase):
         enqueue_block = script.split("function enqueueAnalysisTask", 1)[1].split("function showLowQualityModal", 1)[0]
         self.assertNotIn("scheduleAnalysisTimeout(item, render);", enqueue_block)
 
+    def test_multiple_uploads_use_configurable_concurrency_and_batch_polling(self):
+        script = (PROJECT_ROOT / "static/js/app.js").read_text(encoding="utf-8")
+
+        self.assertIn("window.LEDGED_ANALYSIS_MAX_CONCURRENCY || 2", script)
+        self.assertIn("const analysisBatchPolls = new Map();", script)
+        self.assertIn("function createAnalysisBatchId()", script)
+        self.assertIn('formData.append("batch_id", item.analysisBatchId);', script)
+        self.assertIn("/api/invoice-analysis-batches/${encodeURIComponent(batchId)}", script)
+
 
 if __name__ == "__main__":
     unittest.main()

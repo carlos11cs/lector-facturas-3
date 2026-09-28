@@ -1652,6 +1652,44 @@ N° intracommunautaire : ESB05410667"""
         )
         self.assertEqual(result["total_amount"], 121.0)
 
+    def test_ocr_fallback_obeys_the_worker_semaphore(self):
+        class TrackingSemaphore:
+            def __init__(self):
+                self.acquired = 0
+                self.released = 0
+
+            def acquire(self):
+                self.acquired += 1
+
+            def release(self):
+                self.released += 1
+
+        semaphore = TrackingSemaphore()
+        initial = self._completed_structured_invoice()
+        audited = self._completed_structured_invoice()
+        critical_issue = "La ecuación base + IVA + otros impuestos - retención no cuadra con el total."
+        with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": "invoice-test-model"}), patch.object(
+            svc, "_get_client", return_value=object()
+        ), patch.object(svc, "_extract_pdf_text_from_bytes", return_value=""), patch.object(
+            svc, "_call_invoice_responses", side_effect=[initial, audited]
+        ), patch.object(
+            svc, "_validate_structured_invoice", side_effect=[[critical_issue], []]
+        ), patch.object(
+            svc, "_run_with_timeout", return_value=("texto OCR", False)
+        ):
+            result, telemetry = svc.analyze_invoice(
+                file_bytes=b"%PDF-test",
+                filename="factura.pdf",
+                mime_type="application/pdf",
+                return_telemetry=True,
+                ocr_semaphore=semaphore,
+            )
+
+        self.assertEqual(result["total_amount"], 121.0)
+        self.assertEqual(semaphore.acquired, 1)
+        self.assertEqual(semaphore.released, 1)
+        self.assertIn("ocr_concurrency_wait_ms", telemetry)
+
     def test_valid_invoice_does_not_trigger_audit(self):
         extraction = self._completed_structured_invoice()
         with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": "invoice-test-model"}), patch.object(
