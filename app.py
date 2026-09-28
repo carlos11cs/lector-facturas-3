@@ -41,6 +41,7 @@ from sqlalchemy import (
     String,
     Text,
     Table,
+    UniqueConstraint,
     create_engine,
     func,
     inspect,
@@ -55,10 +56,12 @@ from services.ai_invoice_service import (
     _find_payment_date_by_keywords,
     _find_payment_dates_by_keywords,
     analyze_invoice,
+    analyze_invoice_v2_fast_text,
     _extract_pdf_text_from_bytes,
     _extract_pdf_text_ocr_from_bytes,
     _extract_image_text_ocr_from_bytes,
     extract_loan_schedule,
+    prepare_invoice_v2_fast_text,
 )
 from services.storage_service import (
     delete_private_object,
@@ -106,6 +109,16 @@ FULL_DOCUMENT_CONCURRENCY = max(
 )
 OCR_CONCURRENCY = max(1, int(os.getenv("OCR_CONCURRENCY", "1")))
 COMPANY_CONCURRENCY = max(1, int(os.getenv("COMPANY_CONCURRENCY", "2")))
+INVOICE_V2_SHADOW_ENABLED = os.getenv(
+    "INVOICE_V2_SHADOW_ENABLED", ""
+).strip().lower() in {"1", "true", "yes"}
+try:
+    INVOICE_V2_SHADOW_SAMPLE_RATE = min(
+        1.0, max(0.0, float(os.getenv("INVOICE_V2_SHADOW_SAMPLE_RATE", "0.10")))
+    )
+except ValueError:
+    INVOICE_V2_SHADOW_SAMPLE_RATE = 0.10
+V2_SHADOW_CONCURRENCY = max(1, int(os.getenv("V2_SHADOW_CONCURRENCY", "1")))
 RATE_LIMIT_RETRY_DELAYS_SECONDS = (30, 60, 120, 300)
 MAX_RATE_LIMIT_DEFERRED_RETRIES = len(RATE_LIMIT_RETRY_DELAYS_SECONDS)
 ASYNC_INVOICE_ANALYSIS_LEASE_RENEWAL_SECONDS = max(
@@ -434,7 +447,7 @@ invoice_analysis_metrics_table = Table(
     "invoice_analysis_metrics",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("job_id", Integer, nullable=False, unique=True),
+    Column("job_id", Integer, nullable=False),
     Column("user_id", Integer, nullable=False),
     Column("company_id", Integer, nullable=False),
     Column("document_type", String, nullable=False),
@@ -474,6 +487,69 @@ invoice_analysis_metrics_table = Table(
     Index("ix_invoice_analysis_metrics_company_queued_at", "company_id", "queued_at"),
     Index("ix_invoice_analysis_metrics_status_completed_at", "status", "completed_at"),
     Index("ix_invoice_analysis_metrics_worker_completed_at", "worker_instance_id", "completed_at"),
+)
+
+# Shadow runs are operational benchmark records. They intentionally do not
+# contain source object keys, document text, prompts, images or raw PDFs.
+invoice_analysis_shadow_runs_table = Table(
+    "invoice_analysis_shadow_runs",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("job_id", Integer, nullable=False),
+    Column("user_id", Integer, nullable=False),
+    Column("company_id", Integer, nullable=False),
+    Column("batch_id", String),
+    Column("batch_position", Integer),
+    Column("shadow_version", String, nullable=False),
+    Column("route", String, nullable=False),
+    Column("model", String),
+    Column("reasoning_effort", String),
+    Column("eligible", Boolean, nullable=False),
+    Column("eligibility_reason", String, nullable=False),
+    Column("status", String, nullable=False),
+    Column("validation_status", String, nullable=False),
+    Column("preprocessing_ms", Integer),
+    Column("openai_ms", Integer),
+    Column("parsing_ms", Integer),
+    Column("validation_ms", Integer),
+    Column("total_ms", Integer),
+    Column("input_tokens", Integer),
+    Column("output_tokens", Integer),
+    Column("reasoning_tokens", Integer),
+    Column("total_tokens", Integer),
+    Column("mime_type", String),
+    Column("page_count", Integer),
+    Column("native_text_chars", Integer),
+    Column("sent_text_chars", Integer),
+    Column("text_reduction_ratio", Float),
+    Column("result_json", Text),
+    Column("provider_match", Boolean),
+    Column("invoice_number_match", Boolean),
+    Column("invoice_date_match", Boolean),
+    Column("tax_base_match", Boolean),
+    Column("vat_match", Boolean),
+    Column("withholding_match", Boolean),
+    Column("total_match", Boolean),
+    Column("due_date_match", Boolean),
+    Column("overall_match", Boolean),
+    Column("comparison_json", Text),
+    Column("error_type", String),
+    Column("attempt_count", Integer, nullable=False, server_default=text("0")),
+    Column("lease_token", String),
+    Column("lease_expires_at", String),
+    Column("created_at", String, nullable=False),
+    Column("started_at", String),
+    Column("completed_at", String),
+    Column("updated_at", String, nullable=False),
+    Column("worker_instance_id", String),
+    UniqueConstraint(
+        "job_id",
+        "shadow_version",
+        name="uq_invoice_shadow_runs_job_version",
+    ),
+    Index("ix_invoice_shadow_runs_status_created", "status", "created_at", "id"),
+    Index("ix_invoice_shadow_runs_company_created", "company_id", "created_at"),
+    Index("ix_invoice_shadow_runs_batch", "batch_id", "created_at"),
 )
 
 facturacion_table = Table(
@@ -6108,6 +6184,116 @@ def async_invoice_analysis_is_available():
     return ASYNC_INVOICE_ANALYSIS_ENABLED and has_private_object_storage()
 
 
+INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v1"
+INVOICE_V2_SHADOW_ROUTE = "v2_fast_text_native"
+
+
+def _invoice_v2_shadow_is_selected(job_id):
+    """Use a stable bucket so retries do not randomly enter or leave shadow."""
+    if not INVOICE_V2_SHADOW_ENABLED or INVOICE_V2_SHADOW_SAMPLE_RATE <= 0:
+        return False
+    if INVOICE_V2_SHADOW_SAMPLE_RATE >= 1:
+        return True
+    bucket = int.from_bytes(
+        hashlib.sha256(f"invoice-v2-shadow:{job_id}".encode("utf-8")).digest()[:8],
+        byteorder="big",
+    ) / float(1 << 64)
+    return bucket < INVOICE_V2_SHADOW_SAMPLE_RATE
+
+
+def _create_invoice_v2_shadow_run(job, prepared_text):
+    """Persist benchmark metadata only; the compact source text stays in memory."""
+    now_iso = datetime.utcnow().isoformat()
+    eligible = bool(prepared_text.get("eligible"))
+    status = "queued" if eligible else "skipped"
+    validation_status = "pending" if eligible else "not_applicable"
+    values = {
+        "job_id": job["id"],
+        "user_id": job["user_id"],
+        "company_id": job["company_id"],
+        "batch_id": job.get("batch_id"),
+        "batch_position": job.get("batch_position"),
+        "shadow_version": INVOICE_V2_SHADOW_VERSION,
+        "route": INVOICE_V2_SHADOW_ROUTE,
+        "model": (os.getenv("OPENAI_INVOICE_MODEL") or "").strip() or None,
+        "reasoning_effort": (os.getenv("OPENAI_INVOICE_REASONING_EFFORT") or "low").strip().lower(),
+        "eligible": eligible,
+        "eligibility_reason": str(prepared_text.get("reason") or "unknown")[:255],
+        "status": status,
+        "validation_status": validation_status,
+        "preprocessing_ms": None,
+        "openai_ms": None,
+        "parsing_ms": None,
+        "validation_ms": None,
+        "total_ms": None,
+        "input_tokens": None,
+        "output_tokens": None,
+        "reasoning_tokens": None,
+        "total_tokens": None,
+        "mime_type": job.get("mime_type"),
+        "page_count": max(int(prepared_text.get("page_count") or 0), 0),
+        "native_text_chars": max(int(prepared_text.get("native_text_chars") or 0), 0),
+        "sent_text_chars": max(int(prepared_text.get("sent_text_chars") or 0), 0),
+        "text_reduction_ratio": prepared_text.get("size_reduction_ratio"),
+        "result_json": None,
+        "provider_match": None,
+        "invoice_number_match": None,
+        "invoice_date_match": None,
+        "tax_base_match": None,
+        "vat_match": None,
+        "withholding_match": None,
+        "total_match": None,
+        "due_date_match": None,
+        "overall_match": None,
+        "comparison_json": None,
+        "error_type": None,
+        "attempt_count": 0,
+        "lease_token": None,
+        "lease_expires_at": None,
+        "created_at": now_iso,
+        "started_at": None,
+        "completed_at": now_iso if status == "skipped" else None,
+        "updated_at": now_iso,
+        "worker_instance_id": None,
+    }
+    try:
+        with engine.begin() as conn:
+            existing = conn.execute(
+                select(invoice_analysis_shadow_runs_table.c.id)
+                .where(invoice_analysis_shadow_runs_table.c.job_id == job["id"])
+                .where(
+                    invoice_analysis_shadow_runs_table.c.shadow_version
+                    == INVOICE_V2_SHADOW_VERSION
+                )
+            ).first()
+            if existing:
+                return True
+            conn.execute(invoice_analysis_shadow_runs_table.insert().values(**values))
+        app.logger.info(
+            "Invoice V2 shadow run created: job_id=%s eligible=%s reason=%s",
+            job["id"],
+            eligible,
+            values["eligibility_reason"],
+        )
+        return True
+    except Exception:
+        app.logger.exception(
+            "No se pudo crear la ejecución shadow V2 para el trabajo de factura %s.",
+            job["id"],
+        )
+        return False
+
+
+def _invoice_v2_shadow_candidate(job, file_bytes):
+    if not _invoice_v2_shadow_is_selected(job["id"]):
+        return None
+    return prepare_invoice_v2_fast_text(
+        file_bytes,
+        filename=job.get("original_filename"),
+        mime_type=job.get("mime_type"),
+    )
+
+
 def _async_invoice_analysis_storage_key(filename):
     extension = os.path.splitext(filename or "")[1].lower()
     if extension not in ALLOWED_EXTENSIONS:
@@ -6754,7 +6940,7 @@ class _InvoiceAnalysisLeaseRenewer:
 
 
 def cleanup_expired_invoice_analysis_jobs():
-    """Purge expired results and any source object left by an interrupted worker."""
+    """Purge expired results without extending a retained source for shadow V2."""
     now_iso = datetime.utcnow().isoformat()
     with engine.begin() as conn:
         rows = conn.execute(
@@ -6763,9 +6949,31 @@ def cleanup_expired_invoice_analysis_jobs():
             .where(invoice_analysis_jobs_table.c.status != "processing")
         ).mappings().all()
         if rows:
+            job_ids = [row["id"] for row in rows]
+            # The document TTL remains authoritative. A shadow run that has
+            # not started or finished by then is recorded as incomplete and
+            # cannot retain the private source beyond the existing lifetime.
+            conn.execute(
+                invoice_analysis_shadow_runs_table.update()
+                .where(invoice_analysis_shadow_runs_table.c.job_id.in_(job_ids))
+                .where(
+                    invoice_analysis_shadow_runs_table.c.status.in_(
+                        ("queued", "processing")
+                    )
+                )
+                .values(
+                    status="failed",
+                    validation_status="not_run",
+                    completed_at=now_iso,
+                    updated_at=now_iso,
+                    lease_token=None,
+                    lease_expires_at=None,
+                    error_type="source_expired",
+                )
+            )
             conn.execute(
                 invoice_analysis_jobs_table.delete().where(
-                    invoice_analysis_jobs_table.c.id.in_([row["id"] for row in rows])
+                    invoice_analysis_jobs_table.c.id.in_(job_ids)
                 )
             )
     for row in rows:
@@ -6896,6 +7104,7 @@ def _finish_invoice_analysis_job(
     rate_limit_metadata=None,
     extracted=None,
     lease_renewal_count=0,
+    retain_source=False,
 ):
     """Persist a terminal state only while this worker still owns the lease."""
     job_id = job["id"]
@@ -6906,12 +7115,13 @@ def _finish_invoice_analysis_job(
         "lease_expires_at": None,
         "lease_token": None,
         "next_attempt_at": None,
-        "storage_key": None,
         "expires_at": (
             datetime.fromisoformat(completed_at_iso)
             + timedelta(seconds=ASYNC_INVOICE_ANALYSIS_RESULT_TTL_SECONDS)
         ).isoformat(),
     }
+    if not retain_source:
+        values["storage_key"] = None
     if status == "completed":
         values["result_json"] = json.dumps(extracted or {})
         values["error_message"] = None
@@ -6952,6 +7162,439 @@ def _finish_invoice_analysis_job(
             "No se pudo registrar la telemetría final del trabajo de factura %s.", job_id
         )
     return True
+
+
+_INVOICE_V2_SHADOW_RESULT_FIELDS = (
+    "provider_name",
+    "supplier_tax_id",
+    "invoice_number",
+    "invoice_date",
+    "payment_dates",
+    "currency",
+    "base_amount",
+    "vat_amount",
+    "withholding_amount",
+    "other_taxes",
+    "total_amount",
+    "vat_breakdown",
+)
+
+
+def _safe_invoice_v2_shadow_result(result):
+    """Persist only normalized accounting values, never evidence or source text."""
+    if not isinstance(result, dict):
+        return {}
+    safe = {}
+    for field in _INVOICE_V2_SHADOW_RESULT_FIELDS:
+        value = result.get(field)
+        if field == "payment_dates":
+            safe[field] = [str(item)[:32] for item in value or [] if item]
+        elif field == "vat_breakdown":
+            safe[field] = [
+                {
+                    "base": item.get("base"),
+                    "rate": item.get("rate"),
+                    "vat_amount": item.get("vat_amount"),
+                }
+                for item in value or []
+                if isinstance(item, dict)
+            ]
+        elif isinstance(value, str):
+            safe[field] = value[:255]
+        else:
+            safe[field] = value
+    return safe
+
+
+def _normalize_shadow_comparison_text(value, *, entity=False):
+    if value is None:
+        return ""
+    normalized = unicodedata.normalize("NFKD", str(value)).encode("ascii", "ignore").decode("ascii")
+    tokens = re.findall(r"[A-Za-z0-9]+", normalized.upper())
+    if entity:
+        ignored = {"S", "L", "SL", "SLU", "SA", "SAU", "SRL", "LTD", "LIMITED", "INC"}
+        tokens = [token for token in tokens if token not in ignored]
+    return "".join(tokens)
+
+
+def _shadow_amount_matches(left, right, tolerance=0.01):
+    if left is None or right is None:
+        return left is None and right is None
+    try:
+        return abs(float(left) - float(right)) <= tolerance
+    except (TypeError, ValueError):
+        return False
+
+
+def _shadow_vat_breakdown_matches(left, right):
+    def normalized_lines(value):
+        lines = []
+        for item in value or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                lines.append(
+                    (
+                        round(float(item.get("rate")), 2),
+                        round(float(item.get("base")), 2),
+                        round(float(item.get("vat_amount")), 2),
+                    )
+                )
+            except (TypeError, ValueError):
+                return None
+        return sorted(lines)
+
+    left_lines = normalized_lines(left)
+    right_lines = normalized_lines(right)
+    if left_lines is None or right_lines is None or len(left_lines) != len(right_lines):
+        return False
+    return all(
+        _shadow_amount_matches(left_item[0], right_item[0])
+        and _shadow_amount_matches(left_item[1], right_item[1])
+        and _shadow_amount_matches(left_item[2], right_item[2])
+        for left_item, right_item in zip(left_lines, right_lines)
+    )
+
+
+def _compare_invoice_v1_and_v2(v1_result, v2_result):
+    """Compare normalized accounting fields without persisting either document text."""
+    v1_result = v1_result if isinstance(v1_result, dict) else {}
+    v2_result = v2_result if isinstance(v2_result, dict) else {}
+    provider_match = _normalize_shadow_comparison_text(
+        v1_result.get("provider_name") or v1_result.get("supplier"), entity=True
+    ) == _normalize_shadow_comparison_text(v2_result.get("provider_name"), entity=True)
+    invoice_number_match = _normalize_shadow_comparison_text(
+        v1_result.get("invoice_number")
+    ) == _normalize_shadow_comparison_text(v2_result.get("invoice_number"))
+    invoice_date_match = (v1_result.get("invoice_date") or None) == (
+        v2_result.get("invoice_date") or None
+    )
+    tax_base_match = _shadow_amount_matches(
+        v1_result.get("base_amount"), v2_result.get("base_amount")
+    )
+    vat_match = _shadow_amount_matches(
+        v1_result.get("vat_amount"), v2_result.get("vat_amount")
+    ) and _shadow_vat_breakdown_matches(
+        v1_result.get("vat_breakdown"), v2_result.get("vat_breakdown")
+    )
+    withholding_match = _shadow_amount_matches(
+        abs(float(v1_result.get("withholding_amount") or 0)),
+        abs(float(v2_result.get("withholding_amount") or 0)),
+    )
+    total_match = _shadow_amount_matches(
+        v1_result.get("total_amount"), v2_result.get("total_amount")
+    )
+    due_date_match = sorted(v1_result.get("payment_dates") or []) == sorted(
+        v2_result.get("payment_dates") or []
+    )
+    matches = {
+        "provider_match": provider_match,
+        "invoice_number_match": invoice_number_match,
+        "invoice_date_match": invoice_date_match,
+        "tax_base_match": tax_base_match,
+        "vat_match": vat_match,
+        "withholding_match": withholding_match,
+        "total_match": total_match,
+        "due_date_match": due_date_match,
+    }
+    differences = [field for field, matches_value in matches.items() if not matches_value]
+    return {
+        **matches,
+        "overall_match": not differences,
+        "comparison_json": json.dumps(
+            {"different_fields": differences}, separators=(",", ":"), sort_keys=True
+        ),
+    }
+
+
+def _requeue_expired_invoice_v2_shadow_leases(conn, now_iso):
+    expired_ids = [
+        row[0]
+        for row in conn.execute(
+            select(invoice_analysis_shadow_runs_table.c.id)
+            .where(invoice_analysis_shadow_runs_table.c.status == "processing")
+            .where(invoice_analysis_shadow_runs_table.c.lease_expires_at.is_not(None))
+            .where(invoice_analysis_shadow_runs_table.c.lease_expires_at < now_iso)
+        ).all()
+    ]
+    if expired_ids:
+        conn.execute(
+            invoice_analysis_shadow_runs_table.update()
+            .where(invoice_analysis_shadow_runs_table.c.id.in_(expired_ids))
+            .values(
+                status="queued",
+                started_at=None,
+                lease_token=None,
+                lease_expires_at=None,
+                updated_at=now_iso,
+                worker_instance_id=None,
+            )
+        )
+    return expired_ids
+
+
+def claim_next_invoice_v2_shadow_run():
+    """Claim one V2 run only after the worker has no V1 work to submit."""
+    now = datetime.utcnow()
+    now_iso = now.isoformat()
+    lease_expires_at = (
+        now + timedelta(seconds=ASYNC_INVOICE_ANALYSIS_LEASE_SECONDS)
+    ).isoformat()
+    with engine.begin() as conn:
+        _requeue_expired_invoice_v2_shadow_leases(conn, now_iso)
+        candidate = conn.execute(
+            select(
+                invoice_analysis_shadow_runs_table,
+                invoice_analysis_jobs_table.c.storage_key.label("source_storage_key"),
+                invoice_analysis_jobs_table.c.original_filename.label("source_filename"),
+                invoice_analysis_jobs_table.c.mime_type.label("source_mime_type"),
+                invoice_analysis_jobs_table.c.result_json.label("v1_result_json"),
+            )
+            .join(
+                invoice_analysis_jobs_table,
+                invoice_analysis_jobs_table.c.id
+                == invoice_analysis_shadow_runs_table.c.job_id,
+            )
+            .where(invoice_analysis_shadow_runs_table.c.status == "queued")
+            .where(invoice_analysis_shadow_runs_table.c.eligible.is_(True))
+            .where(invoice_analysis_jobs_table.c.status == "completed")
+            .where(invoice_analysis_jobs_table.c.storage_key.is_not(None))
+            .order_by(
+                invoice_analysis_shadow_runs_table.c.created_at.asc(),
+                invoice_analysis_shadow_runs_table.c.id.asc(),
+            )
+            .limit(1)
+            .with_for_update(skip_locked=True, of=invoice_analysis_shadow_runs_table)
+        ).mappings().first()
+        if not candidate:
+            return None
+        lease_token = secrets.token_urlsafe(32)
+        claim = conn.execute(
+            invoice_analysis_shadow_runs_table.update()
+            .where(invoice_analysis_shadow_runs_table.c.id == candidate["id"])
+            .where(invoice_analysis_shadow_runs_table.c.status == "queued")
+            .values(
+                status="processing",
+                started_at=now_iso,
+                lease_token=lease_token,
+                lease_expires_at=lease_expires_at,
+                attempt_count=int(candidate.get("attempt_count") or 0) + 1,
+                updated_at=now_iso,
+                worker_instance_id=_render_worker_instance_id(),
+            )
+        )
+        if claim.rowcount != 1:
+            return None
+        claimed = dict(candidate)
+        claimed.update(
+            {
+                "status": "processing",
+                "started_at": now_iso,
+                "lease_token": lease_token,
+                "lease_expires_at": lease_expires_at,
+                "attempt_count": int(candidate.get("attempt_count") or 0) + 1,
+            }
+        )
+        return claimed
+
+
+def _finish_invoice_v2_shadow_run(
+    run,
+    *,
+    status,
+    validation_status,
+    prepared_text=None,
+    telemetry=None,
+    result=None,
+    comparison=None,
+    error_type=None,
+):
+    completed_at = datetime.utcnow().isoformat()
+    values = {
+        "status": status,
+        "validation_status": validation_status,
+        "completed_at": completed_at,
+        "updated_at": completed_at,
+        "lease_token": None,
+        "lease_expires_at": None,
+        "error_type": str(error_type)[:255] if error_type else None,
+        "total_ms": _invoice_analysis_elapsed_ms(run.get("started_at"), completed_at),
+    }
+    if isinstance(prepared_text, dict):
+        values.update(
+            {
+                "eligible": bool(prepared_text.get("eligible")),
+                "eligibility_reason": str(
+                    prepared_text.get("reason") or run.get("eligibility_reason") or "unknown"
+                )[:255],
+                "page_count": max(int(prepared_text.get("page_count") or 0), 0),
+                "native_text_chars": max(int(prepared_text.get("native_text_chars") or 0), 0),
+                "sent_text_chars": max(int(prepared_text.get("sent_text_chars") or 0), 0),
+                "text_reduction_ratio": prepared_text.get("size_reduction_ratio"),
+            }
+        )
+    if isinstance(telemetry, dict):
+        for field in (
+            "preprocessing_ms",
+            "openai_ms",
+            "parsing_ms",
+            "validation_ms",
+            "input_tokens",
+            "output_tokens",
+            "reasoning_tokens",
+            "total_tokens",
+        ):
+            value = telemetry.get(field)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                values[field] = max(int(value), 0)
+        if telemetry.get("openai_model"):
+            values["model"] = str(telemetry["openai_model"])[:255]
+    if isinstance(result, dict):
+        values["result_json"] = json.dumps(
+            _safe_invoice_v2_shadow_result(result),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    if isinstance(comparison, dict):
+        values.update(
+            {
+                field: comparison.get(field)
+                for field in (
+                    "provider_match",
+                    "invoice_number_match",
+                    "invoice_date_match",
+                    "tax_base_match",
+                    "vat_match",
+                    "withholding_match",
+                    "total_match",
+                    "due_date_match",
+                    "overall_match",
+                    "comparison_json",
+                )
+            }
+        )
+    with engine.begin() as conn:
+        finished = conn.execute(
+            invoice_analysis_shadow_runs_table.update()
+            .where(invoice_analysis_shadow_runs_table.c.id == run["id"])
+            .where(invoice_analysis_shadow_runs_table.c.status == "processing")
+            .where(invoice_analysis_shadow_runs_table.c.lease_token == run.get("lease_token"))
+            .where(invoice_analysis_shadow_runs_table.c.lease_expires_at > completed_at)
+            .values(**values)
+        )
+    if finished.rowcount != 1:
+        app.logger.warning(
+            "Resultado V2 shadow descartado para ejecución %s: lease ya no vigente.",
+            run["id"],
+        )
+        return False
+    return True
+
+
+def _release_invoice_v2_shadow_source(job_id, storage_key):
+    """Delete a retained object only after every shadow run for its job is terminal."""
+    if not storage_key:
+        return False
+    with engine.begin() as conn:
+        pending = conn.execute(
+            select(invoice_analysis_shadow_runs_table.c.id)
+            .where(invoice_analysis_shadow_runs_table.c.job_id == job_id)
+            .where(invoice_analysis_shadow_runs_table.c.status.in_(("queued", "processing")))
+            .limit(1)
+        ).first()
+        if pending:
+            return False
+        released = conn.execute(
+            invoice_analysis_jobs_table.update()
+            .where(invoice_analysis_jobs_table.c.id == job_id)
+            .where(invoice_analysis_jobs_table.c.status == "completed")
+            .where(invoice_analysis_jobs_table.c.storage_key == storage_key)
+            .values(storage_key=None, updated_at=datetime.utcnow().isoformat())
+        )
+    if released.rowcount != 1:
+        return False
+    try:
+        delete_private_object(storage_key)
+    except Exception:
+        app.logger.exception(
+            "No se pudo borrar el documento temporal tras V2 shadow para el trabajo %s.",
+            job_id,
+        )
+    return True
+
+
+def _run_claimed_invoice_v2_shadow_run(run):
+    """Execute V2 after V1 completion. Any V2 failure remains benchmark-only."""
+    storage_key = run.get("source_storage_key")
+    source_released = False
+    try:
+        if not storage_key:
+            raise RuntimeError("source_document_unavailable")
+        file_bytes = download_private_bytes(storage_key)
+        prepared_text = prepare_invoice_v2_fast_text(
+            file_bytes,
+            filename=run.get("source_filename"),
+            mime_type=run.get("source_mime_type"),
+        )
+        if not prepared_text.get("eligible"):
+            source_released = _finish_invoice_v2_shadow_run(
+                run,
+                status="skipped",
+                validation_status="not_applicable",
+                prepared_text=prepared_text,
+            )
+            return True
+        with engine.connect() as conn:
+            company_names = get_company_names_for_analysis(conn, run["company_id"])
+        result, telemetry = analyze_invoice_v2_fast_text(
+            file_bytes=file_bytes,
+            filename=run.get("source_filename") or "documento.pdf",
+            mime_type=run.get("source_mime_type"),
+            company_names=company_names,
+            prepared_text=prepared_text,
+            return_telemetry=True,
+        )
+        analysis_error = result.get("analysis_error") if isinstance(result, dict) else None
+        if isinstance(analysis_error, dict):
+            source_released = _finish_invoice_v2_shadow_run(
+                run,
+                status="failed",
+                validation_status=result.get("validation_status") or "not_run",
+                prepared_text=prepared_text,
+                telemetry=telemetry,
+                error_type=analysis_error.get("status") or "v2_error",
+            )
+            return True
+        comparison = None
+        if result.get("validation_status") == "passed":
+            try:
+                v1_result = json.loads(run.get("v1_result_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                v1_result = {}
+            comparison = _compare_invoice_v1_and_v2(v1_result, result)
+        source_released = _finish_invoice_v2_shadow_run(
+            run,
+            status="completed",
+            validation_status=result.get("validation_status") or "failed",
+            prepared_text=prepared_text,
+            telemetry=telemetry,
+            result=result,
+            comparison=comparison,
+        )
+        return True
+    except Exception as exc:
+        app.logger.exception("Error ejecutando V2 shadow para el trabajo de factura %s.", run.get("job_id"))
+        source_released = _finish_invoice_v2_shadow_run(
+            run,
+            status="failed",
+            validation_status="not_run",
+            error_type=type(exc).__name__,
+        )
+        return True
+    finally:
+        if source_released:
+            _release_invoice_v2_shadow_source(run["job_id"], storage_key)
 
 
 def _run_claimed_invoice_analysis_job(
@@ -7021,7 +7664,20 @@ def _run_claimed_invoice_analysis_job(
                 job, metadata=error_metadata
             )
         elif _is_valid_invoice_analysis_result(extracted):
-            source_can_be_deleted = _finish_invoice_analysis_job(
+            shadow_candidate = None
+            try:
+                shadow_candidate = _invoice_v2_shadow_candidate(job, file_bytes)
+            except Exception:
+                # Benchmark preparation is deliberately non-blocking for the
+                # V1 result. A V2 setup issue must never fail the invoice.
+                app.logger.exception(
+                    "No se pudo preparar V2 shadow para el trabajo de factura %s.",
+                    job_id,
+                )
+            retain_source_for_shadow = bool(
+                shadow_candidate and shadow_candidate.get("eligible")
+            )
+            finished_v1 = _finish_invoice_analysis_job(
                 job,
                 status="completed",
                 completed_at_iso=completed_at_iso,
@@ -7029,7 +7685,16 @@ def _run_claimed_invoice_analysis_job(
                 error_type=None,
                 extracted=extracted,
                 lease_renewal_count=renewer.renewal_count,
+                retain_source=retain_source_for_shadow,
             )
+            source_can_be_deleted = finished_v1 and not retain_source_for_shadow
+            if finished_v1 and shadow_candidate is not None:
+                shadow_created = _create_invoice_v2_shadow_run(job, shadow_candidate)
+                if retain_source_for_shadow and not shadow_created:
+                    # No benchmark record means no consumer owns the retained
+                    # object, so release it immediately rather than extending
+                    # its privacy lifetime.
+                    _release_invoice_v2_shadow_source(job_id, storage_key)
         else:
             terminal_error_type = (
                 _rate_limit_terminal_error_type(error_metadata)
@@ -7099,39 +7764,63 @@ def run_invoice_analysis_worker_once(
     return True
 
 
+def run_invoice_v2_shadow_worker_once():
+    """Testable V2-only entry point; never claims a V1 invoice job."""
+    cleanup_expired_invoice_analysis_jobs()
+    run = claim_next_invoice_v2_shadow_run()
+    if not run:
+        return False
+    _run_claimed_invoice_v2_shadow_run(run)
+    return True
+
+
 def run_invoice_analysis_worker(stop_event=None):
     """Run concurrent, fenced queue consumers inside one Render worker instance."""
     app.logger.info(
-        "Worker de análisis persistente iniciado: worker_concurrency=%s full_document_concurrency=%s ocr_concurrency=%s company_concurrency=%s",
+        "Worker de análisis persistente iniciado: worker_concurrency=%s full_document_concurrency=%s ocr_concurrency=%s company_concurrency=%s v2_shadow_enabled=%s v2_shadow_sample_rate=%s v2_shadow_concurrency=%s",
         WORKER_CONCURRENCY,
         FULL_DOCUMENT_CONCURRENCY,
         OCR_CONCURRENCY,
         COMPANY_CONCURRENCY,
+        INVOICE_V2_SHADOW_ENABLED,
+        INVOICE_V2_SHADOW_SAMPLE_RATE,
+        V2_SHADOW_CONCURRENCY,
     )
     full_document_semaphore = threading.BoundedSemaphore(FULL_DOCUMENT_CONCURRENCY)
     ocr_semaphore = mp.get_context("spawn").BoundedSemaphore(OCR_CONCURRENCY)
     last_cleanup_at = 0.0
-    with ThreadPoolExecutor(max_workers=WORKER_CONCURRENCY) as executor:
-        futures = set()
+    shadow_capacity = V2_SHADOW_CONCURRENCY if INVOICE_V2_SHADOW_ENABLED else 0
+    # Shadow text calls receive separate capacity. They are only started when
+    # no V1 task is active, while V1 retains all of its configured slots if a
+    # new upload arrives during a benchmark call.
+    with ThreadPoolExecutor(
+        max_workers=WORKER_CONCURRENCY + shadow_capacity
+    ) as executor:
+        v1_futures = set()
+        shadow_futures = set()
         while not stop_event or not stop_event.is_set():
             now_monotonic = time.monotonic()
             if now_monotonic - last_cleanup_at >= ASYNC_INVOICE_ANALYSIS_POLL_SECONDS:
                 cleanup_expired_invoice_analysis_jobs()
                 last_cleanup_at = now_monotonic
 
-            completed_futures = {future for future in futures if future.done()}
-            futures.difference_update(completed_futures)
-            for future in completed_futures:
+            completed_v1 = {future for future in v1_futures if future.done()}
+            completed_shadow = {
+                future for future in shadow_futures if future.done()
+            }
+            v1_futures.difference_update(completed_v1)
+            shadow_futures.difference_update(completed_shadow)
+            for future in completed_v1 | completed_shadow:
                 try:
                     future.result()
                 except Exception:
                     app.logger.exception("Un worker de factura terminó inesperadamente.")
 
-            while len(futures) < WORKER_CONCURRENCY:
+            while len(v1_futures) < WORKER_CONCURRENCY:
                 job = claim_next_invoice_analysis_job()
                 if not job:
                     break
-                futures.add(
+                v1_futures.add(
                     executor.submit(
                         _run_claimed_invoice_analysis_job,
                         job,
@@ -7140,9 +7829,21 @@ def run_invoice_analysis_worker(stop_event=None):
                     )
                 )
 
-            if futures:
+            # V2 is best-effort and never claims work ahead of V1. Running it
+            # only during an idle V1 window keeps user queue latency primary.
+            if not v1_futures and shadow_capacity:
+                while len(shadow_futures) < shadow_capacity:
+                    shadow_run = claim_next_invoice_v2_shadow_run()
+                    if not shadow_run:
+                        break
+                    shadow_futures.add(
+                        executor.submit(_run_claimed_invoice_v2_shadow_run, shadow_run)
+                    )
+
+            active_futures = v1_futures | shadow_futures
+            if active_futures:
                 wait(
-                    futures,
+                    active_futures,
                     timeout=ASYNC_INVOICE_ANALYSIS_POLL_SECONDS,
                     return_when=FIRST_COMPLETED,
                 )

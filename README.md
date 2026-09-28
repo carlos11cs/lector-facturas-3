@@ -60,6 +60,11 @@ export FULL_DOCUMENT_CONCURRENCY="1"
 export OCR_CONCURRENCY="1"
 export COMPANY_CONCURRENCY="2"
 export ASYNC_INVOICE_ANALYSIS_LEASE_RENEWAL_SECONDS="60"
+# V2 is a text-only benchmark. Keep it disabled until a controlled test.
+export INVOICE_V2_SHADOW_ENABLED="false"
+export INVOICE_V2_SHADOW_SAMPLE_RATE="0.10"
+export V2_SHADOW_CONCURRENCY="1"
+export INVOICE_V2_FAST_TEXT_MAX_CHARS="30000"
 ```
 
 ## Inicializar base de datos
@@ -110,6 +115,20 @@ sobrescribir el trabajo recuperado por otro. Empieza con `WORKER_CONCURRENCY=1`,
 cola, prueba `WORKER_CONCURRENCY=2` manteniendo inicialmente los otros límites en
 uno. `COMPANY_CONCURRENCY=2` limita la ocupación de cada empresa para preservar la
 equidad entre gestorías.
+
+### Benchmark V2 Fast Path
+
+V2 usa únicamente texto nativo compacto de PDFs digitales y se ejecuta en
+**shadow mode**: V1 sigue siendo siempre el único resultado visible y contable.
+Por defecto `INVOICE_V2_SHADOW_ENABLED=false`. Cuando se active de forma
+controlada, `INVOICE_V2_SHADOW_SAMPLE_RATE` selecciona trabajos de forma estable
+por identificador y `V2_SHADOW_CONCURRENCY=1` reserva una única ejecución de baja
+prioridad. V2 solo se inicia cuando no hay trabajo V1 activo; no usa OCR ni envía
+el PDF, imágenes o texto completo a telemetría. Los resultados comparativos se
+guardan en `invoice_analysis_shadow_runs` y el PDF privado se borra tras V2 o al
+alcanzar el TTL ya existente.
+La primera variante queda identificada como `v2-sol-text-v1`; la tabla permite
+comparar varias variantes del mismo trabajo mediante `job_id + shadow_version`.
 
 ## Docker (produccion)
 

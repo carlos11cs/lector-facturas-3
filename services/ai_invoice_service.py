@@ -43,6 +43,7 @@ DEFAULT_INVOICE_REASONING_EFFORT = "low"
 DEFAULT_INVOICE_AUDIT_REASONING_EFFORT = "high"
 INVOICE_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 PDF_TEXT_THRESHOLD = int(os.getenv("PDF_TEXT_THRESHOLD", "100"))
+DEFAULT_INVOICE_V2_FAST_TEXT_MAX_CHARS = 30000
 PDF_OCR_ZOOM = float(os.getenv("PDF_OCR_ZOOM", "2.0"))
 OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", "5"))
 OCR_MAX_SECONDS = int(os.getenv("OCR_MAX_SECONDS", "7"))
@@ -205,6 +206,20 @@ def _get_invoice_timeout_seconds() -> int:
         raise RuntimeError("OPENAI_INVOICE_TIMEOUT_SECONDS must be a positive integer") from exc
     if value <= 0:
         raise RuntimeError("OPENAI_INVOICE_TIMEOUT_SECONDS must be a positive integer")
+    return value
+
+
+def _get_invoice_v2_fast_text_max_chars() -> int:
+    configured = os.getenv(
+        "INVOICE_V2_FAST_TEXT_MAX_CHARS",
+        str(DEFAULT_INVOICE_V2_FAST_TEXT_MAX_CHARS),
+    ).strip()
+    try:
+        value = int(configured)
+    except ValueError as exc:
+        raise RuntimeError("INVOICE_V2_FAST_TEXT_MAX_CHARS must be a positive integer") from exc
+    if value < 1000:
+        raise RuntimeError("INVOICE_V2_FAST_TEXT_MAX_CHARS must be at least 1000")
     return value
 
 
@@ -3601,6 +3616,100 @@ def _extract_pdf_text_from_bytes(data: bytes) -> str:
         return "\n".join(parts).strip()
 
 
+def _compact_native_pdf_page_text(text: str) -> str:
+    """Preserve native PDF reading order while removing layout-only whitespace."""
+    compact_lines: List[str] = []
+    previous_line = None
+    for raw_line in _normalize_ocr_amount_text(text or "").splitlines():
+        line = re.sub(r"[ \t]+", " ", raw_line).strip()
+        if not line or line == previous_line:
+            continue
+        compact_lines.append(line)
+        previous_line = line
+    return "\n".join(compact_lines)
+
+
+def prepare_invoice_v2_fast_text(
+    file_bytes: bytes,
+    *,
+    filename: Optional[str] = None,
+    mime_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build an in-memory, page-labelled representation for the V2 shadow path.
+
+    This function deliberately does not extract accounting fields. Its output is
+    only a faithful compact rendering of native PDF text and operational size
+    metadata. Callers must not persist the returned ``text`` value.
+    """
+    filename = filename or "documento"
+    is_pdf = (mime_type or "").lower() == "application/pdf" or filename.lower().endswith(
+        ".pdf"
+    )
+    base_result: Dict[str, Any] = {
+        "eligible": False,
+        "reason": "not_pdf",
+        "page_count": 0,
+        "native_text_chars": 0,
+        "sent_text_chars": 0,
+        "size_reduction_ratio": None,
+        "text": "",
+    }
+    if not is_pdf:
+        return base_result
+    if fitz is None:
+        base_result["reason"] = "pymupdf_unavailable"
+        return base_result
+    try:
+        with fitz.open(stream=file_bytes, filetype="pdf") as document:
+            page_count = len(document)
+            raw_pages = [page.get_text("text", sort=True) or "" for page in document]
+    except Exception:
+        logger.info("Fast path V2 no elegible (%s): native_text_unavailable", filename)
+        base_result["reason"] = "native_text_unavailable"
+        return base_result
+
+    native_text = "\n".join(raw_pages)
+    native_text_chars = len(native_text)
+    base_result["page_count"] = page_count
+    base_result["native_text_chars"] = native_text_chars
+    if not _is_text_significant(native_text, PDF_TEXT_THRESHOLD):
+        base_result["reason"] = "scanned_pdf"
+        return base_result
+
+    page_blocks = []
+    for page_number, raw_page in enumerate(raw_pages, start=1):
+        compact_page = _compact_native_pdf_page_text(raw_page)
+        if compact_page:
+            page_blocks.append(f"[PÁGINA {page_number}]\n{compact_page}")
+    compact_text = "\n\n".join(page_blocks).strip()
+    if not _is_text_significant(compact_text, PDF_TEXT_THRESHOLD):
+        base_result["reason"] = "native_text_insufficient"
+        return base_result
+
+    max_chars = _get_invoice_v2_fast_text_max_chars()
+    if len(compact_text) > max_chars:
+        # Keep document headers and final tax/total blocks instead of silently
+        # dropping the end of a long digital invoice.
+        marker = "\n\n[CONTENIDO INTERMEDIO OMITIDO POR LÍMITE DE TAMAÑO]\n\n"
+        head_size = max(1, int((max_chars - len(marker)) * 0.6))
+        tail_size = max(1, max_chars - len(marker) - head_size)
+        compact_text = compact_text[:head_size] + marker + compact_text[-tail_size:]
+
+    sent_text_chars = len(compact_text)
+    base_result.update(
+        {
+            "eligible": True,
+            "reason": "native_text_sufficient",
+            "sent_text_chars": sent_text_chars,
+            "size_reduction_ratio": round(
+                max(0.0, 1 - (sent_text_chars / max(native_text_chars, 1))), 4
+            ),
+            "text": compact_text,
+        }
+    )
+    return base_result
+
+
 def _render_document_pages_for_vision(
     data: bytes,
     *,
@@ -3897,6 +4006,57 @@ INVOICE_EXTRACTION_SCHEMA = _strict_object(
     }
 )
 
+# V2 shadow intentionally asks for only the accounting contract needed to
+# compare a digital invoice with V1. Evidence is used for validation in-memory
+# and is never persisted with a shadow run.
+_FAST_TEXT_PARTY_SCHEMA = _strict_object(
+    {"legal_name": _nullable("string"), "tax_id": _nullable("string")}
+)
+_FAST_TEXT_INVOICE_SCHEMA = _strict_object(
+    {
+        "invoice_number": _nullable("string"),
+        "issue_date": _nullable("string"),
+        "currency": _nullable("string"),
+    }
+)
+_FAST_TEXT_TAX_SCHEMA = _strict_object(
+    {
+        "taxable_base": _nullable("number"),
+        "vat_rate": _nullable("number"),
+        "vat_amount": _nullable("number"),
+    }
+)
+_FAST_TEXT_TOTALS_SCHEMA = _strict_object(
+    {
+        "taxable_base": _nullable("number"),
+        "vat_amount": _nullable("number"),
+        "withholding": _nullable("number"),
+        "other_taxes": _nullable("number"),
+        "total": _nullable("number"),
+    }
+)
+INVOICE_FAST_TEXT_SCHEMA = _strict_object(
+    {
+        "supplier": _FAST_TEXT_PARTY_SCHEMA,
+        "customer": _FAST_TEXT_PARTY_SCHEMA,
+        "invoice": _FAST_TEXT_INVOICE_SCHEMA,
+        "due_dates": {"type": "array", "items": {"type": "string"}},
+        "taxes": {"type": "array", "items": _FAST_TEXT_TAX_SCHEMA},
+        "totals": _FAST_TEXT_TOTALS_SCHEMA,
+        "field_evidence": _strict_object(
+            {
+                "supplier": _EVIDENCE_SCHEMA,
+                "invoice_number": _EVIDENCE_SCHEMA,
+                "issue_date": _EVIDENCE_SCHEMA,
+                "taxes": _EVIDENCE_SCHEMA,
+                "totals": _EVIDENCE_SCHEMA,
+                "withholding": _EVIDENCE_SCHEMA,
+                "due_dates": _EVIDENCE_SCHEMA,
+            }
+        ),
+    }
+)
+
 
 def _money_decimal(value: Any) -> Optional[Decimal]:
     amount = _normalize_amount(value)
@@ -4068,7 +4228,22 @@ def _invoice_analysis_telemetry_result(
     return result
 
 
-def _call_invoice_responses(client, *, file_bytes: bytes, filename: str, mime_type: str, extracted_text: str, prompt: str, audit_issues: Optional[List[str]] = None, telemetry: Optional[Dict[str, Any]] = None, queue_managed_rate_limits: bool = False) -> Dict[str, Any]:
+def _call_invoice_responses(
+    client,
+    *,
+    file_bytes: bytes,
+    filename: str,
+    mime_type: str,
+    extracted_text: str,
+    prompt: str,
+    audit_issues: Optional[List[str]] = None,
+    telemetry: Optional[Dict[str, Any]] = None,
+    queue_managed_rate_limits: bool = False,
+    response_input: Optional[List[Dict[str, Any]]] = None,
+    response_schema: Optional[Dict[str, Any]] = None,
+    schema_name: str = "invoice_extraction",
+    route: str = "current_full_document",
+) -> Dict[str, Any]:
     audit = bool(audit_issues)
     if audit_issues:
         prompt += "\n\nREVISIÓN LIMITADA: corrige solo estas discrepancias: " + " | ".join(audit_issues)
@@ -4085,8 +4260,12 @@ def _call_invoice_responses(client, *, file_bytes: bytes, filename: str, mime_ty
         else client
     )
     logger.info(
-        "OpenAI invoice request retry policy: max_retries=%s",
+        "OpenAI invoice request retry policy: route=%s max_retries=%s",
+        route,
         getattr(request_client, "max_retries", None),
+    )
+    request_input = response_input or _response_input_for_invoice(
+        file_bytes, filename, mime_type, extracted_text, prompt
     )
     try:
         response = request_client.responses.create(
@@ -4094,8 +4273,15 @@ def _call_invoice_responses(client, *, file_bytes: bytes, filename: str, mime_ty
             reasoning={"effort": reasoning_effort},
             max_output_tokens=max_output_tokens,
             store=False,
-            input=_response_input_for_invoice(file_bytes, filename, mime_type, extracted_text, prompt),
-            text={"format": {"type": "json_schema", "name": "invoice_extraction", "strict": True, "schema": INVOICE_EXTRACTION_SCHEMA}},
+            input=request_input,
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": schema_name,
+                    "strict": True,
+                    "schema": response_schema or INVOICE_EXTRACTION_SCHEMA,
+                }
+            },
             timeout=timeout_seconds,
         )
     except Exception as exc:
@@ -4117,7 +4303,8 @@ def _call_invoice_responses(client, *, file_bytes: bytes, filename: str, mime_ty
         else:
             status = "timeout" if openai is not None and isinstance(exc, openai.APITimeoutError) else "api_error"
         logger.warning(
-            "OpenAI Responses invoice API error: status=%s error_class=%s http_status=%s error_code=%s error_type=%s error_param=%s request_id=%s retry_after_seconds=%s rate_limit_kind=%s retryable=%s requests_limit=%s requests_remaining=%s requests_reset=%s tokens_limit=%s tokens_remaining=%s tokens_reset=%s audit=%s openai_response_elapsed_ms=%s timeout_seconds=%s reasoning_effort=%s",
+            "OpenAI Responses invoice API error: route=%s status=%s error_class=%s http_status=%s error_code=%s error_type=%s error_param=%s request_id=%s retry_after_seconds=%s rate_limit_kind=%s retryable=%s requests_limit=%s requests_remaining=%s requests_reset=%s tokens_limit=%s tokens_remaining=%s tokens_reset=%s audit=%s openai_response_elapsed_ms=%s timeout_seconds=%s reasoning_effort=%s",
+            route,
             status,
             metadata.get("error_class"),
             metadata.get("http_status"),
@@ -4177,12 +4364,18 @@ def _call_invoice_responses(client, *, file_bytes: bytes, filename: str, mime_ty
     if not raw_text.strip():
         logger.warning("OpenAI Responses invoice response_status=completed response_refusal=false empty_output=true")
         raise InvoiceAnalysisResponseError("empty_output", "No structured output")
+    parsing_started = time.monotonic()
     data = _extract_json(raw_text)
+    if telemetry is not None:
+        telemetry["parsing_ms"] = int(telemetry.get("parsing_ms") or 0) + round(
+            (time.monotonic() - parsing_started) * 1000
+        )
     if not data:
         logger.warning("OpenAI Responses invoice response_status=completed response_refusal=false valid_json=false")
         raise InvoiceAnalysisResponseError("invalid_structured_output", "JSON Schema output could not be parsed")
     logger.info(
-        "OpenAI Responses invoice: model=%s endpoint=responses response_status=completed response_refusal=false direct_document=%s audit=%s openai_response_elapsed_ms=%s valid_json=true request_id=%s max_retries=%s timeout_seconds=%s reasoning_effort=%s",
+        "OpenAI Responses invoice: route=%s model=%s endpoint=responses response_status=completed response_refusal=false direct_document=%s audit=%s openai_response_elapsed_ms=%s valid_json=true request_id=%s max_retries=%s timeout_seconds=%s reasoning_effort=%s",
+        route,
         getattr(response, "model", model),
         bool(file_bytes),
         audit,
@@ -4225,7 +4418,7 @@ def _invoice_analysis_failure(
     }
 
 
-def analyze_invoice(
+def analyze_invoice_v1(
     file_path: Optional[str] = None,
     file_bytes: Optional[bytes] = None,
     filename: Optional[str] = None,
@@ -5034,6 +5227,269 @@ def analyze_invoice(
         round((time.monotonic() - analysis_started) * 1000),
     )
     return _invoice_analysis_telemetry_result(result, telemetry, return_telemetry)
+
+
+def _response_input_for_invoice_fast_text(prompt: str, compact_text: str) -> List[Dict[str, Any]]:
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": prompt},
+                {
+                    "type": "input_text",
+                    "text": "DOCUMENTO DIGITAL (texto nativo por página):\n" + compact_text,
+                },
+            ],
+        }
+    ]
+
+
+def _normalize_fast_text_tax_id(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = re.sub(r"[^A-Za-z0-9]", "", str(value)).upper()
+    return normalized or None
+
+
+def _is_plausible_fast_text_tax_id(value: Optional[str]) -> bool:
+    if value is None:
+        return True
+    return (
+        8 <= len(value) <= 16
+        and any(character.isalpha() for character in value)
+        and any(character.isdigit() for character in value)
+    )
+
+
+def _normalize_fast_text_tax_lines(raw_taxes: Any) -> List[Dict[str, Optional[float]]]:
+    lines: List[Dict[str, Optional[float]]] = []
+    for line in raw_taxes if isinstance(raw_taxes, list) else []:
+        if not isinstance(line, dict):
+            continue
+        base_amount = _money_decimal(line.get("taxable_base"))
+        vat_amount = _money_decimal(line.get("vat_amount"))
+        lines.append(
+            {
+                "base": _round_amount(float(base_amount)) if base_amount is not None else None,
+                "rate": _normalize_rate(line.get("vat_rate")),
+                "vat_amount": _round_amount(float(vat_amount)) if vat_amount is not None else None,
+            }
+        )
+    return lines
+
+
+def _fast_text_evidence_present(structured_data: Dict[str, Any], field: str) -> bool:
+    evidence = (structured_data.get("field_evidence") or {}).get(field) or {}
+    return bool(isinstance(evidence, dict) and str(evidence.get("evidence") or "").strip())
+
+
+def _normalize_fast_text_invoice(structured_data: Dict[str, Any]) -> Dict[str, Any]:
+    supplier = structured_data.get("supplier") or {}
+    customer = structured_data.get("customer") or {}
+    invoice = structured_data.get("invoice") or {}
+    totals = structured_data.get("totals") or {}
+    due_dates = []
+    for value in structured_data.get("due_dates") or []:
+        normalized = _normalize_date(value)
+        if normalized and normalized not in due_dates:
+            due_dates.append(normalized)
+    taxes = _normalize_fast_text_tax_lines(structured_data.get("taxes"))
+    provider_name = _strip_inline_tax_id(supplier.get("legal_name")) if supplier.get("legal_name") else None
+    customer_name = _strip_inline_tax_id(customer.get("legal_name")) if customer.get("legal_name") else None
+    base_amount = _money_decimal(totals.get("taxable_base"))
+    vat_amount = _money_decimal(totals.get("vat_amount"))
+    withholding = _money_decimal(totals.get("withholding"))
+    other_taxes = _money_decimal(totals.get("other_taxes"))
+    total_amount = _money_decimal(totals.get("total"))
+    return {
+        "provider_name": provider_name.strip() if isinstance(provider_name, str) else None,
+        "supplier_tax_id": _normalize_fast_text_tax_id(supplier.get("tax_id")),
+        "client_name": customer_name.strip() if isinstance(customer_name, str) else None,
+        "customer_tax_id": _normalize_fast_text_tax_id(customer.get("tax_id")),
+        "invoice_number": str(invoice.get("invoice_number") or "").strip() or None,
+        "invoice_date": _normalize_date(invoice.get("issue_date")),
+        "payment_dates": due_dates,
+        "currency": str(invoice.get("currency") or "").strip().upper() or None,
+        "base_amount": _round_amount(float(base_amount)) if base_amount is not None else None,
+        "vat_amount": _round_amount(float(vat_amount)) if vat_amount is not None else None,
+        "withholding_amount": _round_amount(float(abs(withholding))) if withholding is not None else None,
+        "other_taxes": _round_amount(float(other_taxes)) if other_taxes is not None else None,
+        "total_amount": _round_amount(float(total_amount)) if total_amount is not None else None,
+        "vat_breakdown": taxes,
+    }
+
+
+def _validate_fast_text_invoice(
+    structured_data: Dict[str, Any],
+    normalized: Dict[str, Any],
+    company_names: Optional[List[str]],
+) -> List[str]:
+    """Reject questionable V2 output without correcting or enriching it."""
+    issues: List[str] = []
+    provider_name = normalized.get("provider_name")
+    client_name = normalized.get("client_name")
+    invoice_number = normalized.get("invoice_number")
+    invoice_date = normalized.get("invoice_date")
+    supplier_tax_id = normalized.get("supplier_tax_id")
+    base_amount = _money_decimal(normalized.get("base_amount"))
+    vat_amount = _money_decimal(normalized.get("vat_amount"))
+    withholding = _money_decimal(normalized.get("withholding_amount")) or Decimal("0.00")
+    other_taxes = _money_decimal(normalized.get("other_taxes")) or Decimal("0.00")
+    total_amount = _money_decimal(normalized.get("total_amount"))
+    taxes = normalized.get("vat_breakdown") or []
+
+    if not provider_name:
+        issues.append("missing_supplier")
+    elif _is_same_entity(provider_name, company_names):
+        issues.append("supplier_matches_registered_customer")
+    if provider_name and client_name and _normalize_entity_name(provider_name) == _normalize_entity_name(client_name):
+        issues.append("supplier_matches_customer")
+    if not invoice_number:
+        issues.append("missing_invoice_number")
+    if not invoice_date:
+        issues.append("invalid_invoice_date")
+    if not _is_plausible_fast_text_tax_id(supplier_tax_id):
+        issues.append("invalid_supplier_tax_id")
+    if base_amount is None or vat_amount is None or total_amount is None:
+        issues.append("missing_accounting_totals")
+    else:
+        expected_total = (base_amount + vat_amount + other_taxes - abs(withholding)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        if abs(expected_total - total_amount) > Decimal("0.01"):
+            issues.append("inconsistent_accounting_equation")
+    if not taxes:
+        issues.append("missing_tax_lines")
+    else:
+        line_bases = Decimal("0.00")
+        line_vat = Decimal("0.00")
+        for line in taxes:
+            rate = line.get("rate")
+            line_base = _money_decimal(line.get("base"))
+            line_amount = _money_decimal(line.get("vat_amount"))
+            if rate is None or rate < 0 or rate > 30 or line_base is None or line_amount is None:
+                issues.append("invalid_tax_line")
+                break
+            line_bases += line_base
+            line_vat += line_amount
+        if base_amount is not None and abs(line_bases - base_amount) > Decimal("0.01"):
+            issues.append("tax_base_mismatch")
+        if vat_amount is not None and abs(line_vat - vat_amount) > Decimal("0.01"):
+            issues.append("tax_amount_mismatch")
+    for critical_field in ("supplier", "invoice_number", "issue_date", "totals", "taxes"):
+        if not _fast_text_evidence_present(structured_data, critical_field):
+            issues.append(f"missing_evidence_{critical_field}")
+    return list(dict.fromkeys(issues))
+
+
+def analyze_invoice_v2_fast_text(
+    *,
+    file_bytes: bytes,
+    filename: str,
+    mime_type: Optional[str] = None,
+    company_names: Optional[List[str]] = None,
+    prepared_text: Optional[Dict[str, Any]] = None,
+    return_telemetry: bool = False,
+) -> Union[Dict[str, Any], Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """Run the native-text-only V2 path. It is intended only for shadow use."""
+    started = time.monotonic()
+    telemetry: Dict[str, Any] = {
+        "preprocessing_ms": None,
+        "openai_ms": 0,
+        "parsing_ms": None,
+        "openai_model": None,
+        "input_tokens": None,
+        "output_tokens": None,
+        "reasoning_tokens": None,
+        "total_tokens": None,
+        "processing_type": "v2_fast_text_native",
+        "route": "v2_fast_text_native",
+    }
+    prepared = prepared_text or prepare_invoice_v2_fast_text(
+        file_bytes, filename=filename, mime_type=mime_type
+    )
+    telemetry["preprocessing_ms"] = round((time.monotonic() - started) * 1000)
+    if not prepared.get("eligible"):
+        result = {
+            "analysis_status": "skipped",
+            "validation_status": "not_applicable",
+            "eligibility_reason": prepared.get("reason") or "not_eligible",
+        }
+        return _invoice_analysis_telemetry_result(result, telemetry, return_telemetry)
+
+    prompt = (
+        "Extrae exclusivamente los campos contables de esta factura digital usando el texto nativo "
+        "por páginas. Devuelve el schema exacto. El proveedor es el emisor, nunca el cliente, "
+        "destinatario o dirección de entrega. No inventes importes, IVA, retenciones, fechas o NIF. "
+        "La retención se devuelve siempre como importe absoluto positivo. Verifica internamente: "
+        "total = base + IVA + otros impuestos - retención. Incluye evidencia literal breve y el número "
+        "de página para proveedor, número, fecha, líneas fiscales y totales."
+    )
+    try:
+        _get_invoice_model()
+        response_data = _call_invoice_responses(
+            _get_client(),
+            file_bytes=b"",
+            filename=filename,
+            mime_type=mime_type or "application/pdf",
+            extracted_text="",
+            prompt=prompt,
+            telemetry=telemetry,
+            queue_managed_rate_limits=True,
+            response_input=_response_input_for_invoice_fast_text(prompt, prepared["text"]),
+            response_schema=INVOICE_FAST_TEXT_SCHEMA,
+            schema_name="invoice_fast_text_extraction",
+            route="v2_fast_text_native",
+        )
+    except InvoiceAnalysisResponseError as exc:
+        result = {
+            "analysis_status": "failed",
+            "validation_status": "not_run",
+            "eligibility_reason": prepared.get("reason"),
+            "analysis_error": {
+                "status": exc.status,
+                "detail": exc.detail,
+                "metadata": exc.metadata,
+            },
+        }
+        return _invoice_analysis_telemetry_result(result, telemetry, return_telemetry)
+    except RuntimeError as exc:
+        result = {
+            "analysis_status": "failed",
+            "validation_status": "not_run",
+            "eligibility_reason": prepared.get("reason"),
+            "analysis_error": {"status": "configuration_error", "detail": str(exc)},
+        }
+        return _invoice_analysis_telemetry_result(result, telemetry, return_telemetry)
+
+    validation_started = time.monotonic()
+    normalized = _normalize_fast_text_invoice(response_data)
+    validation_issues = _validate_fast_text_invoice(
+        response_data, normalized, company_names or []
+    )
+    telemetry["validation_ms"] = round((time.monotonic() - validation_started) * 1000)
+    result = {
+        "analysis_status": "ok" if not validation_issues else "failed",
+        "validation_status": "passed" if not validation_issues else "failed",
+        "eligibility_reason": prepared.get("reason"),
+        "validation_issues": validation_issues,
+        **normalized,
+    }
+    logger.info(
+        "Invoice V2 fast text: status=%s validation_status=%s pages=%s native_text_chars=%s sent_text_chars=%s total_elapsed_ms=%s",
+        result["analysis_status"],
+        result["validation_status"],
+        prepared.get("page_count"),
+        prepared.get("native_text_chars"),
+        prepared.get("sent_text_chars"),
+        round((time.monotonic() - started) * 1000),
+    )
+    return _invoice_analysis_telemetry_result(result, telemetry, return_telemetry)
+
+
+def analyze_invoice(*args, **kwargs):
+    """Compatibility entry point: V1 remains the only production result path."""
+    return analyze_invoice_v1(*args, **kwargs)
 
 
 def extract_loan_schedule(text: str) -> List[Dict[str, Any]]:
