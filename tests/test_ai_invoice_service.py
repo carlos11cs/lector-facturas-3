@@ -816,6 +816,81 @@ class TestAiInvoiceService(unittest.TestCase):
         payment_date = (svc.date.fromisoformat(invoice_date) + svc.timedelta(days=terms)).isoformat()
         self.assertEqual(payment_date, "2020-03-12")
 
+    def test_issue_date_evidence_normalizes_all_supported_separators(self):
+        for evidence in (
+            "FECHA FACTURA 16-07-26",
+            "FECHA FACTURA 16/07/26",
+            "FECHA FACTURA 16.07.26",
+        ):
+            with self.subTest(evidence=evidence):
+                details = svc._inspect_issue_date_evidence(evidence)
+                self.assertEqual(details["status"], "unambiguous")
+                self.assertEqual(details["normalized_date"], "2026-07-16")
+
+    def test_issue_date_evidence_corrects_iso_model_date(self):
+        invoice_date, correction, review_reason = svc._resolve_issue_date_from_evidence(
+            "2016-07-26", "FECHA FACTURA 16-07-26"
+        )
+
+        self.assertEqual(invoice_date, "2026-07-16")
+        self.assertEqual(correction["code"], "issue_date_corrected_from_evidence")
+        self.assertEqual(correction["original_model_issue_date"], "2016-07-26")
+        self.assertEqual(correction["normalized_evidence_issue_date"], "2026-07-16")
+        self.assertIsNone(review_reason)
+
+    def test_issue_date_evidence_corrects_reordered_two_digit_model_date(self):
+        invoice_date, correction, review_reason = svc._resolve_issue_date_from_evidence(
+            "26-07-16", "FECHA FACTURA 16-07-26"
+        )
+
+        self.assertEqual(invoice_date, "2026-07-16")
+        self.assertEqual(correction["original_model_issue_date"], "26-07-16")
+        self.assertIsNone(review_reason)
+
+    def test_ambiguous_issue_date_evidence_never_overwrites_model_date(self):
+        invoice_date, correction, review_reason = svc._resolve_issue_date_from_evidence(
+            "2026-07-08", "FECHA FACTURA 07-08-26"
+        )
+
+        self.assertEqual(invoice_date, "2026-07-08")
+        self.assertIsNone(correction)
+        self.assertEqual(review_reason, "issue_date_evidence_ambiguous")
+
+    def test_multiple_issue_date_evidence_values_never_overwrite_model_date(self):
+        invoice_date, correction, review_reason = svc._resolve_issue_date_from_evidence(
+            "2016-07-26", "FECHA FACTURA 16-07-26 / PEDIDO 17-07-26"
+        )
+
+        self.assertEqual(invoice_date, "2016-07-26")
+        self.assertIsNone(correction)
+        self.assertIsNone(review_reason)
+
+    def test_corrected_issue_date_recalculates_document_terms_without_explicit_due_date(self):
+        payment_dates, payment_terms_days = svc._resolve_payment_schedule(
+            "RECIBO 15 DIAS FECHA FACTURA",
+            "2026-07-16",
+            ["2016-08-10"],
+            None,
+            None,
+            issue_date_corrected_from_evidence=True,
+        )
+
+        self.assertEqual(payment_terms_days, 15)
+        self.assertEqual(payment_dates, ["2026-07-31"])
+
+    def test_explicit_due_date_keeps_priority_after_issue_date_correction(self):
+        payment_dates, payment_terms_days = svc._resolve_payment_schedule(
+            "RECIBO 15 DIAS FECHA FACTURA\nFECHA DE VENCIMIENTO 01/08/2026",
+            "2026-07-16",
+            ["2016-08-10"],
+            None,
+            None,
+            issue_date_corrected_from_evidence=True,
+        )
+
+        self.assertIsNone(payment_terms_days)
+        self.assertEqual(payment_dates, ["2026-08-01"])
+
     def test_zero_vat_totals_are_preserved(self):
         extracted = {
             "supplier": "Google Cloud EMEA Limited",
@@ -1709,6 +1784,93 @@ N° intracommunautaire : ESB05410667"""
             result = svc.analyze_invoice(file_bytes=b"%PDF-test", filename="factura.pdf", mime_type="application/pdf")
         self.assertEqual(result["total_amount"], 121.0)
         self.assertNotEqual(result["analysis_status"], "failed")
+
+    def test_job_57_issue_date_evidence_correction_preserves_model_output_and_rebuilds_due_date(self):
+        extraction = self._completed_structured_invoice()
+        extraction["invoice"]["issue_date"] = "2016-07-26"
+        extraction["installments"] = [
+            {
+                "due_date": "2016-08-10",
+                "amount": 121.0,
+                "actual_payment_date": None,
+                "payment_evidence": None,
+            }
+        ]
+        extraction["field_evidence"] = {
+            "issue_date": {
+                "page": 1,
+                "evidence": "FECHA FACTURA 16-07-26",
+                "confidence": 0.99,
+            }
+        }
+        with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": "invoice-test-model"}), patch.object(
+            svc, "_get_client", return_value=object()
+        ), patch.object(
+            svc,
+            "_extract_pdf_text_from_bytes",
+            return_value="RECIBO 15 DIAS FECHA FACTURA\n" + ("Texto nativo " * 20),
+        ), patch.object(svc, "_call_invoice_responses", return_value=extraction):
+            result = svc.analyze_invoice(
+                file_bytes=b"%PDF-test", filename="factura.pdf", mime_type="application/pdf"
+            )
+
+        self.assertEqual(result["invoice_date"], "2026-07-16")
+        self.assertEqual(result["payment_dates"], ["2026-07-31"])
+        self.assertEqual(result["payment_terms_days"], 15)
+        self.assertEqual(result["structured_extraction"]["invoice"]["issue_date"], "2016-07-26")
+        self.assertEqual(
+            result["date_correction"],
+            {
+                "code": "issue_date_corrected_from_evidence",
+                "original_model_issue_date": "2016-07-26",
+                "normalized_evidence_issue_date": "2026-07-16",
+            },
+        )
+
+    def test_correct_issue_date_is_not_changed_or_traced(self):
+        extraction = self._completed_structured_invoice()
+        extraction["invoice"]["issue_date"] = "2026-07-16"
+        extraction["field_evidence"] = {
+            "issue_date": {
+                "page": 1,
+                "evidence": "FECHA FACTURA 16-07-26",
+                "confidence": 0.99,
+            }
+        }
+        with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": "invoice-test-model"}), patch.object(
+            svc, "_get_client", return_value=object()
+        ), patch.object(svc, "_extract_pdf_text_from_bytes", return_value="Texto nativo " * 20), patch.object(
+            svc, "_call_invoice_responses", return_value=extraction
+        ):
+            result = svc.analyze_invoice(
+                file_bytes=b"%PDF-test", filename="factura.pdf", mime_type="application/pdf"
+            )
+
+        self.assertEqual(result["invoice_date"], "2026-07-16")
+        self.assertIsNone(result["date_correction"])
+
+    def test_ambiguous_issue_date_evidence_is_preserved_and_marked_for_review(self):
+        extraction = self._completed_structured_invoice()
+        extraction["invoice"]["issue_date"] = "2026-07-08"
+        extraction["field_evidence"] = {
+            "issue_date": {
+                "page": 1,
+                "evidence": "FECHA FACTURA 07-08-26",
+                "confidence": 0.99,
+            }
+        }
+        with patch.dict(os.environ, {"OPENAI_INVOICE_MODEL": "invoice-test-model"}), patch.object(
+            svc, "_get_client", return_value=object()
+        ), patch.object(svc, "_extract_pdf_text_from_bytes", return_value="Texto nativo " * 20), patch.object(
+            svc, "_call_invoice_responses", return_value=extraction
+        ):
+            result = svc.analyze_invoice(
+                file_bytes=b"%PDF-test", filename="factura.pdf", mime_type="application/pdf"
+            )
+
+        self.assertEqual(result["invoice_date"], "2026-07-08")
+        self.assertIsNone(result["date_correction"])
+        self.assertIn("issue_date_evidence_ambiguous", result["review_reasons"])
 
     def test_secondary_audit_uses_the_same_sdk_timeout_without_thread_wrapper(self):
         initial = self._completed_structured_invoice()

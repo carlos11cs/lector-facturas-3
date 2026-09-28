@@ -334,6 +334,69 @@ def _normalize_date(value: Optional[str]) -> Optional[str]:
     return parsed.isoformat()
 
 
+_ISSUE_DATE_EVIDENCE_PATTERN = re.compile(
+    r"(?<!\d)(\d{1,2})([-/.])(\d{1,2})\2(\d{2})(?!\d)"
+)
+
+
+def _inspect_issue_date_evidence(evidence: Any) -> Dict[str, Optional[str]]:
+    """Classify one field-specific issue-date evidence value without guessing.
+
+    The evidence contract already associates this text with the invoice issue
+    date. A two-digit day at most 12 remains ambiguous between day/month
+    conventions, so callers must never use it to overwrite model output.
+    """
+    text = str(evidence or "").strip()
+    matches = list(_ISSUE_DATE_EVIDENCE_PATTERN.finditer(text))
+    if not matches:
+        return {"status": "missing", "normalized_date": None}
+    if len(matches) != 1:
+        return {"status": "multiple", "normalized_date": None}
+
+    day, _separator, month, year = matches[0].groups()
+    # Reuse Ledged's established two-digit-year policy through _normalize_date.
+    normalized_date = _normalize_date(f"{day}/{month}/{year}")
+    if normalized_date is None:
+        return {"status": "invalid", "normalized_date": None}
+    if int(day) <= 12:
+        return {"status": "ambiguous", "normalized_date": normalized_date}
+    return {"status": "unambiguous", "normalized_date": normalized_date}
+
+
+def _resolve_issue_date_from_evidence(
+    model_issue_date: Any, evidence: Any
+) -> Tuple[Optional[str], Optional[Dict[str, str]], Optional[str]]:
+    """Correct only a contradictory model date with unambiguous date evidence."""
+    normalized_model_date = _normalize_date(model_issue_date)
+    evidence_details = _inspect_issue_date_evidence(evidence)
+    evidence_date = evidence_details.get("normalized_date")
+    evidence_status = evidence_details.get("status")
+
+    if (
+        evidence_status == "unambiguous"
+        and normalized_model_date is not None
+        and evidence_date is not None
+        and normalized_model_date != evidence_date
+    ):
+        return (
+            evidence_date,
+            {
+                "code": "issue_date_corrected_from_evidence",
+                "original_model_issue_date": str(model_issue_date),
+                "normalized_evidence_issue_date": evidence_date,
+            },
+            None,
+        )
+    if (
+        evidence_status == "ambiguous"
+        and normalized_model_date is not None
+        and evidence_date is not None
+        and normalized_model_date != evidence_date
+    ):
+        return normalized_model_date, None, "issue_date_evidence_ambiguous"
+    return normalized_model_date, None, None
+
+
 def _extract_first_date(text: str) -> Optional[str]:
     if not text:
         return None
@@ -548,6 +611,8 @@ def _resolve_payment_schedule(
     raw_payment_dates: Any,
     single_payment_date_raw: Any,
     payment_terms_days_raw: Any,
+    *,
+    issue_date_corrected_from_evidence: bool = False,
 ) -> Tuple[List[str], Optional[int]]:
     payment_terms_days = _pick_first_non_empty(payment_terms_days_raw)
     try:
@@ -576,6 +641,23 @@ def _resolve_payment_schedule(
     explicit_due_dates = _find_due_dates_in_due_context(extracted_text)
     if explicit_due_dates:
         payment_dates = explicit_due_dates
+    elif issue_date_corrected_from_evidence:
+        # This literal term is a deterministic due-date rule. It supersedes a
+        # model-derived installment only after the issue date itself has been
+        # corrected from unambiguous, field-specific evidence.
+        document_terms_days = extract_payment_terms_days(extracted_text)
+        if document_terms_days is not None and invoice_date:
+            try:
+                payment_dates = [
+                    (date.fromisoformat(invoice_date) + timedelta(days=document_terms_days)).isoformat()
+                ]
+                payment_terms_days = document_terms_days
+            except ValueError:
+                payment_dates = []
+        else:
+            text_payment_dates = _find_payment_dates_by_keywords(extracted_text, invoice_date)
+            if text_payment_dates:
+                payment_dates = text_payment_dates
     else:
         text_payment_dates = _find_payment_dates_by_keywords(extracted_text, invoice_date)
         if text_payment_dates:
@@ -4812,8 +4894,12 @@ def analyze_invoice_v1(
         or data.get("customer")
         or data.get("client_name")
     )
-    invoice_date = _normalize_date(
+    model_issue_date = (
         data.get("invoice_date") or data.get("fecha_factura") or data.get("fecha")
+    )
+    issue_date_evidence = evidence_payload.get("issue_date")
+    invoice_date, issue_date_correction, issue_date_review_reason = (
+        _resolve_issue_date_from_evidence(model_issue_date, issue_date_evidence)
     )
     text_invoice_date = _extract_invoice_date_from_text(extracted_text)
     if text_invoice_date and invoice_date is None:
@@ -5002,6 +5088,7 @@ def analyze_invoice_v1(
         raw_payment_dates,
         single_payment_date_raw,
         _pick_first_non_empty(data.get("payment_terms_days"), data.get("payment_terms")),
+        issue_date_corrected_from_evidence=issue_date_correction is not None,
     )
     payment_date = payment_dates[0] if payment_dates else None
 
@@ -5166,6 +5253,8 @@ def analyze_invoice_v1(
         withholding_amount=withholding_amount,
         breakdown_warning=bool(breakdown_warning),
     )
+    if issue_date_review_reason:
+        review_reasons.append(issue_date_review_reason)
     review_reasons = list(dict.fromkeys(validation_issues + review_reasons))
     if review_reasons and analysis_status == "ok":
         analysis_status = "needs_review"
@@ -5201,6 +5290,7 @@ def analyze_invoice_v1(
         "client_name": client_name,
         "client": client_name,
         "invoice_date": invoice_date,
+        "date_correction": issue_date_correction,
         "payment_terms_days": payment_terms_days,
         "payment_dates": payment_dates,
         "payment_date": payment_date,
