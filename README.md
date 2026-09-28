@@ -130,6 +130,13 @@ alcanzar el TTL ya existente.
 La primera variante queda identificada como `v2-sol-text-v1`; la tabla permite
 comparar varias variantes del mismo trabajo mediante `job_id + shadow_version`.
 
+### Descartar un análisis pendiente
+
+`DELETE /api/invoice-analysis-jobs/<job_id>` es un **soft-dismiss**: registra
+`dismissed_at` y retira el análisis de la interfaz al recargar. No elimina el
+job, su estado, las métricas, los resultados V2 ni el documento temporal antes
+de que el worker complete su ciclo normal de limpieza.
+
 ## Docker (produccion)
 
 ```bash

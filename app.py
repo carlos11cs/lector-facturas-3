@@ -437,6 +437,9 @@ invoice_analysis_jobs_table = Table(
     Column("created_at", String, nullable=False),
     Column("started_at", String),
     Column("completed_at", String),
+    # Soft-dismissal hides a transient UI analysis without changing its
+    # processing status or removing its technical history.
+    Column("dismissed_at", String),
     Column("updated_at", String, nullable=False),
     Column("expires_at", String, nullable=False),
 )
@@ -1496,6 +1499,7 @@ def init_db():
     )
     add_column_if_missing("invoice_analysis_jobs", "batch_id", "VARCHAR")
     add_column_if_missing("invoice_analysis_jobs", "batch_position", "INTEGER")
+    add_column_if_missing("invoice_analysis_jobs", "dismissed_at", "VARCHAR")
     add_column_if_missing("invoice_analysis_metrics", "batch_id", "VARCHAR")
     add_column_if_missing("invoice_analysis_metrics", "batch_position", "INTEGER")
     add_column_if_missing("invoice_analysis_metrics", "total_elapsed_ms", "INTEGER")
@@ -1541,6 +1545,11 @@ def init_db():
         "ix_invoice_analysis_jobs_batch",
         "invoice_analysis_jobs",
         "user_id, company_id, batch_id, created_at, id",
+    )
+    create_index_if_missing(
+        "ix_invoice_analysis_jobs_visible",
+        "invoice_analysis_jobs",
+        "user_id, company_id, dismissed_at, expires_at, created_at, id",
     )
 
     add_column_if_missing("invoices", "user_id", "INTEGER")
@@ -10412,13 +10421,18 @@ def analyze_invoice_api():
     )
 
 
-def _get_invoice_analysis_job_for_request(conn, job_id, data_owner_id, company_id):
-    return conn.execute(
+def _get_invoice_analysis_job_for_request(
+    conn, job_id, data_owner_id, company_id, *, include_dismissed=False
+):
+    query = (
         select(invoice_analysis_jobs_table)
         .where(invoice_analysis_jobs_table.c.id == job_id)
         .where(invoice_analysis_jobs_table.c.user_id == data_owner_id)
         .where(invoice_analysis_jobs_table.c.company_id == company_id)
-    ).mappings().first()
+    )
+    if not include_dismissed:
+        query = query.where(invoice_analysis_jobs_table.c.dismissed_at.is_(None))
+    return conn.execute(query).mappings().first()
 
 
 @app.route("/api/invoice-analysis-jobs", methods=["POST"])
@@ -10495,6 +10509,7 @@ def create_invoice_analysis_job():
                     created_at=now_iso,
                     started_at=None,
                     completed_at=None,
+                    dismissed_at=None,
                     updated_at=now_iso,
                     expires_at=expires_at,
                 )
@@ -10556,6 +10571,7 @@ def list_invoice_analysis_jobs():
             .where(invoice_analysis_jobs_table.c.user_id == data_owner_id)
             .where(invoice_analysis_jobs_table.c.company_id == company_id)
             .where(invoice_analysis_jobs_table.c.status.in_(["queued", "processing", "completed", "failed"]))
+            .where(invoice_analysis_jobs_table.c.dismissed_at.is_(None))
             .where(invoice_analysis_jobs_table.c.expires_at > now_iso)
             .order_by(invoice_analysis_jobs_table.c.created_at.asc(), invoice_analysis_jobs_table.c.id.asc())
             .limit(100)
@@ -10586,6 +10602,7 @@ def get_invoice_analysis_batch(batch_id):
         invoice_analysis_jobs_table.c.user_id == data_owner_id,
         invoice_analysis_jobs_table.c.company_id == company_id,
         invoice_analysis_jobs_table.c.batch_id == batch_id,
+        invoice_analysis_jobs_table.c.dismissed_at.is_(None),
         invoice_analysis_jobs_table.c.expires_at > now_iso,
     )
     with engine.connect() as conn:
@@ -10640,54 +10657,42 @@ def get_invoice_analysis_job(job_id):
 
 
 @app.route("/api/invoice-analysis-jobs/<int:job_id>", methods=["DELETE"])
-def cancel_invoice_analysis_job(job_id):
+def dismiss_invoice_analysis_job(job_id):
+    """Soft-dismiss a transient analysis without deleting its technical history.
+
+    The job remains available to its worker and its status, metrics and V2
+    shadow run remain untouched. This endpoint only prevents restoring it in
+    the user's pending-analysis interface.
+    """
     data_owner_id = get_data_owner_id()
     company_id = get_company_id(required=True)
     if company_id is None:
         return jsonify({"ok": False, "errors": ["Empresa no seleccionada."]}), 400
     now_iso = datetime.utcnow().isoformat()
     with engine.begin() as conn:
-        row = _get_invoice_analysis_job_for_request(conn, job_id, data_owner_id, company_id)
+        row = _get_invoice_analysis_job_for_request(
+            conn,
+            job_id,
+            data_owner_id,
+            company_id,
+            include_dismissed=True,
+        )
         if not row:
             return jsonify({"ok": False, "errors": ["Trabajo no encontrado."]}), 404
+        if row.get("dismissed_at"):
+            return jsonify({"ok": True, "dismissed": True, "idempotent": True})
         result = conn.execute(
             invoice_analysis_jobs_table.update()
             .where(invoice_analysis_jobs_table.c.id == job_id)
-            .where(
-                invoice_analysis_jobs_table.c.status.in_(
-                    ["queued", "processing", "completed", "failed"]
-                )
-            )
+            .where(invoice_analysis_jobs_table.c.user_id == data_owner_id)
+            .where(invoice_analysis_jobs_table.c.company_id == company_id)
+            .where(invoice_analysis_jobs_table.c.dismissed_at.is_(None))
             .values(
-                status="cancelled",
-                result_json=None,
-                error_message=None,
-                storage_key=None,
-                completed_at=now_iso,
+                dismissed_at=now_iso,
                 updated_at=now_iso,
-                lease_expires_at=None,
-                lease_token=None,
-                next_attempt_at=None,
-                expires_at=now_iso,
             )
         )
-    if result.rowcount == 1:
-        try:
-            with engine.begin() as conn:
-                _complete_invoice_analysis_metrics(
-                    conn,
-                    job_id=job_id,
-                    status="cancelled",
-                    completed_at=now_iso,
-                )
-        except Exception:
-            app.logger.exception("No se pudo registrar la cancelación de un trabajo de factura.")
-    if row.get("storage_key"):
-        try:
-            delete_private_object(row["storage_key"])
-        except Exception:
-            app.logger.exception("No se pudo borrar un documento temporal cancelado.")
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "dismissed": bool(result.rowcount)})
 
 
 @app.route("/api/invoice-analysis-jobs/consume", methods=["POST"])
@@ -10709,6 +10714,7 @@ def consume_invoice_analysis_jobs():
             .where(invoice_analysis_jobs_table.c.user_id == data_owner_id)
             .where(invoice_analysis_jobs_table.c.company_id == company_id)
             .where(invoice_analysis_jobs_table.c.status == "completed")
+            .where(invoice_analysis_jobs_table.c.dismissed_at.is_(None))
             .values(
                 status="consumed",
                 result_json=None,

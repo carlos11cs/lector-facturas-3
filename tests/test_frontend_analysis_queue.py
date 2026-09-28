@@ -33,6 +33,14 @@ class TestFrontendAnalysisQueue(unittest.TestCase):
         self.assertIn("getAnalysisQueueMessage(", script)
         self.assertIn("retryAtMs - Date.now() + ANALYSIS_PENDING_TIMEOUT_MS", script)
 
+    def test_remove_uses_soft_dismiss_for_persistent_jobs(self):
+        script = (PROJECT_ROOT / "static/js/app.js").read_text(encoding="utf-8")
+
+        self.assertIn("function dismissPersistentAnalysisItem(item)", script)
+        self.assertIn('method: "DELETE"', script)
+        self.assertIn('removeBtn.textContent = "Quitar";', script)
+        self.assertNotIn("function abortPendingAnalysis(item)", script)
+
 
 if __name__ == "__main__":
     unittest.main()

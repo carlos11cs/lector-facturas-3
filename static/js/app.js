@@ -139,7 +139,9 @@ function removeQueuedAnalysisTask(itemId) {
   }
 }
 
-function abortPendingAnalysis(item) {
+function dismissPersistentAnalysisItem(item) {
+  // This only hides the pending UI representation. A persistent worker keeps
+  // ownership of its job and will complete normal source cleanup.
   item._analysisCancelled = true;
   item.analysisPending = false;
   item.analysisQueued = false;
@@ -158,7 +160,13 @@ function abortPendingAnalysis(item) {
   if (item.analysisJobId) {
     fetch(withCompanyParam(`/api/invoice-analysis-jobs/${item.analysisJobId}`), {
       method: "DELETE",
-    }).catch(() => undefined);
+    })
+      .then((response) => {
+        if (!response.ok) {
+          console.warn("No se pudo descartar el análisis persistente.");
+        }
+      })
+      .catch(() => console.warn("No se pudo descartar el análisis persistente."));
   }
 }
 
@@ -4615,11 +4623,9 @@ function appendPayrollPendingRow(item) {
   actionsTd.classList.add("row-actions");
   const removeBtn = document.createElement("button");
   removeBtn.type = "button";
-  removeBtn.textContent = item.analysisPending ? "Cancelar" : "Quitar";
+  removeBtn.textContent = "Quitar";
   removeBtn.addEventListener("click", () => {
-    if (item.analysisPending) {
-      abortPendingAnalysis(item);
-    }
+    dismissPersistentAnalysisItem(item);
     const index = pendingFiles.findIndex((entry) => entry.id === item.id);
     if (index !== -1) {
       pendingFiles.splice(index, 1);
@@ -4919,11 +4925,9 @@ function renderTable() {
     actionsTd.classList.add("row-actions");
     const removeBtn = document.createElement("button");
     removeBtn.type = "button";
-    removeBtn.textContent = item.analysisPending ? "Cancelar" : "Quitar";
+    removeBtn.textContent = "Quitar";
     removeBtn.addEventListener("click", () => {
-      if (item.analysisPending) {
-        abortPendingAnalysis(item);
-      }
+      dismissPersistentAnalysisItem(item);
       const index = pendingFiles.findIndex((entry) => entry.id === item.id);
       if (index !== -1) {
         pendingFiles.splice(index, 1);
@@ -5492,11 +5496,9 @@ function renderIncomeTable() {
     actionsTd.classList.add("row-actions");
     const removeBtn = document.createElement("button");
     removeBtn.type = "button";
-    removeBtn.textContent = item.analysisPending ? "Cancelar" : "Quitar";
+    removeBtn.textContent = "Quitar";
     removeBtn.addEventListener("click", () => {
-      if (item.analysisPending) {
-        abortPendingAnalysis(item);
-      }
+      dismissPersistentAnalysisItem(item);
       const index = pendingIncomeFiles.findIndex((entry) => entry.id === item.id);
       if (index !== -1) {
         pendingIncomeFiles.splice(index, 1);
