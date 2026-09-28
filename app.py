@@ -536,6 +536,8 @@ invoice_analysis_shadow_runs_table = Table(
     Column("due_date_match", Boolean),
     Column("overall_match", Boolean),
     Column("comparison_json", Text),
+    # Compact validation codes for benchmark diagnosis; never document evidence.
+    Column("validation_errors_json", Text),
     Column("error_type", String),
     Column("attempt_count", Integer, nullable=False, server_default=text("0")),
     Column("lease_token", String),
@@ -1518,6 +1520,9 @@ def init_db():
     )
     add_column_if_missing(
         "invoice_analysis_metrics", "rate_limit_metadata_json", "TEXT"
+    )
+    add_column_if_missing(
+        "invoice_analysis_shadow_runs", "validation_errors_json", "TEXT"
     )
     # The queue uses status/expiry/age to claim work, company/status/age to
     # enforce fairness, and the batch index for progressive client polling.
@@ -3080,6 +3085,25 @@ def get_company_names_for_analysis(conn, company_id):
     if not row:
         return []
     return [row.get("display_name"), row.get("legal_name")]
+
+
+def get_company_context_for_invoice_v2(conn, company_id):
+    """Return only the registered identity needed to disambiguate V2 parties."""
+    if not conn or not company_id:
+        return {"company_name": None, "company_tax_id": None}
+    row = conn.execute(
+        select(
+            companies_table.c.display_name,
+            companies_table.c.legal_name,
+            companies_table.c.tax_id,
+        ).where(companies_table.c.id == company_id)
+    ).mappings().first()
+    if not row:
+        return {"company_name": None, "company_tax_id": None}
+    return {
+        "company_name": row.get("legal_name") or row.get("display_name"),
+        "company_tax_id": row.get("tax_id"),
+    }
 
 
 def build_processed_document_payload(
@@ -6193,7 +6217,7 @@ def async_invoice_analysis_is_available():
     return ASYNC_INVOICE_ANALYSIS_ENABLED and has_private_object_storage()
 
 
-INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v1"
+INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v2"
 INVOICE_V2_SHADOW_ROUTE = "v2_fast_text_native"
 
 
@@ -6255,6 +6279,7 @@ def _create_invoice_v2_shadow_run(job, prepared_text):
         "due_date_match": None,
         "overall_match": None,
         "comparison_json": None,
+        "validation_errors_json": None,
         "error_type": None,
         "attempt_count": 0,
         "lease_token": None,
@@ -7465,6 +7490,14 @@ def _finish_invoice_v2_shadow_run(
             separators=(",", ":"),
             sort_keys=True,
         )
+        validation_issues = result.get("validation_issues")
+        if isinstance(validation_issues, list):
+            # Store diagnosis codes only, never evidence or document content.
+            values["validation_errors_json"] = json.dumps(
+                [str(issue)[:128] for issue in validation_issues if str(issue).strip()],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
     if isinstance(comparison, dict):
         values.update(
             {
@@ -7556,11 +7589,13 @@ def _run_claimed_invoice_v2_shadow_run(run):
             return True
         with engine.connect() as conn:
             company_names = get_company_names_for_analysis(conn, run["company_id"])
+            company_context = get_company_context_for_invoice_v2(conn, run["company_id"])
         result, telemetry = analyze_invoice_v2_fast_text(
             file_bytes=file_bytes,
             filename=run.get("source_filename") or "documento.pdf",
             mime_type=run.get("source_mime_type"),
             company_names=company_names,
+            company_context=company_context,
             prepared_text=prepared_text,
             return_telemetry=True,
         )

@@ -5283,6 +5283,43 @@ def _fast_text_evidence_present(structured_data: Dict[str, Any], field: str) -> 
     return bool(isinstance(evidence, dict) and str(evidence.get("evidence") or "").strip())
 
 
+def _normalize_fast_text_company_context(
+    company_context: Optional[Dict[str, Any]],
+) -> Dict[str, Optional[str]]:
+    """Normalize trusted Ledged company data used only to disambiguate parties."""
+    context = company_context if isinstance(company_context, dict) else {}
+    name = re.sub(r"\s+", " ", str(context.get("company_name") or "")).strip()
+    tax_id = _normalize_fast_text_tax_id(context.get("company_tax_id"))
+    return {
+        "company_name": name[:255] or None,
+        "company_tax_id": tax_id,
+    }
+
+
+def _fast_text_invoice_prompt(company_context: Optional[Dict[str, Any]]) -> str:
+    """Build V2 instructions without treating Ledged company data as invoice evidence."""
+    context = _normalize_fast_text_company_context(company_context)
+    company_name = context.get("company_name") or "no disponible"
+    company_tax_id = context.get("company_tax_id") or "no disponible"
+    return (
+        "Extrae exclusivamente los campos contables de esta factura digital usando el texto nativo "
+        "por páginas. Devuelve el schema exacto. El proveedor/emisor es la contraparte que emite "
+        "la factura y cobra; el cliente/receptor/comprador es quien la recibe y registra. "
+        "CONTEXTO DE LEDGED PARA DISTINGUIR ROLES (no es evidencia documental ni obliga a "
+        "inventar campos): la empresa que registra esta factura es "
+        f"{json.dumps(company_name, ensure_ascii=False)}, con identificador fiscal "
+        f"{json.dumps(company_tax_id, ensure_ascii=False)}. Si ese nombre o identificador "
+        "aparece en el documento, normalmente identifica al destinatario/receptor/comprador y "
+        "nunca debe clasificarse como proveedor/emisor. Si aparecen ambos identificadores, usa "
+        "las etiquetas, la posición y el contexto documental para diferenciarlos. Si el documento "
+        "es ambiguo, devuelve null para la parte que no puedas atribuir con seguridad en vez de "
+        "asignar a la empresa registrada como proveedor. No inventes importes, IVA, retenciones, "
+        "fechas o NIF. La retención se devuelve siempre como importe absoluto positivo. Verifica "
+        "internamente: total = base + IVA + otros impuestos - retención. Incluye evidencia literal "
+        "breve y el número de página para proveedor, número, fecha, líneas fiscales y totales."
+    )
+
+
 def _normalize_fast_text_invoice(structured_data: Dict[str, Any]) -> Dict[str, Any]:
     supplier = structured_data.get("supplier") or {}
     customer = structured_data.get("customer") or {}
@@ -5323,6 +5360,8 @@ def _validate_fast_text_invoice(
     structured_data: Dict[str, Any],
     normalized: Dict[str, Any],
     company_names: Optional[List[str]],
+    *,
+    registered_company_tax_id: Optional[str] = None,
 ) -> List[str]:
     """Reject questionable V2 output without correcting or enriching it."""
     issues: List[str] = []
@@ -5342,6 +5381,9 @@ def _validate_fast_text_invoice(
         issues.append("missing_supplier")
     elif _is_same_entity(provider_name, company_names):
         issues.append("supplier_matches_registered_customer")
+    registered_tax_id = _normalize_fast_text_tax_id(registered_company_tax_id)
+    if supplier_tax_id and registered_tax_id and supplier_tax_id == registered_tax_id:
+        issues.append("supplier_tax_id_matches_registered_customer")
     if provider_name and client_name and _normalize_entity_name(provider_name) == _normalize_entity_name(client_name):
         issues.append("supplier_matches_customer")
     if not invoice_number:
@@ -5388,6 +5430,7 @@ def analyze_invoice_v2_fast_text(
     filename: str,
     mime_type: Optional[str] = None,
     company_names: Optional[List[str]] = None,
+    company_context: Optional[Dict[str, Any]] = None,
     prepared_text: Optional[Dict[str, Any]] = None,
     return_telemetry: bool = False,
 ) -> Union[Dict[str, Any], Tuple[Dict[str, Any], Dict[str, Any]]]:
@@ -5417,14 +5460,11 @@ def analyze_invoice_v2_fast_text(
         }
         return _invoice_analysis_telemetry_result(result, telemetry, return_telemetry)
 
-    prompt = (
-        "Extrae exclusivamente los campos contables de esta factura digital usando el texto nativo "
-        "por páginas. Devuelve el schema exacto. El proveedor es el emisor, nunca el cliente, "
-        "destinatario o dirección de entrega. No inventes importes, IVA, retenciones, fechas o NIF. "
-        "La retención se devuelve siempre como importe absoluto positivo. Verifica internamente: "
-        "total = base + IVA + otros impuestos - retención. Incluye evidencia literal breve y el número "
-        "de página para proveedor, número, fecha, líneas fiscales y totales."
-    )
+    normalized_company_context = _normalize_fast_text_company_context(company_context)
+    validation_company_names = list(company_names or [])
+    if normalized_company_context.get("company_name"):
+        validation_company_names.append(normalized_company_context["company_name"])
+    prompt = _fast_text_invoice_prompt(normalized_company_context)
     try:
         _get_invoice_model()
         response_data = _call_invoice_responses(
@@ -5465,7 +5505,10 @@ def analyze_invoice_v2_fast_text(
     validation_started = time.monotonic()
     normalized = _normalize_fast_text_invoice(response_data)
     validation_issues = _validate_fast_text_invoice(
-        response_data, normalized, company_names or []
+        response_data,
+        normalized,
+        validation_company_names,
+        registered_company_tax_id=normalized_company_context.get("company_tax_id"),
     )
     telemetry["validation_ms"] = round((time.monotonic() - validation_started) * 1000)
     result = {
