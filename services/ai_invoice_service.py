@@ -5414,25 +5414,62 @@ def _fast_text_invoice_prompt(company_context: Optional[Dict[str, Any]]) -> str:
     )
 
 
-_FAST_TEXT_INVOICE_NUMBER_LABEL_PATTERN = re.compile(
-    r"(?<![A-Z0-9])(?:"
-    r"(?:N(?:[º°o.]|[ÚU]M(?:ERO)?\.?)\s*(?:DE\s+)?FACTURA)"
-    r"|(?:FACTURA\s*(?:N(?:[º°o.]|[ÚU]M(?:ERO)?\.?)))"
-    r"|(?:N[ÚU]MERO\s+(?:DE\s+)?FACTURA)"
-    r")(?![A-Z0-9])",
-    flags=re.IGNORECASE,
+# One common grammar is used for labels such as "N.º", "N°", "Núm." and
+# "Número", whether they precede or follow the document type.
+_FAST_TEXT_NUMBER_MARKER_PATTERN = (
+    r"(?:N\s*(?:[º°]\.?|[.]\s*[º°o]\.?|[ÚU]M(?:ERO)?\.?))"
 )
-_FAST_TEXT_NON_INVOICE_REFERENCE_LABEL_PATTERN = re.compile(
-    r"(?<![A-Z0-9])(?:"
-    r"(?:N(?:[º°o.]|[ÚU]M(?:ERO)?\.?)\s*)?(?:PEDIDO|ALBAR[ÁA]N)"
-    r"|(?:REFERENCIA(?:\s+(?:DE\s+)?(?:PEDIDO|CLIENTE))?)"
-    r"|(?:ORDER\s+REFERENCE|DELIVERY\s+NOTE|CUSTOMER\s+REFERENCE)"
-    r")(?![A-Z0-9])",
-    flags=re.IGNORECASE,
+_FAST_TEXT_INVOICE_LABEL_TERMS = (r"FACTURA",)
+_FAST_TEXT_NON_INVOICE_REFERENCE_LABEL_TERMS = (
+    r"ORDER\s+REFERENCE",
+    r"DELIVERY\s+NOTE",
+    r"CUSTOMER\s+REFERENCE",
+    r"REFERENCIA\s+(?:DE\s+)?(?:PEDIDO|CLIENTE)",
+    r"REFERENCIA",
+    r"PEDIDO",
+    r"ALBAR[ÁA]N",
+    r"REF\.?",
+)
+
+
+def _build_fast_text_document_label_pattern(
+    terms: Tuple[str, ...],
+    *,
+    allow_bare_label: bool,
+    bare_label_requires_colon: bool,
+) -> re.Pattern:
+    """Build the same label grammar for invoice and non-invoice references."""
+    term_pattern = "(?:" + "|".join(terms) + ")"
+    variants = [
+        rf"{_FAST_TEXT_NUMBER_MARKER_PATTERN}\s*(?:DE\s+)?{term_pattern}",
+        rf"{term_pattern}\s*{_FAST_TEXT_NUMBER_MARKER_PATTERN}",
+    ]
+    if allow_bare_label:
+        bare_suffix = r"\s*:" if bare_label_requires_colon else r"(?=\s|:|$)"
+        variants.append(rf"(?P<bare_label>{term_pattern}{bare_suffix})")
+    return re.compile(
+        r"(?<![A-Z0-9])(?:" + "|".join(variants) + r")(?![A-Z0-9])",
+        flags=re.IGNORECASE,
+    )
+
+
+_FAST_TEXT_INVOICE_NUMBER_LABEL_PATTERN = _build_fast_text_document_label_pattern(
+    _FAST_TEXT_INVOICE_LABEL_TERMS,
+    allow_bare_label=True,
+    bare_label_requires_colon=True,
+)
+_FAST_TEXT_NON_INVOICE_REFERENCE_LABEL_PATTERN = _build_fast_text_document_label_pattern(
+    _FAST_TEXT_NON_INVOICE_REFERENCE_LABEL_TERMS,
+    allow_bare_label=True,
+    bare_label_requires_colon=False,
 )
 _FAST_TEXT_IDENTIFIER_VALUE_PATTERN = re.compile(
     r"^[\s:#\-]*([A-Za-z0-9][A-Za-z0-9._/\-]{0,127})"
 )
+_FAST_TEXT_IDENTIFIER_TOKEN_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])([A-Za-z0-9][A-Za-z0-9._/\-]{0,127})(?![A-Za-z0-9])"
+)
+_FAST_TEXT_LABEL_VALUE_SEPARATOR_PATTERN = re.compile(r"^[\s:#\-]*$")
 _FAST_TEXT_RELATIVE_PAYMENT_TERMS_PATTERN = re.compile(
     r"(?<![0-9/])(?:RECIBO\s+)?([1-9][0-9]{0,2})\s+D[IÍ]AS\s+(?:A\s+)?FECHA\s+FACTURA\b",
     flags=re.IGNORECASE,
@@ -5446,6 +5483,26 @@ def _normalize_fast_text_identifier(value: Any) -> Optional[str]:
     return normalized or None
 
 
+def _extract_fast_text_identifier_value(
+    value: str, *, require_single_identifier: bool = False
+) -> Optional[str]:
+    candidate_match = _FAST_TEXT_IDENTIFIER_VALUE_PATTERN.match(value or "")
+    if candidate_match is None:
+        return None
+    candidate = candidate_match.group(1).strip()
+    if not any(character.isdigit() for character in candidate):
+        return None
+    if require_single_identifier:
+        identifiers = [
+            token
+            for token in _FAST_TEXT_IDENTIFIER_TOKEN_PATTERN.findall(value or "")
+            if any(character.isdigit() for character in token)
+        ]
+        if len(identifiers) != 1 or _normalize_date(candidate) is not None:
+            return None
+    return candidate
+
+
 def _extract_fast_text_labeled_identifiers(text: str, label_pattern: re.Pattern) -> List[str]:
     """Read a nearby identifier only when an explicit document label precedes it."""
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
@@ -5454,12 +5511,21 @@ def _extract_fast_text_labeled_identifiers(text: str, label_pattern: re.Pattern)
         match = label_pattern.search(line)
         if not match:
             continue
-        candidate_match = _FAST_TEXT_IDENTIFIER_VALUE_PATTERN.match(line[match.end() :])
-        if candidate_match is None and not line[match.end() :].strip() and index + 1 < len(lines):
-            candidate_match = _FAST_TEXT_IDENTIFIER_VALUE_PATTERN.match(lines[index + 1])
-        if candidate_match is None:
+        remainder = line[match.end() :]
+        requires_single_identifier = bool(match.groupdict().get("bare_label"))
+        candidate = _extract_fast_text_identifier_value(
+            remainder, require_single_identifier=requires_single_identifier
+        )
+        if (
+            candidate is None
+            and _FAST_TEXT_LABEL_VALUE_SEPARATOR_PATTERN.fullmatch(remainder or "")
+            and index + 1 < len(lines)
+        ):
+            candidate = _extract_fast_text_identifier_value(
+                lines[index + 1], require_single_identifier=requires_single_identifier
+            )
+        if candidate is None:
             continue
-        candidate = candidate_match.group(1).strip()
         if _normalize_fast_text_identifier(candidate):
             values.append(candidate)
 

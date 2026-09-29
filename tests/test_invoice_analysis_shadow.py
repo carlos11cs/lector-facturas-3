@@ -235,6 +235,59 @@ class TestInvoiceV2FastText(unittest.TestCase):
         )
         self.assertEqual(result["validation_status"], "passed")
 
+    def test_v2_document_label_grammar_accepts_common_invoice_number_variants(self):
+        variants = (
+            "Nº FACTURA A141949",
+            "N.º FACTURA A141949",
+            "N° FACTURA A141949",
+            "FACTURA Nº A141949",
+            "FACTURA N.º A141949",
+            "FACTURA: A141949",
+            "NÚMERO FACTURA: A141949",
+            "NÚM. FACTURA A141949",
+            "nº factura\nA141949",
+        )
+        for label in variants:
+            with self.subTest(label=label):
+                evidence = invoice_service._inspect_fast_text_invoice_number_evidence(
+                    f"{label}\nPEDIDO Nº: 17944113"
+                )
+
+                self.assertEqual(evidence["status"], "unambiguous")
+                self.assertEqual(evidence["invoice_number"], "A141949")
+                self.assertEqual(evidence["reference_identifiers"], {"17944113"})
+
+    def test_v2_document_label_grammar_classifies_common_non_invoice_references(self):
+        references = (
+            "PEDIDO 17944113",
+            "Nº PEDIDO 17944113",
+            "PEDIDO Nº: 17944113",
+            "REFERENCIA 17944113",
+            "REF. 17944113",
+            "ALBARÁN 17944113",
+            "Nº ALBARÁN 17944113",
+            "ALBARÁN Nº 17944113",
+        )
+        for label in references:
+            with self.subTest(label=label):
+                evidence = invoice_service._inspect_fast_text_invoice_number_evidence(
+                    f"Nº FACTURA A141949\n{label}"
+                )
+
+                self.assertEqual(evidence["invoice_number"], "A141949")
+                self.assertEqual(evidence["reference_identifiers"], {"17944113"})
+
+    def test_v2_bare_factura_label_requires_one_immediate_identifier(self):
+        title_only = invoice_service._inspect_fast_text_invoice_number_evidence(
+            "FACTURA: ENCABEZADO\nPEDIDO Nº: 17944113"
+        )
+        multiple_identifiers = invoice_service._inspect_fast_text_invoice_number_evidence(
+            "FACTURA: A141949 17944113\nPEDIDO Nº: 17944113"
+        )
+
+        self.assertEqual(title_only["status"], "missing")
+        self.assertEqual(multiple_identifiers["status"], "missing")
+
     def test_v2_does_not_correct_ambiguous_invoice_number_labels(self):
         structured = _fast_text_invoice_payload(
             supplier_name="Proveedor Demo SL",
@@ -313,7 +366,7 @@ class TestInvoiceV2FastText(unittest.TestCase):
             60,
         )
 
-    def test_v2_job_63_regression_matches_v1_after_label_and_terms_reconciliation(self):
+    def test_v2_job_64_regression_matches_v1_after_label_and_terms_reconciliation(self):
         structured = _fast_text_invoice_payload(
             supplier_name="Henry Schein Medical SL",
             supplier_tax_id="B12345678",
@@ -336,7 +389,7 @@ class TestInvoiceV2FastText(unittest.TestCase):
         }
         result = self._analyze_fast_text(
             structured,
-            "Nº FACTURA A141949\nPEDIDO 17944113\nALBARÁN 681188\n"
+            "N.º FACTURA A141949\nPEDIDO Nº: 17944113\nALBARÁN Nº 681188\n"
             "RECIBO 15 DIAS FECHA FACTURA",
         )
         v1_result = {
@@ -684,7 +737,7 @@ class TestInvoiceV2ShadowQueue(unittest.TestCase):
                 .order_by(ledger_app.invoice_analysis_shadow_runs_table.c.shadow_version)
             ).scalars().all()
 
-        self.assertEqual(runs, ["v2-next-text-v1", "v2-sol-text-v3"])
+        self.assertEqual(runs, ["v2-next-text-v1", "v2-sol-text-v4"])
 
     def test_ineligible_shadow_is_recorded_without_retaining_source(self):
         job_id = self._create_completed_job()
