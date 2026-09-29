@@ -547,6 +547,8 @@ invoice_analysis_shadow_runs_table = Table(
     Column("metadata_quality_status", String),
     Column("metadata_issues_json", Text),
     Column("invoice_number_evidence_status", String),
+    # Bounded V6 parser metadata. It never contains document text or context.
+    Column("invoice_parser_diagnostics_json", Text),
     Column("error_type", String),
     Column("attempt_count", Integer, nullable=False, server_default=text("0")),
     Column("lease_token", String),
@@ -1550,6 +1552,9 @@ def init_db():
     )
     add_column_if_missing(
         "invoice_analysis_shadow_runs", "invoice_number_evidence_status", "VARCHAR"
+    )
+    add_column_if_missing(
+        "invoice_analysis_shadow_runs", "invoice_parser_diagnostics_json", "TEXT"
     )
     # The queue uses status/expiry/age to claim work, company/status/age to
     # enforce fairness, and the batch index for progressive client polling.
@@ -6244,7 +6249,7 @@ def async_invoice_analysis_is_available():
     return ASYNC_INVOICE_ANALYSIS_ENABLED and has_private_object_storage()
 
 
-INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v5"
+INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v6"
 INVOICE_V2_SHADOW_ROUTE = "v2_fast_text_native"
 
 
@@ -6313,6 +6318,7 @@ def _create_invoice_v2_shadow_run(job, prepared_text):
         "metadata_quality_status": None,
         "metadata_issues_json": None,
         "invoice_number_evidence_status": None,
+        "invoice_parser_diagnostics_json": None,
         "error_type": None,
         "attempt_count": 0,
         "lease_token": None,
@@ -7276,6 +7282,71 @@ def _safe_invoice_v2_shadow_result(result):
     return safe
 
 
+_INVOICE_PARSER_DIAGNOSTIC_TYPES = {
+    "invoice_number",
+    "order_reference",
+    "delivery_note",
+    "customer_reference",
+    "generic_document_number",
+    "product_reference",
+    "unknown",
+}
+
+
+def _bounded_nonnegative_int(value, maximum):
+    try:
+        return min(max(int(value or 0), 0), maximum)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _safe_invoice_parser_diagnostics(value):
+    """Whitelist compact V6 parser metadata without retaining source context."""
+    if not isinstance(value, dict):
+        return None
+    safe_candidates = []
+    for candidate in value.get("invoice_candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_type = str(candidate.get("type") or "")
+        if candidate_type not in _INVOICE_PARSER_DIAGNOSTIC_TYPES:
+            continue
+        normalized_value = re.sub(r"[^A-Za-z0-9]", "", str(candidate.get("normalized_value") or ""))
+        if not normalized_value:
+            continue
+        safe_candidates.append(
+            {
+                "type": candidate_type,
+                "normalized_value": normalized_value[:128],
+                "label_type": str(candidate.get("label_type") or "")[:64],
+                "strength": str(candidate.get("strength") or "")[:24],
+            }
+        )
+        if len(safe_candidates) == 3:
+            break
+    raw_counts = value.get("secondary_candidate_counts") or {}
+    safe_counts = {
+        candidate_type: _bounded_nonnegative_int(raw_counts.get(candidate_type), 999)
+        for candidate_type in _INVOICE_PARSER_DIAGNOSTIC_TYPES
+        if candidate_type != "invoice_number"
+    }
+    invoice_date = value.get("invoice_date") if isinstance(value.get("invoice_date"), dict) else {}
+    return {
+        "parser_revision": str(value.get("parser_revision") or "")[:24],
+        "invoice_candidates": safe_candidates,
+        "secondary_candidate_counts": safe_counts,
+        "selected_candidate_type": str(value.get("selected_candidate_type") or "")[:64] or None,
+        "reconciliation_action": str(value.get("reconciliation_action") or "")[:128] or None,
+        "ambiguity_reason": str(value.get("ambiguity_reason") or "")[:128] or None,
+        "invoice_date": {
+            "status": str(invoice_date.get("status") or "")[:32] or None,
+            "candidate_count": _bounded_nonnegative_int(invoice_date.get("candidate_count"), 99),
+            "reconciliation_action": str(invoice_date.get("reconciliation_action") or "")[:128]
+            or None,
+        },
+    }
+
+
 def _normalize_shadow_comparison_text(value, *, entity=False):
     if value is None:
         return ""
@@ -7848,6 +7919,16 @@ def _finish_invoice_v2_shadow_run(
             value = result.get(status_field)
             if value:
                 values[status_field] = str(value)[:64]
+        parser_diagnostics = _safe_invoice_parser_diagnostics(
+            result.get("invoice_parser_diagnostics")
+        )
+        if parser_diagnostics is not None:
+            values["invoice_parser_diagnostics_json"] = json.dumps(
+                parser_diagnostics,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
         for issue_field, database_field in (
             ("accounting_safety_issues", "accounting_safety_issues_json"),
             ("metadata_issues", "metadata_issues_json"),

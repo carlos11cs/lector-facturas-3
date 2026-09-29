@@ -396,6 +396,64 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
         self.assertIn(metadata_review, [row["job_id"] for row in report["review_rows"]])
         self.assertIn(accounting_failed, [row["job_id"] for row in report["review_rows"]])
 
+    def test_v6_rates_use_comparable_denominators_and_never_exceed_one_hundred_percent(self):
+        self._add_run(
+            shadow_version="v2-sol-text-v6",
+            validation_status="passed",
+            strict_match=True,
+            accounting_safety_status="passed",
+            accounting_safety_issues=[],
+            metadata_quality_status="confirmed",
+            metadata_issues=[],
+            invoice_number_evidence_status="confirmed",
+        )
+        self._add_run(
+            shadow_version="v2-sol-text-v6",
+            validation_status="failed",
+            strict_match=True,
+            accounting_safety_status="passed",
+            accounting_safety_issues=[],
+            metadata_quality_status="review_required",
+            metadata_issues=["invoice_number_evidence_missing"],
+            invoice_number_evidence_status="missing",
+        )
+        self._add_run(
+            shadow_version="v2-sol-text-v6",
+            validation_status="passed",
+            strict_match=False,
+            accounting_safety_status="passed",
+            accounting_safety_issues=[],
+            metadata_quality_status="confirmed",
+            metadata_issues=[],
+            invoice_number_evidence_status="confirmed",
+        )
+        self._add_run(
+            shadow_version="v2-sol-text-v6",
+            validation_status="failed",
+            strict_match=None,
+            accounting_safety_status="failed",
+            accounting_safety_issues=["invalid_invoice_date"],
+            metadata_quality_status="confirmed",
+            metadata_issues=[],
+            invoice_number_evidence_status="confirmed",
+        )
+
+        report = benchmark.build_benchmark_report(
+            benchmark.load_benchmark_rows(self.engine, shadow_version="v2-sol-text-v6"),
+            {"shadow_version": "v2-sol-text-v6"},
+        )
+        rates = report["rates"]
+
+        self.assertAlmostEqual(rates["strict_match_of_validation_passed"], 50.0)
+        self.assertAlmostEqual(rates["strict_match_of_accounting_safe"], 200 / 3)
+        self.assertAlmostEqual(rates["accounting_safety_passed_of_completed"], 75.0)
+        self.assertAlmostEqual(rates["metadata_confirmed_of_evaluated"], 75.0)
+        self.assertAlmostEqual(rates["fully_confirmed_fast_path_candidate"], 25.0)
+        self.assertEqual(report["volume"]["fallback_accounting"], 1)
+        self.assertEqual(report["volume"]["fallback_metadata"], 1)
+        self.assertEqual(report["volume"]["fallback_unassessed_or_mismatch"], 1)
+        self.assertTrue(all(0 <= value <= 100 for value in rates.values() if value is not None))
+
 
 if __name__ == "__main__":
     unittest.main()

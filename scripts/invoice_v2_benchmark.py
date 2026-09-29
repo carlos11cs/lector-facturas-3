@@ -274,6 +274,21 @@ def build_benchmark_report(rows: Sequence[Mapping[str, Any]], scope: Mapping[str
     ]
     strict_match_rows = [row for row in normalized_rows if row.get("strict_accounting_match") is True]
     strict_mismatch_rows = [row for row in normalized_rows if row.get("strict_accounting_match") is False]
+    comparable_rows = [
+        row
+        for row in normalized_rows
+        if row.get("eligible") is True
+        and row.get("status") == "completed"
+        and row.get("strict_accounting_match") in (True, False)
+    ]
+    validation_passed_comparable_rows = [
+        row for row in comparable_rows if row.get("validation_status") == "passed"
+    ]
+    strict_validation_passed_rows = [
+        row
+        for row in validation_passed_comparable_rows
+        if row.get("strict_accounting_match") is True
+    ]
     pending_rows = [
         row for row in normalized_rows if str(row.get("status") or "") in _PENDING_V2_STATUSES
     ]
@@ -304,6 +319,15 @@ def build_benchmark_report(rows: Sequence[Mapping[str, Any]], scope: Mapping[str
         and row.get("status") == "completed"
         and row.get("accounting_safety_status") == "failed"
     ]
+    accounting_evaluated_rows = accounting_safe_rows + accounting_failed_rows
+    accounting_safe_comparable_rows = [
+        row for row in comparable_rows if row.get("accounting_safety_status") == "passed"
+    ]
+    strict_accounting_safe_rows = [
+        row
+        for row in accounting_safe_comparable_rows
+        if row.get("strict_accounting_match") is True
+    ]
     metadata_confirmed_rows = [
         row
         for row in normalized_rows
@@ -325,6 +349,9 @@ def build_benchmark_report(rows: Sequence[Mapping[str, Any]], scope: Mapping[str
         and row.get("status") == "completed"
         and row.get("metadata_quality_status") == "failed"
     ]
+    metadata_evaluated_rows = (
+        metadata_confirmed_rows + metadata_review_rows + metadata_failed_rows
+    )
     fully_confirmed_rows = [
         row
         for row in normalized_rows
@@ -333,6 +360,30 @@ def build_benchmark_report(rows: Sequence[Mapping[str, Any]], scope: Mapping[str
         and row.get("accounting_safety_status") == "passed"
         and row.get("metadata_quality_status") == "confirmed"
         and row.get("strict_accounting_match") is True
+    ]
+    eligible_completed_rows = [
+        row
+        for row in normalized_rows
+        if row.get("eligible") is True and row.get("status") == "completed"
+    ]
+    fallback_accounting_rows = [
+        row for row in eligible_completed_rows if row.get("accounting_safety_status") == "failed"
+    ]
+    fallback_metadata_rows = [
+        row
+        for row in eligible_completed_rows
+        if row.get("accounting_safety_status") == "passed"
+        and row.get("metadata_quality_status") != "confirmed"
+    ]
+    fallback_unassessed_rows = [
+        row
+        for row in eligible_completed_rows
+        if row.get("accounting_safety_status") not in ("passed", "failed")
+        or (
+            row.get("accounting_safety_status") == "passed"
+            and row.get("metadata_quality_status") == "confirmed"
+            and row.get("strict_accounting_match") is not True
+        )
     ]
 
     def discrepancies_for(rows_to_group: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -448,6 +499,11 @@ def build_benchmark_report(rows: Sequence[Mapping[str, Any]], scope: Mapping[str
             ),
             "fully_confirmed_fast_path_candidate": len(fully_confirmed_rows),
             "accounting_safe_metadata_review": len(metadata_review_rows),
+            "comparable": len(comparable_rows),
+            "fallback_accounting": len(fallback_accounting_rows),
+            "fallback_metadata": len(fallback_metadata_rows),
+            "fallback_unassessed_or_mismatch": len(fallback_unassessed_rows),
+            "fallback_not_eligible": sum(row.get("eligible") is False for row in normalized_rows),
         },
         "rates": {
             "eligibility": _percent(
@@ -458,18 +514,34 @@ def build_benchmark_report(rows: Sequence[Mapping[str, Any]], scope: Mapping[str
             ),
             "strict_match_of_completed": _percent(len(strict_match_rows), len(completed_rows)),
             "strict_match_of_validation_passed": _percent(
-                len(strict_match_rows), len(validation_passed_rows)
+                len(strict_validation_passed_rows), len(validation_passed_comparable_rows)
+            ),
+            "strict_match_of_accounting_safe": _percent(
+                len(strict_accounting_safe_rows), len(accounting_safe_comparable_rows)
             ),
             "safe_fast_path_candidate": _percent(len(safe_fast_path_rows), total),
             "requires_v1_fallback": _percent(total - len(safe_fast_path_rows), total),
             "accounting_safety_passed_of_completed": _percent(
-                len(accounting_safe_rows), len(completed_rows)
+                len(accounting_safe_rows), len(accounting_evaluated_rows)
+            ),
+            "metadata_confirmed_of_evaluated": _percent(
+                len(metadata_confirmed_rows), len(metadata_evaluated_rows)
             ),
             "metadata_confirmed_of_accounting_safe": _percent(
-                len(fully_confirmed_rows), len(accounting_safe_rows)
+                len(
+                    [
+                        row
+                        for row in accounting_safe_rows
+                        if row.get("metadata_quality_status") == "confirmed"
+                    ]
+                ),
+                len(accounting_safe_rows),
             ),
             "fully_confirmed_fast_path_candidate": _percent(
                 len(fully_confirmed_rows), total
+            ),
+            "fully_confirmed_fast_path_candidate_of_eligible_completed": _percent(
+                len(fully_confirmed_rows), len(eligible_completed_rows)
             ),
         },
         "safe_fast_path_candidate_count": len(safe_fast_path_rows),
@@ -649,22 +721,26 @@ def render_benchmark_report(report: Mapping[str, Any]) -> str:
         f"  Validación: passed={volume['validation_passed']} | failed={volume['validation_failed']}",
         f"  Strict accounting: true={volume['strict_match']} | false={volume['strict_mismatch']}",
         "",
-        "ACCOUNTING SAFETY (V5)",
+        "ACCOUNTING SAFETY (V5+)",
         f"  Passed: {volume['accounting_safety_passed']} | Failed: {volume['accounting_safety_failed']} | Sin evaluar: {volume['accounting_safety_unassessed']}",
-        f"  Passed sobre V2 completados: {_format_percent(rates['accounting_safety_passed_of_completed'])}",
+        f"  Passed sobre evaluados: {_format_percent(rates['accounting_safety_passed_of_completed'])}",
         "",
-        "METADATA QUALITY (V5)",
+        "METADATA QUALITY (V5+)",
         f"  Confirmed: {volume['metadata_confirmed']} | Review required: {volume['metadata_review_required']} | Failed: {volume['metadata_failed']} | Sin evaluar: {volume['metadata_unassessed']}",
+        f"  Confirmed sobre evaluados: {_format_percent(rates['metadata_confirmed_of_evaluated'])}",
+        f"  Confirmed entre accounting-safe: {_format_percent(rates['metadata_confirmed_of_accounting_safe'])}",
         f"  Contablemente seguros con metadata review: {volume['accounting_safe_metadata_review']}",
-        f"  Fully confirmed fast path candidate (solo benchmark): {report['fully_confirmed_fast_path_candidate_count']} ({_format_percent(rates['fully_confirmed_fast_path_candidate'])})",
+        f"  Fully confirmed fast path candidate (solo benchmark): {report['fully_confirmed_fast_path_candidate_count']} ({_format_percent(rates['fully_confirmed_fast_path_candidate'])} del total; {_format_percent(rates['fully_confirmed_fast_path_candidate_of_eligible_completed'])} de elegibles completados)",
         "",
         "TASAS",
         f"  Elegibilidad: {_format_percent(rates['eligibility'])}",
         f"  Validación passed sobre V2 completados: {_format_percent(rates['validation_passed_of_completed'])}",
         f"  Strict match sobre V2 completados: {_format_percent(rates['strict_match_of_completed'])}",
-        f"  Strict match sobre validation passed: {_format_percent(rates['strict_match_of_validation_passed'])}",
+        f"  Strict match entre validation passed comparables: {_format_percent(rates['strict_match_of_validation_passed'])}",
+        f"  Strict match entre accounting-safe comparables: {_format_percent(rates['strict_match_of_accounting_safe'])}",
         f"  Safe fast path candidate (solo benchmark): {report['safe_fast_path_candidate_count']} ({_format_percent(rates['safe_fast_path_candidate'])})",
         f"  Requerirían fallback a V1 (conceptual): {_format_percent(rates['requires_v1_fallback'])}",
+        f"  Fallback por accounting: {volume['fallback_accounting']} | por metadata: {volume['fallback_metadata']} | no elegibles: {volume['fallback_not_eligible']} | sin evaluar o strict mismatch: {volume['fallback_unassessed_or_mismatch']}",
         "",
         "LATENCIA (ms)",
         "  Fuente                         n       media       p50       p95",

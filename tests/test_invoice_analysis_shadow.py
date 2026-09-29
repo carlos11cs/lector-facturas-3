@@ -273,7 +273,7 @@ class TestInvoiceV2FastText(unittest.TestCase):
                 self.assertEqual(evidence["status"], "unambiguous")
                 self.assertEqual(evidence["invoice_number"], invoice_number)
                 self.assertEqual(evidence["reference_identifiers"], {"17944113"})
-                self.assertEqual(evidence["invoice_candidates"][0]["type"], "invoice")
+                self.assertEqual(evidence["invoice_candidates"][0]["type"], "invoice_number")
                 self.assertEqual(
                     evidence["invoice_candidates"][0]["normalized_value"],
                     invoice_service._normalize_fast_text_identifier(invoice_number),
@@ -317,7 +317,7 @@ class TestInvoiceV2FastText(unittest.TestCase):
             result["deterministic_corrections"],
         )
 
-    def test_v2_completes_compound_invoice_when_model_returns_only_series_suffix(self):
+    def test_v2_corrects_truncated_compound_invoice_from_strong_label_without_substring_match(self):
         structured = _fast_text_invoice_payload(
             supplier_name="Proveedor Demo SL",
             supplier_tax_id="B12345678",
@@ -329,9 +329,10 @@ class TestInvoiceV2FastText(unittest.TestCase):
 
         self.assertEqual(result["invoice_number"], "2025IR 0625")
         self.assertEqual(result["invoice_number_evidence_status"], "confirmed")
-        self.assertIn(
-            "invoice_number_completed_from_explicit_label",
-            result["deterministic_corrections"],
+        self.assertIn("invoice_number_corrected_from_explicit_label", result["deterministic_corrections"])
+        self.assertEqual(
+            result["invoice_parser_diagnostics"]["reconciliation_action"],
+            "corrected_truncated_invoice_number_from_explicit_label",
         )
 
     def test_v2_metadata_review_does_not_hide_accounting_safe_ambiguity(self):
@@ -576,6 +577,183 @@ class TestInvoiceV2FastText(unittest.TestCase):
         self.assertEqual(result["invoice_number"], "A141949")
         self.assertEqual(result["payment_dates"], ["2026-07-31"])
         self.assertTrue(comparison["strict_accounting_match"])
+
+    def test_v6_supports_spanish_and_english_invoice_label_grammar(self):
+        variants = (
+            "Nº FACTURA A141949",
+            "N.º FACTURA A141949",
+            "N° FACTURA A141949",
+            "NÚM. FACTURA A141949",
+            "Número factura A141949",
+            "FACTURA Nº A141949",
+            "FACTURA: A141949",
+            "Factura A141949",
+            "NºFactura A141949",
+            "INVOICE NUMBER A141949",
+            "INVOICE NO. A141949",
+            "INVOICE # A141949",
+        )
+        for text in variants:
+            with self.subTest(text=text):
+                evidence = invoice_service._inspect_fast_text_invoice_number_evidence(text)
+                self.assertEqual(evidence["status"], "unambiguous")
+                self.assertEqual(evidence["invoice_number"], "A141949")
+
+    def test_v6_preserves_compound_identifier_forms_without_description_text(self):
+        cases = {
+            "Nº FACTURA 2025IR 0625": "2025IR 0625",
+            "Nº FACTURA FV 2025-001 servicio anual": "FV 2025-001",
+            "Nº FACTURA A-2025/0625": "A-2025/0625",
+            "Nº FACTURA 26/E/0341": "26/E/0341",
+            "Nº FACTURA INP-26FIG1-005889": "INP-26FIG1-005889",
+            "Nº FACTURA FNV-ES2-26-003019": "FNV-ES2-26-003019",
+            "Nº FACTURA SF-005143": "SF-005143",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                evidence = invoice_service._inspect_fast_text_invoice_number_evidence(text)
+                self.assertEqual(evidence["invoice_number"], expected)
+
+    def test_v6_types_customer_and_product_identifiers_as_secondary(self):
+        candidates = invoice_service._extract_fast_text_typed_identifiers(
+            "Nº FACTURA A141949\nCUSTOMER NUMBER C-77\nPRODUCTO 999-ABC"
+        )
+        candidate_types = {candidate["type"] for candidate in candidates}
+
+        self.assertIn("invoice_number", candidate_types)
+        self.assertIn("customer_reference", candidate_types)
+        self.assertIn("product_reference", candidate_types)
+
+    def test_v6_generic_document_number_requires_invoice_context_and_exact_v2_value(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Proveedor Demo SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        structured["invoice"]["invoice_number"] = "649833495"
+        result = self._analyze_fast_text(
+            structured,
+            "FACTURA\nNº DOCUMENTO 649833495\nPEDIDO 12345\nALBARÁN 67890",
+        )
+
+        self.assertEqual(result["invoice_number"], "649833495")
+        self.assertEqual(result["invoice_number_evidence_status"], "confirmed")
+        self.assertEqual(result["metadata_quality_status"], "confirmed")
+        self.assertEqual(
+            result["invoice_parser_diagnostics"]["selected_candidate_type"],
+            "generic_document_number",
+        )
+
+    def test_v6_generic_document_number_without_invoice_context_stays_in_review(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Proveedor Demo SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        structured["invoice"]["invoice_number"] = "649833495"
+        result = self._analyze_fast_text(structured, "Nº DOCUMENTO 649833495\nPEDIDO 12345")
+
+        self.assertEqual(result["invoice_number_evidence_status"], "missing")
+        self.assertEqual(result["metadata_quality_status"], "review_required")
+
+    def test_v6_does_not_fill_generic_document_number_when_v2_returns_null(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Proveedor Demo SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        structured["invoice"]["invoice_number"] = None
+        result = self._analyze_fast_text(structured, "FACTURA\nNúmero del doc. 310875910")
+
+        self.assertIsNone(result["invoice_number"])
+        self.assertEqual(result["invoice_number_evidence_status"], "missing")
+        self.assertIn("invoice_number_evidence_missing", result["validation_issues"])
+        self.assertEqual(result["metadata_quality_status"], "review_required")
+
+    def test_v6_reconciles_only_one_explicit_invoice_date_and_derives_due_date(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Proveedor Demo SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        structured["invoice"]["issue_date"] = None
+        structured["due_dates"] = []
+        structured["field_evidence"].pop("issue_date")
+        result = self._analyze_fast_text(
+            structured,
+            "FACTURA\nFECHA FACTURA 23.03.2026\nRECIBO 30 DIAS FECHA FACTURA\n"
+            "FECHA DE VENCIMIENTO 22.04.2026",
+        )
+
+        self.assertEqual(result["invoice_date"], "2026-03-23")
+        self.assertEqual(result["payment_dates"], ["2026-04-22"])
+        self.assertIn("invoice_date_corrected_from_explicit_label", result["deterministic_corrections"])
+        self.assertNotIn("missing_evidence_issue_date", result["validation_issues"])
+        self.assertEqual(result["invoice_parser_diagnostics"]["invoice_date"]["status"], "unambiguous")
+
+    def test_v6_accepts_supported_invoice_date_separators_only_in_invoice_context(self):
+        for source, expected in (
+            ("FECHA FACTURA 23.03.2026", "2026-03-23"),
+            ("FECHA DE FACTURA 23/03/2026", "2026-03-23"),
+            ("INVOICE DATE 23-03-2026", "2026-03-23"),
+            ("FACTURA\nde fecha 23.03.2026", "2026-03-23"),
+        ):
+            with self.subTest(source=source):
+                evidence = invoice_service._inspect_fast_text_invoice_date_evidence(source)
+                self.assertEqual(evidence["status"], "unambiguous")
+                self.assertEqual(evidence["invoice_date"], expected)
+
+    def test_v6_rejects_due_delivery_and_order_dates_as_invoice_date_evidence(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Proveedor Demo SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        structured["invoice"]["issue_date"] = None
+        result = self._analyze_fast_text(
+            structured,
+            "FACTURA\nFECHA DE VENCIMIENTO 23.03.2026\nENTREGA 24/03/2026\nPEDIDO 25-03-2026",
+        )
+
+        self.assertIsNone(result["invoice_date"])
+        self.assertEqual(result["invoice_parser_diagnostics"]["invoice_date"]["status"], "missing")
+        self.assertEqual(result["accounting_safety_status"], "failed")
+
+    def test_v6_multiple_invoice_dates_require_review(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Proveedor Demo SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        result = self._analyze_fast_text(
+            structured,
+            "FACTURA\nFECHA FACTURA 23/03/2026\nINVOICE DATE 24-03-2026",
+        )
+
+        self.assertIn("invoice_date_evidence_ambiguous", result["validation_issues"])
+        self.assertEqual(result["metadata_quality_status"], "review_required")
+
+    def test_v6_parser_diagnostics_are_bounded_and_do_not_contain_source_context(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Proveedor Demo SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        source = "Nº FACTURA A141949\nPEDIDO 17944113\nALBARÁN 681188\nPRODUCTO 999"
+        result = self._analyze_fast_text(structured, source)
+
+        diagnostics = result["invoice_parser_diagnostics"]
+        self.assertEqual(diagnostics["parser_revision"], "v6")
+        self.assertLessEqual(len(diagnostics["invoice_candidates"]), 3)
+        self.assertEqual(diagnostics["secondary_candidate_counts"]["order_reference"], 1)
+        self.assertNotIn(source, json.dumps(diagnostics))
 
     def test_v2_context_keeps_known_recipient_separate_from_person_supplier(self):
         structured = _fast_text_invoice_payload(
@@ -901,7 +1079,7 @@ class TestInvoiceV2ShadowQueue(unittest.TestCase):
                 .order_by(ledger_app.invoice_analysis_shadow_runs_table.c.shadow_version)
             ).scalars().all()
 
-        self.assertEqual(runs, ["v2-next-text-v1", "v2-sol-text-v5"])
+        self.assertEqual(runs, ["v2-next-text-v1", "v2-sol-text-v6"])
 
     def test_ineligible_shadow_is_recorded_without_retaining_source(self):
         job_id = self._create_completed_job()
@@ -975,6 +1153,27 @@ class TestInvoiceV2ShadowQueue(unittest.TestCase):
                     "supplier_tax_id_matches_registered_customer",
                 ],
                 "invoice_number_evidence_status": "confirmed",
+                "invoice_parser_diagnostics": {
+                    "parser_revision": "v6",
+                    "invoice_candidates": [
+                        {
+                            "type": "invoice_number",
+                            "normalized_value": "A141949",
+                            "label_type": "invoice_number_prefix",
+                            "strength": "strong",
+                            "untrusted_context": "must not persist",
+                        }
+                    ],
+                    "secondary_candidate_counts": {"order_reference": 1},
+                    "selected_candidate_type": "invoice_number",
+                    "reconciliation_action": "confirmed_exact_invoice_number",
+                    "ambiguity_reason": None,
+                    "invoice_date": {
+                        "status": "unambiguous",
+                        "candidate_count": 1,
+                        "reconciliation_action": "confirmed_exact_invoice_date",
+                    },
+                },
                 "validation_issues": [
                     "supplier_matches_registered_customer",
                     "supplier_tax_id_matches_registered_customer",
@@ -1004,6 +1203,10 @@ class TestInvoiceV2ShadowQueue(unittest.TestCase):
         self.assertEqual(run["accounting_safety_status"], "passed")
         self.assertEqual(run["metadata_quality_status"], "failed")
         self.assertEqual(run["invoice_number_evidence_status"], "confirmed")
+        diagnostics = json.loads(run["invoice_parser_diagnostics_json"])
+        self.assertEqual(diagnostics["parser_revision"], "v6")
+        self.assertEqual(diagnostics["invoice_candidates"][0]["normalized_value"], "A141949")
+        self.assertNotIn("untrusted_context", diagnostics["invoice_candidates"][0])
         self.assertEqual(json.loads(run["accounting_safety_issues_json"]), [])
         self.assertEqual(
             json.loads(run["metadata_issues_json"]),
@@ -1297,6 +1500,7 @@ class TestInvoiceV2ShadowQueue(unittest.TestCase):
         self.assertIn("accounting_safety_status", ledger_app.invoice_analysis_shadow_runs_table.c)
         self.assertIn("metadata_quality_status", ledger_app.invoice_analysis_shadow_runs_table.c)
         self.assertIn("invoice_number_evidence_status", ledger_app.invoice_analysis_shadow_runs_table.c)
+        self.assertIn("invoice_parser_diagnostics_json", ledger_app.invoice_analysis_shadow_runs_table.c)
 
 
 if __name__ == "__main__":

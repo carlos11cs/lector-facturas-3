@@ -6,6 +6,7 @@ import math
 import os
 import re
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -5414,104 +5415,133 @@ def _fast_text_invoice_prompt(company_context: Optional[Dict[str, Any]]) -> str:
     )
 
 
-# One common grammar is used for labels such as "N.º", "N°", "Núm." and
-# "Número", whether they precede or follow the document type.  The parser
-# below keeps document types separate: an order must never become an invoice
-# candidate merely because it is close to an invoice label in the source text.
-_FAST_TEXT_NUMBER_MARKER_PATTERN = (
-    r"(?:N\s*(?:[º°]\.?|[.]\s*[º°o]\.?|[ÚU]M(?:ERO)?\.?))"
+# V6 parses document identifiers through one typed grammar.  Labels and source
+# text are normalized only in memory; neither the compact document text nor its
+# surrounding fragments are persisted by the shadow benchmark.
+_FAST_TEXT_IDENTIFIER_TYPES = {
+    "invoice_number",
+    "order_reference",
+    "delivery_note",
+    "customer_reference",
+    "generic_document_number",
+    "product_reference",
+    "unknown",
+}
+_FAST_TEXT_SECONDARY_IDENTIFIER_TYPES = {
+    "order_reference",
+    "delivery_note",
+    "customer_reference",
+    "product_reference",
+    "unknown",
+}
+_FAST_TEXT_NUMBER_MARKER_NORMALIZATION_PATTERN = re.compile(
+    r"(?<!INVOICE )(?<!ORDER )(?<!DOCUMENT )(?<!CUSTOMER )"
+    r"\bN\s*(?:[º°]\.?|O\.?|\.\s*(?:[º°O])|U(?:M(?:ERO)?)\.?)"
+    r"(?=\s|:|#|$|(?:FACTURA|PEDIDO|ALBARAN|DOCUMENTO|DOC)\b)",
+    flags=re.IGNORECASE,
 )
-_FAST_TEXT_IDENTIFIER_LABEL_DEFINITIONS = (
-    (
-        "invoice",
-        (r"FACTURA",),
-        True,
-        False,
-    ),
-    (
-        "order",
-        (r"PEDIDO", r"ORDER(?:\s+(?:NUMBER|NO\.?))?"),
-        True,
-        False,
-    ),
-    (
-        "reference",
-        (
-            r"ORDER\s+REFERENCE",
-            r"CUSTOMER\s+REFERENCE",
-            r"DOCUMENT\s+REFERENCE",
-            r"REFERENCIA\s+(?:DE\s+)?(?:PEDIDO|CLIENTE)",
-            r"REFERENCIA",
-            r"REF\.?",
-        ),
-        True,
-        False,
-    ),
-    (
-        "delivery_note",
-        (r"DELIVERY\s+NOTE", r"ALBAR[ÁA]N"),
-        True,
-        False,
-    ),
+_FAST_TEXT_IDENTIFIER_LABEL_GRAMMAR = (
+    # Invoice labels.  The contextual FACTURA form is deliberately weaker: it
+    # must have exactly one immediate structured identifier before it can help.
+    ("invoice_number", "invoice_number_prefix", "strong", r"NUMERO\s+(?:DE\s+)?FACTURA"),
+    ("invoice_number", "invoice_number_suffix", "strong", r"FACTURA\s+NUMERO"),
+    ("invoice_number", "invoice_number_english", "strong", r"INVOICE\s+(?:NUMBER|NO\.?|#)"),
+    ("invoice_number", "invoice_context", "contextual", r"FACTURA(?=\s|:|$)"),
+    # Secondary document identifiers must remain typed so they cannot compete
+    # with an explicit invoice label during reconciliation.
+    ("order_reference", "order_prefix", "strong", r"NUMERO\s+(?:DE\s+)?PEDIDO"),
+    ("order_reference", "order_suffix", "strong", r"PEDIDO\s+NUMERO"),
+    ("order_reference", "order_english", "strong", r"ORDER\s+(?:NUMBER|NO\.?)"),
+    ("order_reference", "order_context", "contextual", r"PEDIDO(?=\s|:|$)"),
+    ("delivery_note", "delivery_prefix", "strong", r"NUMERO\s+(?:DE\s+)?ALBARAN"),
+    ("delivery_note", "delivery_suffix", "strong", r"ALBARAN\s+NUMERO"),
+    ("delivery_note", "delivery_english", "strong", r"DELIVERY\s+NOTE(?:\s+(?:NUMBER|NO\.?))?"),
+    ("delivery_note", "delivery_context", "contextual", r"ALBARAN(?=\s|:|$)"),
+    ("customer_reference", "customer_reference", "strong", r"CUSTOMER\s+REFERENCE"),
+    ("customer_reference", "customer_number_prefix", "strong", r"CUSTOMER\s+(?:NUMBER|NO\.?)"),
+    ("customer_reference", "customer_number_suffix", "strong", r"NUMERO\s+(?:DE\s+)?CLIENTE"),
+    ("customer_reference", "reference_order", "strong", r"ORDER\s+REFERENCE"),
+    ("customer_reference", "document_reference", "strong", r"DOCUMENT\s+REFERENCE"),
+    ("customer_reference", "reference_spanish", "strong", r"REFERENCIA\s+(?:DE\s+)?(?:PEDIDO|CLIENTE)"),
+    ("customer_reference", "reference_context", "contextual", r"(?:REFERENCIA|REF\.?)\s*(?=\s|:|$)"),
+    ("product_reference", "product_reference", "strong", r"(?:PRODUCT|PRODUCTO|ARTICULO)\s+(?:REFERENCE|REFERENCIA|NUMBER|NUMERO)"),
+    ("product_reference", "product_context", "contextual", r"(?:PRODUCTO|ARTICULO)(?=\s|:|$)"),
+    # Generic document labels are intentionally not invoice labels.  They are
+    # promoted only by the guarded rule in _inspect_fast_text_invoice_number_evidence.
+    ("generic_document_number", "generic_document_prefix", "strong", r"NUMERO\s+(?:DEL\s+)?(?:DOCUMENTO|DOC\.?)"),
+    ("generic_document_number", "generic_document_english", "strong", r"DOCUMENT\s+(?:NUMBER|NO\.?)"),
 )
-_FAST_TEXT_NON_INVOICE_TYPES = {"order", "reference", "delivery_note"}
 _FAST_TEXT_IDENTIFIER_COMPONENT_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9])([A-Za-z0-9]+(?:[._/\-][A-Za-z0-9]+)*)(?![A-Za-z0-9])"
+    r"(?<![A-Z0-9])([A-Z0-9]+(?:[._/\-][A-Z0-9]+)*)(?![A-Z0-9])"
 )
 _FAST_TEXT_LABEL_VALUE_SEPARATOR_PATTERN = re.compile(r"^[\s:#\-]*$")
 _FAST_TEXT_RELATIVE_PAYMENT_TERMS_PATTERN = re.compile(
     r"(?<![0-9/])(?:RECIBO\s+)?([1-9][0-9]{0,2})\s+D[IÍ]AS\s+(?:A\s+)?FECHA\s+FACTURA\b",
     flags=re.IGNORECASE,
 )
+_FAST_TEXT_INVOICE_DATE_PATTERN = re.compile(
+    r"(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{4})(?!\d)"
+)
+_FAST_TEXT_DATE_EXCLUSION_PATTERN = re.compile(
+    r"\b(?:VENCIMIENTO|PAGO|ENTREGA|PEDIDO|ALBARAN|EXPEDICION|ENVIO|DUE|PAYMENT|DELIVERY|ORDER|SHIP(?:PING)?)\b"
+)
+_FAST_TEXT_INVOICE_DATE_STRONG_PATTERN = re.compile(
+    r"\b(?:FECHA\s+(?:DE\s+)?FACTURA|FACTURA\b.*\bFECHA|INVOICE\s+DATE)\b"
+)
+_FAST_TEXT_INVOICE_DATE_CONTEXTUAL_PATTERN = re.compile(r"\bDE\s+FECHA\b")
 
 
 def _normalize_fast_text_identifier(value: Any) -> Optional[str]:
     if value is None:
         return None
-    normalized = re.sub(r"[^A-Za-z0-9]", "", str(value)).upper()
+    normalized = unicodedata.normalize("NFKD", str(value))
+    normalized = "".join(character for character in normalized if not unicodedata.combining(character))
+    normalized = re.sub(r"[^A-Za-z0-9]", "", normalized).upper()
     return normalized or None
 
 
-def _build_fast_text_document_label_pattern(
-    terms: Tuple[str, ...], *, allow_bare_label: bool, bare_label_requires_colon: bool
-) -> re.Pattern:
-    """Build one label grammar for invoice, order, reference and delivery note."""
-    term_pattern = "(?:" + "|".join(terms) + ")"
-    variants = [
-        rf"{_FAST_TEXT_NUMBER_MARKER_PATTERN}\s*(?:DE\s+)?{term_pattern}",
-        rf"{term_pattern}\s*{_FAST_TEXT_NUMBER_MARKER_PATTERN}",
+def _normalize_fast_text_parser_line(value: Any) -> str:
+    """Normalize typography and label markers without retaining source text."""
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    normalized = "".join(character for character in normalized if not unicodedata.combining(character))
+    normalized = normalized.replace("\u00a0", " ")
+    normalized = re.sub(r"[‐‑‒–—―]", "-", normalized)
+    normalized = _FAST_TEXT_NUMBER_MARKER_NORMALIZATION_PATTERN.sub("NUMERO ", normalized)
+    return re.sub(r"[ \t]+", " ", normalized).strip().upper()
+
+
+def _fast_text_parser_lines(text: str) -> List[Tuple[int, str]]:
+    return [
+        (index, normalized)
+        for index, raw_line in enumerate((text or "").splitlines())
+        if (normalized := _normalize_fast_text_parser_line(raw_line))
     ]
-    if allow_bare_label:
-        bare_suffix = r"\s*:" if bare_label_requires_colon else r"(?=\s|:|$)"
-        variants.append(rf"(?P<bare_label>{term_pattern}{bare_suffix})")
-    return re.compile(
-        r"(?<![A-Z0-9])(?:" + "|".join(variants) + r")(?![A-Z0-9])",
-        flags=re.IGNORECASE,
-    )
 
 
-_FAST_TEXT_IDENTIFIER_LABEL_PATTERNS = {
-    candidate_type: _build_fast_text_document_label_pattern(
-        terms,
-        allow_bare_label=allow_bare_label,
-        bare_label_requires_colon=bare_label_requires_colon,
+def _fast_text_identifier_components(value: str) -> List[re.Match]:
+    return list(_FAST_TEXT_IDENTIFIER_COMPONENT_PATTERN.finditer(value or ""))
+
+
+def _should_join_fast_text_identifier_components(first: str, second: str) -> bool:
+    """Allow only bounded series/year splits, never two unrelated document IDs."""
+    if not any(character.isdigit() for character in second):
+        return False
+    if first.isalpha():
+        return len(first) <= 4
+    return bool(
+        re.fullmatch(r"(?:\d{2,4}[A-Z]{1,6}|[A-Z]{1,6}\d{2,4})", first)
+        and second.isdigit()
     )
-    for candidate_type, terms, allow_bare_label, bare_label_requires_colon
-    in _FAST_TEXT_IDENTIFIER_LABEL_DEFINITIONS
-}
-# Kept as aliases for the existing diagnostic helpers and their callers.
-_FAST_TEXT_INVOICE_NUMBER_LABEL_PATTERN = _FAST_TEXT_IDENTIFIER_LABEL_PATTERNS["invoice"]
-# This sentinel is only accepted by _extract_fast_text_labeled_identifiers;
-# combining the three compiled grammars would redefine their named groups.
-_FAST_TEXT_NON_INVOICE_REFERENCE_LABEL_PATTERN = re.compile(r"(?!)")
 
 
 def _extract_fast_text_identifier_value(
     value: str, *, require_single_identifier: bool = False
 ) -> Optional[str]:
     """Extract one compact or compound identifier without consuming description text."""
-    matches = list(_FAST_TEXT_IDENTIFIER_COMPONENT_PATTERN.finditer(value or ""))
-    if not matches or matches[0].start() != 0 and not (value or "")[: matches[0].start()].strip(" :#-") == "":
+    matches = _fast_text_identifier_components(value)
+    if not matches or (
+        matches[0].start() != 0 and not (value or "")[: matches[0].start()].strip(" :#-") == ""
+    ):
         return None
     components = [match.group(1) for match in matches]
     if not components:
@@ -5519,29 +5549,16 @@ def _extract_fast_text_identifier_value(
     first = components[0]
     candidate_parts = [first]
     next_index = 1
-    first_has_digit = any(character.isdigit() for character in first)
-    first_has_alpha = any(character.isalpha() for character in first)
-    if not first_has_digit:
-        # A short series prefix is only part of the identifier when followed
-        # immediately by a material numeric component, e.g. "FV 2025-001".
-        if len(first) > 4 or len(components) < 2 or not any(
-            character.isdigit() for character in components[1]
-        ):
-            return None
-        candidate_parts.append(components[1])
-        next_index = 2
-    elif (
-        first_has_alpha
-        and len(components) > 1
-        and components[1].isdigit()
-        and re.fullmatch(r"(?:\d{4}[A-Za-z]{1,4}|[A-Za-z]{1,4}\d{2,4})", first)
+    if len(components) > 1 and _should_join_fast_text_identifier_components(
+        first, components[1]
     ):
-        # Preserve a constrained series/year split such as "2025IR 0625",
-        # but never join independent values such as "A141949 17944113".
         candidate_parts.append(components[1])
         next_index = 2
     candidate = " ".join(candidate_parts)
-    if not any(character.isdigit() for character in candidate) or _normalize_date(candidate) is not None:
+    if (
+        not any(character.isdigit() for character in candidate)
+        or _normalize_fast_text_date(candidate) is not None
+    ):
         return None
     if require_single_identifier:
         remaining = components[next_index:]
@@ -5550,34 +5567,32 @@ def _extract_fast_text_identifier_value(
     return candidate
 
 
-def _extract_fast_text_typed_identifiers(text: str) -> List[Dict[str, str]]:
-    """Extract typed labelled candidates without retaining document text downstream."""
-    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
-    candidates: List[Dict[str, str]] = []
+def _extract_fast_text_typed_identifiers(text: str) -> List[Dict[str, Any]]:
+    """Extract typed candidates using the common V6 document-label grammar."""
+    lines = _fast_text_parser_lines(text)
+    candidates: List[Dict[str, Any]] = []
     seen = set()
-    for candidate_type, _terms, _allow_bare, _bare_requires_colon in _FAST_TEXT_IDENTIFIER_LABEL_DEFINITIONS:
-        label_pattern = _FAST_TEXT_IDENTIFIER_LABEL_PATTERNS[candidate_type]
-        for index, line in enumerate(lines):
+    for candidate_type, label_type, strength, expression in _FAST_TEXT_IDENTIFIER_LABEL_GRAMMAR:
+        label_pattern = re.compile(
+            r"(?<![A-Z0-9])(?:" + expression + r")(?![A-Z0-9])"
+        )
+        for line_position, (_, line) in enumerate(lines):
             for match in label_pattern.finditer(line):
                 remainder = line[match.end() :]
-                is_bare_label = bool(match.groupdict().get("bare_label"))
                 candidate = _extract_fast_text_identifier_value(
-                    remainder, require_single_identifier=is_bare_label
+                    remainder, require_single_identifier=strength == "contextual"
                 )
                 if (
                     candidate is None
                     and _FAST_TEXT_LABEL_VALUE_SEPARATOR_PATTERN.fullmatch(remainder or "")
-                    and index + 1 < len(lines)
+                    and line_position + 1 < len(lines)
                 ):
                     candidate = _extract_fast_text_identifier_value(
-                        lines[index + 1], require_single_identifier=is_bare_label
+                        lines[line_position + 1][1], require_single_identifier=strength == "contextual"
                     )
                 normalized = _normalize_fast_text_identifier(candidate)
                 if not candidate or not normalized:
                     continue
-                # Markers are strong; a bare "FACTURA:" is intentionally
-                # contextual and was already constrained to one immediate ID.
-                strength = "contextual" if is_bare_label else "strong"
                 key = (candidate_type, normalized)
                 if key in seen:
                     continue
@@ -5587,32 +5602,75 @@ def _extract_fast_text_typed_identifiers(text: str) -> List[Dict[str, str]]:
                         "visible_value": candidate,
                         "normalized_value": normalized,
                         "type": candidate_type,
-                        "label": re.sub(r"\s+", " ", match.group(0)).strip()[:96],
+                        "candidate_type": candidate_type,
+                        "label_type": label_type,
                         "evidence_strength": strength,
+                        "position": line_position,
                     }
                 )
     return candidates
 
 
-def _extract_fast_text_labeled_identifiers(text: str, label_pattern: re.Pattern) -> List[str]:
-    """Compatibility wrapper for callers that require values only."""
-    if label_pattern is _FAST_TEXT_INVOICE_NUMBER_LABEL_PATTERN:
-        candidate_types = {"invoice"}
-    else:
-        candidate_types = _FAST_TEXT_NON_INVOICE_TYPES
+def _fast_text_document_has_invoice_context(text: str) -> bool:
+    """Require a document-level invoice anchor before promoting a generic number."""
+    for position, (_, line) in enumerate(_fast_text_parser_lines(text)):
+        if position > 12:
+            break
+        if re.search(r"\b(?:FACTURA|INVOICE)\b", line) and not re.search(
+            r"\b(?:PROFORMA|PEDIDO|ALBARAN|DELIVERY|ORDER)\b", line
+        ):
+            return True
+    return False
+
+
+def _limited_invoice_parser_candidates(
+    candidates: List[Dict[str, Any]], candidate_types: set[str], limit: int = 3
+) -> List[Dict[str, str]]:
+    """Expose only bounded structured identifiers, never surrounding document text."""
     return [
-        candidate["visible_value"]
-        for candidate in _extract_fast_text_typed_identifiers(text)
+        {
+            "type": candidate["type"],
+            "normalized_value": str(candidate["normalized_value"])[:128],
+            "label_type": str(candidate["label_type"])[:64],
+            "strength": str(candidate["evidence_strength"])[:24],
+        }
+        for candidate in candidates
         if candidate["type"] in candidate_types
-    ]
+    ][:limit]
+
+
+def _build_fast_text_invoice_parser_diagnostics(
+    evidence: Dict[str, Any], *, selected_candidate_type: Optional[str], action: str, ambiguity_reason: Optional[str]
+) -> Dict[str, Any]:
+    candidates = evidence.get("candidates") or []
+    secondary_counts = {
+        candidate_type: sum(1 for candidate in candidates if candidate["type"] == candidate_type)
+        for candidate_type in sorted(_FAST_TEXT_SECONDARY_IDENTIFIER_TYPES)
+    }
+    secondary_counts["generic_document_number"] = sum(
+        1 for candidate in candidates if candidate["type"] == "generic_document_number"
+    )
+    return {
+        "parser_revision": "v6",
+        "invoice_candidates": _limited_invoice_parser_candidates(
+            candidates, {"invoice_number", "generic_document_number"}
+        ),
+        "secondary_candidate_counts": secondary_counts,
+        "selected_candidate_type": selected_candidate_type,
+        "reconciliation_action": action,
+        "ambiguity_reason": ambiguity_reason,
+    }
 
 
 def _inspect_fast_text_invoice_number_evidence(text: str) -> Dict[str, Any]:
-    """Classify invoice evidence while retaining typed secondary identifiers."""
+    """Classify invoice evidence without allowing secondary IDs to outrank it."""
     candidates = _extract_fast_text_typed_identifiers(text)
-    invoice_candidates = [candidate for candidate in candidates if candidate["type"] == "invoice"]
+    invoice_candidates = [candidate for candidate in candidates if candidate["type"] == "invoice_number"]
+    generic_candidates = [
+        candidate for candidate in candidates if candidate["type"] == "generic_document_number"
+    ]
     reference_candidates = [
-        candidate for candidate in candidates if candidate["type"] in _FAST_TEXT_NON_INVOICE_TYPES
+        candidate for candidate in candidates if candidate["type"] in _FAST_TEXT_SECONDARY_IDENTIFIER_TYPES
     ]
     invoice_by_normalized = {
         candidate["normalized_value"]: candidate for candidate in invoice_candidates
@@ -5628,6 +5686,7 @@ def _inspect_fast_text_invoice_number_evidence(text: str) -> Dict[str, Any]:
             "invoice_candidates": list(invoice_by_normalized.values()),
             "reference_identifiers": reference_identifiers,
             "candidates": candidates,
+            "selected_candidate_type": "invoice_number",
         }
     if len(invoice_by_normalized) > 1:
         return {
@@ -5636,19 +5695,46 @@ def _inspect_fast_text_invoice_number_evidence(text: str) -> Dict[str, Any]:
             "invoice_candidates": list(invoice_by_normalized.values()),
             "reference_identifiers": reference_identifiers,
             "candidates": candidates,
+            "selected_candidate_type": None,
+        }
+    generic_by_normalized = {
+        candidate["normalized_value"]: candidate for candidate in generic_candidates
+    }
+    if len(generic_by_normalized) == 1 and _fast_text_document_has_invoice_context(text):
+        generic_candidate = next(iter(generic_by_normalized.values()))
+        return {
+            "status": "generic_unambiguous",
+            "invoice_number": generic_candidate["visible_value"],
+            "invoice_candidates": [],
+            "generic_candidates": list(generic_by_normalized.values()),
+            "reference_identifiers": reference_identifiers,
+            "candidates": candidates,
+            "selected_candidate_type": "generic_document_number",
+        }
+    if len(generic_by_normalized) > 1 and _fast_text_document_has_invoice_context(text):
+        return {
+            "status": "generic_ambiguous",
+            "invoice_number": None,
+            "invoice_candidates": [],
+            "generic_candidates": list(generic_by_normalized.values()),
+            "reference_identifiers": reference_identifiers,
+            "candidates": candidates,
+            "selected_candidate_type": None,
         }
     return {
         "status": "missing",
         "invoice_number": None,
         "invoice_candidates": [],
+        "generic_candidates": list(generic_by_normalized.values()),
         "reference_identifiers": reference_identifiers,
         "candidates": candidates,
+        "selected_candidate_type": None,
     }
 
 
 def _reconcile_fast_text_invoice_number(
     invoice_number: Optional[str], document_text: str
-) -> Tuple[Optional[str], List[str], List[str], str]:
+) -> Tuple[Optional[str], List[str], List[str], str, Dict[str, Any]]:
     """Confirm or correct only a unique typed invoice candidate.
 
     A secondary order/reference can never create a conflict when the model has
@@ -5656,39 +5742,165 @@ def _reconcile_fast_text_invoice_number(
     """
     evidence = _inspect_fast_text_invoice_number_evidence(document_text)
     normalized_model_number = _normalize_fast_text_identifier(invoice_number)
-    if evidence["status"] == "ambiguous":
-        return invoice_number, [], ["invoice_number_evidence_ambiguous"], "ambiguous"
+    if evidence["status"] in {"ambiguous", "generic_ambiguous"}:
+        diagnostics = _build_fast_text_invoice_parser_diagnostics(
+            evidence,
+            selected_candidate_type=None,
+            action="review_ambiguous_candidates",
+            ambiguity_reason=evidence["status"],
+        )
+        return invoice_number, [], ["invoice_number_evidence_ambiguous"], "ambiguous", diagnostics
     if evidence["status"] == "missing":
         if normalized_model_number in evidence["reference_identifiers"]:
-            return None, [], ["invoice_number_is_non_invoice_reference"], "missing"
-        return invoice_number, [], ["invoice_number_evidence_missing"], "missing"
+            diagnostics = _build_fast_text_invoice_parser_diagnostics(
+                evidence,
+                selected_candidate_type=None,
+                action="rejected_secondary_identifier_without_invoice_evidence",
+                ambiguity_reason=None,
+            )
+            return None, [], ["invoice_number_is_non_invoice_reference"], "missing", diagnostics
+        diagnostics = _build_fast_text_invoice_parser_diagnostics(
+            evidence,
+            selected_candidate_type=None,
+            action="review_missing_invoice_evidence",
+            ambiguity_reason=None,
+        )
+        return invoice_number, [], ["invoice_number_evidence_missing"], "missing", diagnostics
 
     expected_number = evidence["invoice_number"]
     normalized_expected_number = _normalize_fast_text_identifier(expected_number)
     if normalized_model_number == normalized_expected_number:
-        return invoice_number, [], [], "confirmed"
-    if (
+        diagnostics = _build_fast_text_invoice_parser_diagnostics(
+            evidence,
+            selected_candidate_type=evidence["selected_candidate_type"],
+            action=(
+                "confirmed_generic_document_number"
+                if evidence["status"] == "generic_unambiguous"
+                else "confirmed_exact_invoice_number"
+            ),
+            ambiguity_reason=None,
+        )
+        return invoice_number, [], [], "confirmed", diagnostics
+    if evidence["status"] == "generic_unambiguous":
+        diagnostics = _build_fast_text_invoice_parser_diagnostics(
+            evidence,
+            selected_candidate_type="generic_document_number",
+            action=(
+                "review_generic_document_number_missing"
+                if normalized_model_number is None
+                else "review_generic_document_number_mismatch"
+            ),
+            ambiguity_reason=None,
+        )
+        issue = (
+            "invoice_number_evidence_missing"
+            if normalized_model_number is None
+            else "invoice_number_conflicts_with_explicit_label"
+        )
+        status = "missing" if normalized_model_number is None else "conflict"
+        return invoice_number, [], [issue], status, diagnostics
+
+    invoice_candidate = evidence["invoice_candidates"][0]
+    can_correct = invoice_candidate.get("evidence_strength") == "strong"
+    truncated_model_number = bool(
         normalized_model_number
         and len(normalized_model_number) >= 4
         and normalized_expected_number.endswith(normalized_model_number)
+    )
+    if can_correct and (
+        normalized_model_number is None
+        or normalized_model_number in evidence["reference_identifiers"]
+        or truncated_model_number
     ):
-        # A model may omit the series/year prefix from a compound identifier.
-        # With exactly one labelled invoice candidate, completing that suffix is
-        # deterministic and safer than retaining an incomplete invoice number.
-        return (
-            expected_number,
-            ["invoice_number_completed_from_explicit_label"],
-            [],
-            "confirmed",
+        action = (
+            "corrected_truncated_invoice_number_from_explicit_label"
+            if truncated_model_number
+            else "corrected_from_explicit_invoice_label"
         )
-    if normalized_model_number is None or normalized_model_number in evidence["reference_identifiers"]:
+        diagnostics = _build_fast_text_invoice_parser_diagnostics(
+            evidence,
+            selected_candidate_type="invoice_number",
+            action=action,
+            ambiguity_reason=None,
+        )
         return (
             expected_number,
             ["invoice_number_corrected_from_explicit_label"],
             [],
             "confirmed",
+            diagnostics,
         )
-    return invoice_number, [], ["invoice_number_conflicts_with_explicit_label"], "conflict"
+    diagnostics = _build_fast_text_invoice_parser_diagnostics(
+        evidence,
+        selected_candidate_type="invoice_number",
+        action="review_conflicting_invoice_number",
+        ambiguity_reason=None,
+    )
+    return (
+        invoice_number,
+        [],
+        ["invoice_number_conflicts_with_explicit_label"],
+        "conflict",
+        diagnostics,
+    )
+
+
+def _normalize_fast_text_date(value: Any) -> Optional[str]:
+    """Keep V2 date normalization local so the V1 date pipeline is unchanged."""
+    if value is None:
+        return None
+    return _normalize_date(str(value).replace(".", "/"))
+
+
+def _inspect_fast_text_invoice_date_evidence(document_text: str) -> Dict[str, Any]:
+    """Find one invoice-context date, excluding due, delivery and order dates."""
+    candidates: List[str] = []
+    has_invoice_context = _fast_text_document_has_invoice_context(document_text)
+    for position, (_, line) in enumerate(_fast_text_parser_lines(document_text)):
+        if _FAST_TEXT_DATE_EXCLUSION_PATTERN.search(line):
+            continue
+        strong_context = bool(_FAST_TEXT_INVOICE_DATE_STRONG_PATTERN.search(line))
+        contextual_date = bool(_FAST_TEXT_INVOICE_DATE_CONTEXTUAL_PATTERN.search(line))
+        if not strong_context and not (contextual_date and has_invoice_context and position <= 12):
+            continue
+        for match in _FAST_TEXT_INVOICE_DATE_PATTERN.finditer(line):
+            normalized = _normalize_fast_text_date(match.group(0))
+            if normalized and normalized not in candidates:
+                candidates.append(normalized)
+    if len(candidates) == 1:
+        return {"status": "unambiguous", "invoice_date": candidates[0], "candidate_count": 1}
+    if len(candidates) > 1:
+        return {"status": "ambiguous", "invoice_date": None, "candidate_count": len(candidates)}
+    return {"status": "missing", "invoice_date": None, "candidate_count": 0}
+
+
+def _reconcile_fast_text_invoice_date(
+    invoice_date: Optional[str], document_text: str
+) -> Tuple[Optional[str], List[str], List[str], Dict[str, Any]]:
+    """Use only one explicit native-text invoice date as deterministic evidence."""
+    evidence = _inspect_fast_text_invoice_date_evidence(document_text)
+    normalized_model_date = _normalize_fast_text_date(invoice_date)
+    diagnostics = {
+        "status": evidence["status"],
+        "candidate_count": evidence["candidate_count"],
+        "reconciliation_action": "kept_model_date",
+    }
+    if evidence["status"] == "ambiguous":
+        diagnostics["reconciliation_action"] = "review_ambiguous_invoice_dates"
+        return normalized_model_date, [], ["invoice_date_evidence_ambiguous"], diagnostics
+    if evidence["status"] != "unambiguous":
+        diagnostics["reconciliation_action"] = "no_native_invoice_date_evidence"
+        return normalized_model_date, [], [], diagnostics
+    if normalized_model_date == evidence["invoice_date"]:
+        diagnostics["reconciliation_action"] = "confirmed_exact_invoice_date"
+        return normalized_model_date, [], [], diagnostics
+    diagnostics["reconciliation_action"] = "corrected_from_explicit_invoice_date"
+    return (
+        evidence["invoice_date"],
+        ["invoice_date_corrected_from_explicit_label"],
+        [],
+        diagnostics,
+    )
 
 
 def _extract_fast_text_relative_payment_terms_days(text: str) -> Optional[int]:
@@ -5745,7 +5957,7 @@ def _normalize_fast_text_invoice(structured_data: Dict[str, Any]) -> Dict[str, A
         "client_name": customer_name.strip() if isinstance(customer_name, str) else None,
         "customer_tax_id": _normalize_fast_text_tax_id(customer.get("tax_id")),
         "invoice_number": str(invoice.get("invoice_number") or "").strip() or None,
-        "invoice_date": _normalize_date(invoice.get("issue_date")),
+        "invoice_date": _normalize_fast_text_date(invoice.get("issue_date")),
         "payment_dates": due_dates,
         "currency": str(invoice.get("currency") or "").strip().upper() or None,
         "base_amount": _round_amount(float(base_amount)) if base_amount is not None else None,
@@ -5982,13 +6194,23 @@ def analyze_invoice_v2_fast_text(
         invoice_number_corrections,
         invoice_number_issues,
         invoice_number_evidence_status,
+        invoice_parser_diagnostics,
     ) = _reconcile_fast_text_invoice_number(
         normalized.get("invoice_number"), prepared["text"]
+    )
+    (
+        normalized["invoice_date"],
+        invoice_date_corrections,
+        invoice_date_issues,
+        invoice_date_diagnostics,
+    ) = _reconcile_fast_text_invoice_date(
+        normalized.get("invoice_date"), prepared["text"]
     )
     normalized["payment_dates"], due_date_corrections = _reconcile_fast_text_payment_dates(
         normalized.get("payment_dates") or [], normalized.get("invoice_date"), prepared["text"]
     )
     correction_codes.extend(invoice_number_corrections)
+    correction_codes.extend(invoice_date_corrections)
     correction_codes.extend(due_date_corrections)
     validation_issues = _validate_fast_text_invoice(
         response_data,
@@ -5996,7 +6218,15 @@ def analyze_invoice_v2_fast_text(
         validation_company_names,
         registered_company_tax_id=normalized_company_context.get("company_tax_id"),
     )
-    validation_issues = list(dict.fromkeys(invoice_number_issues + validation_issues))
+    if "invoice_date_corrected_from_explicit_label" in correction_codes:
+        # A unique native-text date under a strict invoice label is independent
+        # evidence, even when the model omitted field_evidence.issue_date.
+        validation_issues = [
+            issue for issue in validation_issues if issue != "missing_evidence_issue_date"
+        ]
+    validation_issues = list(
+        dict.fromkeys(invoice_number_issues + invoice_date_issues + validation_issues)
+    )
     safety_assessment = _assess_fast_text_invoice_safety(
         response_data,
         normalized,
@@ -6025,6 +6255,10 @@ def analyze_invoice_v2_fast_text(
         "validation_issues": validation_issues,
         "deterministic_corrections": correction_codes,
         "invoice_number_evidence_status": invoice_number_evidence_status,
+        "invoice_parser_diagnostics": {
+            **invoice_parser_diagnostics,
+            "invoice_date": invoice_date_diagnostics,
+        },
         **safety_assessment,
         **normalized,
     }
