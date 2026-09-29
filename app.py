@@ -547,7 +547,7 @@ invoice_analysis_shadow_runs_table = Table(
     Column("metadata_quality_status", String),
     Column("metadata_issues_json", Text),
     Column("invoice_number_evidence_status", String),
-    # Bounded V7 parser metadata. It never contains document text or context.
+    # Bounded V8 parser metadata. It never contains document text or context.
     Column("invoice_parser_diagnostics_json", Text),
     Column("error_type", String),
     Column("attempt_count", Integer, nullable=False, server_default=text("0")),
@@ -6249,7 +6249,7 @@ def async_invoice_analysis_is_available():
     return ASYNC_INVOICE_ANALYSIS_ENABLED and has_private_object_storage()
 
 
-INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v7"
+INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v8"
 INVOICE_V2_SHADOW_ROUTE = "v2_fast_text_native"
 
 
@@ -7301,29 +7301,34 @@ def _bounded_nonnegative_int(value, maximum):
 
 
 def _safe_invoice_parser_diagnostics(value):
-    """Whitelist compact V7 parser metadata without retaining source context."""
+    """Whitelist compact V8 parser metadata without retaining source context."""
     if not isinstance(value, dict):
         return None
-    safe_candidates = []
-    for candidate in value.get("invoice_candidates") or []:
+
+    def safe_candidate(candidate):
         if not isinstance(candidate, dict):
-            continue
+            return None
         candidate_type = str(candidate.get("type") or "")
         if candidate_type not in _INVOICE_PARSER_DIAGNOSTIC_TYPES:
-            continue
+            return None
         normalized_value = re.sub(r"[^A-Za-z0-9]", "", str(candidate.get("normalized_value") or ""))
         if not normalized_value:
-            continue
-        safe_candidates.append(
-            {
-                "type": candidate_type,
-                "normalized_value": normalized_value[:128],
-                "label_type": str(candidate.get("label_type") or "")[:64],
-                "strength": str(candidate.get("strength") or "")[:24],
-            }
-        )
+            return None
+        return {
+            "type": candidate_type,
+            "normalized_value": normalized_value[:128],
+            "label_type": str(candidate.get("label_type") or "")[:64],
+            "strength": str(candidate.get("strength") or "")[:24],
+        }
+
+    safe_candidates = []
+    for candidate in value.get("label_first_candidates") or value.get("invoice_candidates") or []:
+        sanitized = safe_candidate(candidate)
+        if sanitized is not None:
+            safe_candidates.append(sanitized)
         if len(safe_candidates) == 3:
             break
+    selected_candidate = safe_candidate(value.get("selected_candidate"))
     raw_counts = value.get("secondary_candidate_counts") or {}
     safe_counts = {
         candidate_type: _bounded_nonnegative_int(raw_counts.get(candidate_type), 999)
@@ -7334,9 +7339,13 @@ def _safe_invoice_parser_diagnostics(value):
     return {
         "parser_revision": str(value.get("parser_revision") or "")[:24],
         "candidate_detected": bool(value.get("candidate_detected")),
+        # invoice_candidates remains for older diagnostic readers.  The V8
+        # field makes its label-first, fallback-only role explicit.
         "invoice_candidates": safe_candidates,
+        "label_first_candidates": safe_candidates,
         "secondary_candidate_counts": safe_counts,
         "selected_candidate_type": str(value.get("selected_candidate_type") or "")[:64] or None,
+        "selected_candidate": selected_candidate,
         "model_normalized_value": re.sub(
             r"[^A-Za-z0-9]", "", str(value.get("model_normalized_value") or "")
         )[:128]
@@ -7344,6 +7353,18 @@ def _safe_invoice_parser_diagnostics(value):
         "selected_candidate_normalized_value": re.sub(
             r"[^A-Za-z0-9]", "", str(value.get("selected_candidate_normalized_value") or "")
         )[:128]
+        or None,
+        "model_value_found_in_native_text": bool(value.get("model_value_found_in_native_text")),
+        "model_value_match_count": _bounded_nonnegative_int(
+            value.get("model_value_match_count"), 999
+        ),
+        "model_value_invoice_context_status": str(
+            value.get("model_value_invoice_context_status") or ""
+        )[:64]
+        or None,
+        "model_value_context_label_type": str(
+            value.get("model_value_context_label_type") or ""
+        )[:64]
         or None,
         "reconciliation_action": str(value.get("reconciliation_action") or "")[:128] or None,
         "ambiguity_reason": str(value.get("ambiguity_reason") or "")[:128] or None,
