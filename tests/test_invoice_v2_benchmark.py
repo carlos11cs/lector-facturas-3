@@ -46,6 +46,12 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
         status="completed",
         validation_status="passed",
         strict_match=True,
+        shadow_version="v2-sol-text-v4",
+        accounting_safety_status=None,
+        accounting_safety_issues=None,
+        metadata_quality_status=None,
+        metadata_issues=None,
+        invoice_number_evidence_status=None,
         comparison=None,
         validation_errors=None,
         error_type=None,
@@ -146,7 +152,7 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
                     company_id=11,
                     batch_id=batch_id,
                     batch_position=1,
-                    shadow_version="v2-sol-text-v4",
+                    shadow_version=shadow_version,
                     route="v2_fast_text_native",
                     model="gpt-5.6-sol",
                     reasoning_effort="low",
@@ -179,6 +185,15 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
                     validation_errors_json=json.dumps(validation_errors)
                     if validation_errors is not None
                     else None,
+                    accounting_safety_status=accounting_safety_status,
+                    accounting_safety_issues_json=json.dumps(accounting_safety_issues)
+                    if accounting_safety_issues is not None
+                    else None,
+                    metadata_quality_status=metadata_quality_status,
+                    metadata_issues_json=json.dumps(metadata_issues)
+                    if metadata_issues is not None
+                    else None,
+                    invoice_number_evidence_status=invoice_number_evidence_status,
                     error_type=error_type,
                     attempt_count=1,
                     lease_token=None,
@@ -329,6 +344,57 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
         self.assertNotIn("PRIVATE_V2_DO_NOT_PRINT", output)
         self.assertNotIn("never-rendered.pdf", output)
         self.assertNotIn("private/never-rendered.pdf", output)
+
+    def test_v5_report_separates_accounting_safety_and_metadata_quality(self):
+        fully_confirmed = self._add_run(
+            shadow_version="v2-sol-text-v5",
+            accounting_safety_status="passed",
+            accounting_safety_issues=[],
+            metadata_quality_status="confirmed",
+            metadata_issues=[],
+            invoice_number_evidence_status="confirmed",
+        )
+        metadata_review = self._add_run(
+            shadow_version="v2-sol-text-v5",
+            validation_status="failed",
+            strict_match=False,
+            accounting_safety_status="passed",
+            accounting_safety_issues=[],
+            metadata_quality_status="review_required",
+            metadata_issues=["invoice_number_evidence_missing"],
+            invoice_number_evidence_status="missing",
+        )
+        accounting_failed = self._add_run(
+            shadow_version="v2-sol-text-v5",
+            validation_status="failed",
+            strict_match=None,
+            accounting_safety_status="failed",
+            accounting_safety_issues=["tax_base_mismatch"],
+            metadata_quality_status="confirmed",
+            metadata_issues=[],
+            invoice_number_evidence_status="confirmed",
+        )
+
+        rows = benchmark.load_benchmark_rows(
+            self.engine, shadow_version="v2-sol-text-v5"
+        )
+        report = benchmark.build_benchmark_report(
+            rows, {"shadow_version": "v2-sol-text-v5"}
+        )
+
+        self.assertEqual(report["volume"]["accounting_safety_passed"], 2)
+        self.assertEqual(report["volume"]["accounting_safety_failed"], 1)
+        self.assertEqual(report["volume"]["metadata_confirmed"], 2)
+        self.assertEqual(report["volume"]["metadata_review_required"], 1)
+        self.assertEqual(report["volume"]["fully_confirmed_fast_path_candidate"], 1)
+        self.assertEqual(report["volume"]["accounting_safe_metadata_review"], 1)
+        self.assertEqual(report["fully_confirmed_fast_path_candidate_count"], 1)
+        self.assertAlmostEqual(
+            report["rates"]["fully_confirmed_fast_path_candidate"], 100 / 3
+        )
+        self.assertNotIn(fully_confirmed, [row["job_id"] for row in report["review_rows"]])
+        self.assertIn(metadata_review, [row["job_id"] for row in report["review_rows"]])
+        self.assertIn(accounting_failed, [row["job_id"] for row in report["review_rows"]])
 
 
 if __name__ == "__main__":

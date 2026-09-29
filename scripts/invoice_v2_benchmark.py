@@ -133,15 +133,17 @@ def _vat_breakdown_matches(left: Any, right: Any) -> bool:
             if not isinstance(item, dict):
                 return None
             try:
-                lines.append(
-                    (
-                        round(float(item.get("rate")), 2),
-                        round(float(item.get("base")), 2),
-                        round(float(item.get("vat_amount")), 2),
-                    )
-                )
+                base = round(float(item.get("base")), 2)
+                vat_amount = round(float(item.get("vat_amount")), 2)
             except (TypeError, ValueError):
                 return None
+            if base == 0 and vat_amount == 0:
+                continue
+            try:
+                rate = round(float(item.get("rate")), 2)
+            except (TypeError, ValueError):
+                return None
+            lines.append((rate, base, vat_amount))
         return sorted(lines)
 
     left_lines = normalized_lines(left)
@@ -288,6 +290,50 @@ def build_benchmark_report(rows: Sequence[Mapping[str, Any]], scope: Mapping[str
         and row.get("validation_status") == "passed"
         and row.get("strict_accounting_match") is True
     ]
+    accounting_safe_rows = [
+        row
+        for row in normalized_rows
+        if row.get("eligible") is True
+        and row.get("status") == "completed"
+        and row.get("accounting_safety_status") == "passed"
+    ]
+    accounting_failed_rows = [
+        row
+        for row in normalized_rows
+        if row.get("eligible") is True
+        and row.get("status") == "completed"
+        and row.get("accounting_safety_status") == "failed"
+    ]
+    metadata_confirmed_rows = [
+        row
+        for row in normalized_rows
+        if row.get("eligible") is True
+        and row.get("status") == "completed"
+        and row.get("metadata_quality_status") == "confirmed"
+    ]
+    metadata_review_rows = [
+        row
+        for row in normalized_rows
+        if row.get("eligible") is True
+        and row.get("status") == "completed"
+        and row.get("metadata_quality_status") == "review_required"
+    ]
+    metadata_failed_rows = [
+        row
+        for row in normalized_rows
+        if row.get("eligible") is True
+        and row.get("status") == "completed"
+        and row.get("metadata_quality_status") == "failed"
+    ]
+    fully_confirmed_rows = [
+        row
+        for row in normalized_rows
+        if row.get("eligible") is True
+        and row.get("status") == "completed"
+        and row.get("accounting_safety_status") == "passed"
+        and row.get("metadata_quality_status") == "confirmed"
+        and row.get("strict_accounting_match") is True
+    ]
 
     def discrepancies_for(rows_to_group: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
         scoped_rows = list(rows_to_group)
@@ -344,6 +390,8 @@ def build_benchmark_report(rows: Sequence[Mapping[str, Any]], scope: Mapping[str
         and (
             row.get("validation_status") == "failed"
             or row.get("strict_accounting_match") is False
+            or row.get("metadata_quality_status") in ("review_required", "failed")
+            or row.get("accounting_safety_status") == "failed"
             or str(row.get("status") or "") in _REVIEWABLE_V2_STATUSES
             or bool(row.get("error_type"))
         )
@@ -354,6 +402,8 @@ def build_benchmark_report(rows: Sequence[Mapping[str, Any]], scope: Mapping[str
             "status": row.get("status") or "unknown",
             "validation_status": row.get("validation_status") or "unknown",
             "strict_accounting_match": row.get("strict_accounting_match"),
+            "accounting_safety_status": row.get("accounting_safety_status") or "n/a",
+            "metadata_quality_status": row.get("metadata_quality_status") or "n/a",
         }
         for row in normalized_rows
         if row.get("job_id") in review_ids
@@ -372,6 +422,32 @@ def build_benchmark_report(rows: Sequence[Mapping[str, Any]], scope: Mapping[str
             "strict_mismatch": len(strict_mismatch_rows),
             "pending": len(pending_rows),
             "technical_error": len(technical_error_rows),
+            "accounting_safety_passed": len(accounting_safe_rows),
+            "accounting_safety_failed": len(accounting_failed_rows),
+            "accounting_safety_unassessed": len(
+                [
+                    row
+                    for row in normalized_rows
+                    if row.get("eligible") is True
+                    and row.get("status") == "completed"
+                    and row.get("accounting_safety_status") not in ("passed", "failed")
+                ]
+            ),
+            "metadata_confirmed": len(metadata_confirmed_rows),
+            "metadata_review_required": len(metadata_review_rows),
+            "metadata_failed": len(metadata_failed_rows),
+            "metadata_unassessed": len(
+                [
+                    row
+                    for row in normalized_rows
+                    if row.get("eligible") is True
+                    and row.get("status") == "completed"
+                    and row.get("metadata_quality_status")
+                    not in ("confirmed", "review_required", "failed")
+                ]
+            ),
+            "fully_confirmed_fast_path_candidate": len(fully_confirmed_rows),
+            "accounting_safe_metadata_review": len(metadata_review_rows),
         },
         "rates": {
             "eligibility": _percent(
@@ -386,8 +462,18 @@ def build_benchmark_report(rows: Sequence[Mapping[str, Any]], scope: Mapping[str
             ),
             "safe_fast_path_candidate": _percent(len(safe_fast_path_rows), total),
             "requires_v1_fallback": _percent(total - len(safe_fast_path_rows), total),
+            "accounting_safety_passed_of_completed": _percent(
+                len(accounting_safe_rows), len(completed_rows)
+            ),
+            "metadata_confirmed_of_accounting_safe": _percent(
+                len(fully_confirmed_rows), len(accounting_safe_rows)
+            ),
+            "fully_confirmed_fast_path_candidate": _percent(
+                len(fully_confirmed_rows), total
+            ),
         },
         "safe_fast_path_candidate_count": len(safe_fast_path_rows),
+        "fully_confirmed_fast_path_candidate_count": len(fully_confirmed_rows),
         "latency": {
             "v1_processing_ms": v1_latency,
             "v2_total_ms": v2_latency,
@@ -476,6 +562,11 @@ def load_benchmark_rows(
             shadow_runs.c.status,
             shadow_runs.c.validation_status,
             shadow_runs.c.strict_accounting_match,
+            shadow_runs.c.accounting_safety_status,
+            shadow_runs.c.accounting_safety_issues_json,
+            shadow_runs.c.metadata_quality_status,
+            shadow_runs.c.metadata_issues_json,
+            shadow_runs.c.invoice_number_evidence_status,
             shadow_runs.c.comparison_json,
             shadow_runs.c.validation_errors_json,
             shadow_runs.c.error_type,
@@ -558,6 +649,15 @@ def render_benchmark_report(report: Mapping[str, Any]) -> str:
         f"  Validación: passed={volume['validation_passed']} | failed={volume['validation_failed']}",
         f"  Strict accounting: true={volume['strict_match']} | false={volume['strict_mismatch']}",
         "",
+        "ACCOUNTING SAFETY (V5)",
+        f"  Passed: {volume['accounting_safety_passed']} | Failed: {volume['accounting_safety_failed']} | Sin evaluar: {volume['accounting_safety_unassessed']}",
+        f"  Passed sobre V2 completados: {_format_percent(rates['accounting_safety_passed_of_completed'])}",
+        "",
+        "METADATA QUALITY (V5)",
+        f"  Confirmed: {volume['metadata_confirmed']} | Review required: {volume['metadata_review_required']} | Failed: {volume['metadata_failed']} | Sin evaluar: {volume['metadata_unassessed']}",
+        f"  Contablemente seguros con metadata review: {volume['accounting_safe_metadata_review']}",
+        f"  Fully confirmed fast path candidate (solo benchmark): {report['fully_confirmed_fast_path_candidate_count']} ({_format_percent(rates['fully_confirmed_fast_path_candidate'])})",
+        "",
         "TASAS",
         f"  Elegibilidad: {_format_percent(rates['eligibility'])}",
         f"  Validación passed sobre V2 completados: {_format_percent(rates['validation_passed_of_completed'])}",
@@ -631,7 +731,7 @@ def render_benchmark_report(report: Mapping[str, Any]) -> str:
             strict_value = row["strict_accounting_match"]
             strict_label = "true" if strict_value is True else "false" if strict_value is False else "n/a"
             lines.append(
-                f"  Job {row['job_id']}: status={row['status']}, validation={row['validation_status']}, strict={strict_label}"
+                f"  Job {row['job_id']}: status={row['status']}, validation={row['validation_status']}, strict={strict_label}, accounting={row['accounting_safety_status']}, metadata={row['metadata_quality_status']}"
             )
     else:
         lines.append("  Ninguno")

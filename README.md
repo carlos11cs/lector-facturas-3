@@ -127,8 +127,8 @@ prioridad. V2 solo se inicia cuando no hay trabajo V1 activo; no usa OCR ni env�
 el PDF, imágenes o texto completo a telemetría. Los resultados comparativos se
 guardan en `invoice_analysis_shadow_runs` y el PDF privado se borra tras V2 o al
 alcanzar el TTL ya existente.
-La variante actual queda identificada como `v2-sol-text-v4`; las ejecuciones
-históricas conservan `v2-sol-text-v1` y la tabla permite
+La variante actual queda identificada como `v2-sol-text-v5`; las ejecuciones
+históricas conservan su versión original y la tabla permite
 comparar varias variantes del mismo trabajo mediante `job_id + shadow_version`.
 
 #### Informe de benchmark persistido
@@ -141,23 +141,24 @@ a S3 y no modifica trabajos, métricas ni resultados.
 ```bash
 # Un lote concreto
 python scripts/invoice_v2_benchmark.py \
-  --version v2-sol-text-v4 \
+  --version v2-sol-text-v5 \
   --batch-id TU_BATCH_ID
 
 # Las últimas 50 ejecuciones de la variante
-python scripts/invoice_v2_benchmark.py --version v2-sol-text-v4 --latest 50
+python scripts/invoice_v2_benchmark.py --version v2-sol-text-v5 --latest 50
 
 # Un rango de trabajos
 python scripts/invoice_v2_benchmark.py \
-  --version v2-sol-text-v4 \
+  --version v2-sol-text-v5 \
   --job-min 40 --job-max 120
 ```
 
 El informe muestra elegibilidad, validación, `strict_accounting_match`,
-latencias y tokens V1/V2, discrepancias por campo, motivos de exclusión y los
-`job_id` que requieren revisión. No imprime PDFs, nombres de archivo, texto
-extraído, prompts ni payloads de resultados. `safe_fast_path_candidate` es solo
-una métrica de benchmark: no cambia la ruta oficial V1.
+seguridad contable y calidad de metadata por separado, latencias y tokens V1/V2,
+discrepancias por campo, motivos de exclusión y los `job_id` que requieren
+revisión. No imprime PDFs, nombres de archivo, texto extraído, prompts ni
+payloads de resultados. `safe_fast_path_candidate` y `fully_confirmed_fast_path_candidate`
+son solo métricas de benchmark: no cambian la ruta oficial V1.
 
 ### Descartar un análisis pendiente
 

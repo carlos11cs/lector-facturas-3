@@ -540,6 +540,13 @@ invoice_analysis_shadow_runs_table = Table(
     Column("comparison_json", Text),
     # Compact validation codes for benchmark diagnosis; never document evidence.
     Column("validation_errors_json", Text),
+    # V5 separates fiscal/accounting integrity from document metadata quality.
+    # All fields are nullable so V1-V4 benchmark history remains immutable.
+    Column("accounting_safety_status", String),
+    Column("accounting_safety_issues_json", Text),
+    Column("metadata_quality_status", String),
+    Column("metadata_issues_json", Text),
+    Column("invoice_number_evidence_status", String),
     Column("error_type", String),
     Column("attempt_count", Integer, nullable=False, server_default=text("0")),
     Column("lease_token", String),
@@ -1528,6 +1535,21 @@ def init_db():
     )
     add_column_if_missing(
         "invoice_analysis_shadow_runs", "strict_accounting_match", "BOOLEAN"
+    )
+    add_column_if_missing(
+        "invoice_analysis_shadow_runs", "accounting_safety_status", "VARCHAR"
+    )
+    add_column_if_missing(
+        "invoice_analysis_shadow_runs", "accounting_safety_issues_json", "TEXT"
+    )
+    add_column_if_missing(
+        "invoice_analysis_shadow_runs", "metadata_quality_status", "VARCHAR"
+    )
+    add_column_if_missing(
+        "invoice_analysis_shadow_runs", "metadata_issues_json", "TEXT"
+    )
+    add_column_if_missing(
+        "invoice_analysis_shadow_runs", "invoice_number_evidence_status", "VARCHAR"
     )
     # The queue uses status/expiry/age to claim work, company/status/age to
     # enforce fairness, and the batch index for progressive client polling.
@@ -6222,7 +6244,7 @@ def async_invoice_analysis_is_available():
     return ASYNC_INVOICE_ANALYSIS_ENABLED and has_private_object_storage()
 
 
-INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v4"
+INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v5"
 INVOICE_V2_SHADOW_ROUTE = "v2_fast_text_native"
 
 
@@ -6286,6 +6308,11 @@ def _create_invoice_v2_shadow_run(job, prepared_text):
         "strict_accounting_match": None,
         "comparison_json": None,
         "validation_errors_json": None,
+        "accounting_safety_status": None,
+        "accounting_safety_issues_json": None,
+        "metadata_quality_status": None,
+        "metadata_issues_json": None,
+        "invoice_number_evidence_status": None,
         "error_type": None,
         "attempt_count": 0,
         "lease_token": None,
@@ -7255,9 +7282,68 @@ def _normalize_shadow_comparison_text(value, *, entity=False):
     normalized = unicodedata.normalize("NFKD", str(value)).encode("ascii", "ignore").decode("ascii")
     tokens = re.findall(r"[A-Za-z0-9]+", normalized.upper())
     if entity:
-        ignored = {"S", "L", "SL", "SLU", "SA", "SAU", "SRL", "LTD", "LIMITED", "INC"}
-        tokens = [token for token in tokens if token not in ignored]
+        tokens = _shadow_provider_name_tokens(value)
     return "".join(tokens)
+
+
+_SHADOW_LEGAL_SUFFIXES = (
+    ("S", "L", "U"),
+    ("S", "A", "U"),
+    ("S", "R", "L"),
+    ("S", "L"),
+    ("S", "A"),
+    ("SLU",),
+    ("SAU",),
+    ("SRL",),
+    ("SL",),
+    ("SA",),
+    ("LTD",),
+    ("LIMITED",),
+    ("INC",),
+)
+
+
+def _shadow_provider_name_tokens(value):
+    """Normalize provider names without dropping meaningful interior words."""
+    if value is None:
+        return []
+    normalized = unicodedata.normalize("NFKD", str(value)).encode("ascii", "ignore").decode("ascii")
+    tokens = re.findall(r"[A-Za-z0-9]+", normalized.upper())
+    while tokens:
+        suffix = next(
+            (suffix for suffix in _SHADOW_LEGAL_SUFFIXES if tuple(tokens[-len(suffix) :]) == suffix),
+            None,
+        )
+        if suffix is None:
+            break
+        del tokens[-len(suffix) :]
+    return tokens
+
+
+def _shadow_provider_names_match(left_name, left_tax_id, right_name, right_tax_id):
+    """Match only canonical names or a tax-backed word-boundary extension."""
+    left_tokens = _shadow_provider_name_tokens(left_name)
+    right_tokens = _shadow_provider_name_tokens(right_name)
+    if not left_tokens or not right_tokens:
+        return False, "missing_name"
+    if left_tokens == right_tokens:
+        return True, "canonical_name"
+    left_tax = _normalize_shadow_tax_id(left_tax_id)
+    right_tax = _normalize_shadow_tax_id(right_tax_id)
+    tax_matches = bool(left_tax and right_tax and left_tax == right_tax)
+    shorter, longer = (
+        (left_tokens, right_tokens)
+        if len(left_tokens) <= len(right_tokens)
+        else (right_tokens, left_tokens)
+    )
+    if (
+        tax_matches
+        and len(shorter) >= 2
+        and len(longer) > len(shorter)
+        and longer[: len(shorter)] == shorter
+    ):
+        return True, "tax_id_name_extension"
+    return False, "different_name"
 
 
 def _shadow_amount_matches(left, right, tolerance=0.01):
@@ -7276,15 +7362,19 @@ def _shadow_vat_breakdown_matches(left, right):
             if not isinstance(item, dict):
                 continue
             try:
-                lines.append(
-                    (
-                        round(float(item.get("rate")), 2),
-                        round(float(item.get("base")), 2),
-                        round(float(item.get("vat_amount")), 2),
-                    )
-                )
+                base = round(float(item.get("base")), 2)
+                vat_amount = round(float(item.get("vat_amount")), 2)
             except (TypeError, ValueError):
                 return None
+            # A zero-money informational row cannot affect accounting.  Its
+            # reported rate is therefore not a material VAT discrepancy.
+            if base == 0 and vat_amount == 0:
+                continue
+            try:
+                rate = round(float(item.get("rate")), 2)
+            except (TypeError, ValueError):
+                return None
+            lines.append((rate, base, vat_amount))
         return sorted(lines)
 
     left_lines = normalized_lines(left)
@@ -7404,9 +7494,12 @@ def _compare_invoice_v1_and_v2(v1_result, v2_result):
     """Compare normalized accounting fields without persisting either document text."""
     v1_result = _canonical_v1_shadow_result(v1_result)
     v2_result = _canonical_v2_shadow_result(v2_result)
-    provider_match = _normalize_shadow_comparison_text(
-        v1_result.get("provider_name"), entity=True
-    ) == _normalize_shadow_comparison_text(v2_result.get("provider_name"), entity=True)
+    provider_match, provider_match_reason = _shadow_provider_names_match(
+        v1_result.get("provider_name"),
+        v1_result.get("supplier_tax_id"),
+        v2_result.get("provider_name"),
+        v2_result.get("supplier_tax_id"),
+    )
     invoice_number_match = _normalize_shadow_comparison_text(
         v1_result.get("invoice_number")
     ) == _normalize_shadow_comparison_text(v2_result.get("invoice_number"))
@@ -7466,6 +7559,7 @@ def _compare_invoice_v1_and_v2(v1_result, v2_result):
             {
                 "different_fields": differences,
                 "supplier_tax_id_match": supplier_tax_id_match,
+                "provider_match_reason": provider_match_reason,
             },
             separators=(",", ":"),
             sort_keys=True,
@@ -7518,7 +7612,12 @@ def recalculate_invoice_v2_shadow_comparisons(
             invoice_analysis_jobs_table.c.id == invoice_analysis_shadow_runs_table.c.job_id,
         )
         .where(invoice_analysis_shadow_runs_table.c.status == "completed")
-        .where(invoice_analysis_shadow_runs_table.c.validation_status == "passed")
+        .where(
+            or_(
+                invoice_analysis_shadow_runs_table.c.validation_status == "passed",
+                invoice_analysis_shadow_runs_table.c.accounting_safety_status == "passed",
+            )
+        )
         .where(invoice_analysis_shadow_runs_table.c.result_json.is_not(None))
         .where(invoice_analysis_jobs_table.c.result_json.is_not(None))
         .order_by(invoice_analysis_shadow_runs_table.c.id.asc())
@@ -7560,7 +7659,12 @@ def recalculate_invoice_v2_shadow_comparisons(
                     invoice_analysis_shadow_runs_table.update()
                     .where(invoice_analysis_shadow_runs_table.c.id == run_id)
                     .where(invoice_analysis_shadow_runs_table.c.status == "completed")
-                    .where(invoice_analysis_shadow_runs_table.c.validation_status == "passed")
+                    .where(
+                        or_(
+                            invoice_analysis_shadow_runs_table.c.validation_status == "passed",
+                            invoice_analysis_shadow_runs_table.c.accounting_safety_status == "passed",
+                        )
+                    )
                     .values(
                         **{
                             field: comparison.get(field)
@@ -7736,6 +7840,25 @@ def _finish_invoice_v2_shadow_run(
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
+        for status_field in (
+            "accounting_safety_status",
+            "metadata_quality_status",
+            "invoice_number_evidence_status",
+        ):
+            value = result.get(status_field)
+            if value:
+                values[status_field] = str(value)[:64]
+        for issue_field, database_field in (
+            ("accounting_safety_issues", "accounting_safety_issues_json"),
+            ("metadata_issues", "metadata_issues_json"),
+        ):
+            issue_values = result.get(issue_field)
+            if isinstance(issue_values, list):
+                values[database_field] = json.dumps(
+                    [str(issue)[:128] for issue in issue_values if str(issue).strip()],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
     if isinstance(comparison, dict):
         values.update(
             {
@@ -7850,7 +7973,10 @@ def _run_claimed_invoice_v2_shadow_run(run):
             )
             return True
         comparison = None
-        if result.get("validation_status") == "passed":
+        if (
+            result.get("validation_status") == "passed"
+            or result.get("accounting_safety_status") == "passed"
+        ):
             try:
                 v1_result = json.loads(run.get("v1_result_json") or "{}")
             except (TypeError, json.JSONDecodeError):
