@@ -547,7 +547,7 @@ invoice_analysis_shadow_runs_table = Table(
     Column("metadata_quality_status", String),
     Column("metadata_issues_json", Text),
     Column("invoice_number_evidence_status", String),
-    # Bounded V6 parser metadata. It never contains document text or context.
+    # Bounded V7 parser metadata. It never contains document text or context.
     Column("invoice_parser_diagnostics_json", Text),
     Column("error_type", String),
     Column("attempt_count", Integer, nullable=False, server_default=text("0")),
@@ -6249,7 +6249,7 @@ def async_invoice_analysis_is_available():
     return ASYNC_INVOICE_ANALYSIS_ENABLED and has_private_object_storage()
 
 
-INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v6"
+INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v7"
 INVOICE_V2_SHADOW_ROUTE = "v2_fast_text_native"
 
 
@@ -7301,7 +7301,7 @@ def _bounded_nonnegative_int(value, maximum):
 
 
 def _safe_invoice_parser_diagnostics(value):
-    """Whitelist compact V6 parser metadata without retaining source context."""
+    """Whitelist compact V7 parser metadata without retaining source context."""
     if not isinstance(value, dict):
         return None
     safe_candidates = []
@@ -7333,11 +7333,21 @@ def _safe_invoice_parser_diagnostics(value):
     invoice_date = value.get("invoice_date") if isinstance(value.get("invoice_date"), dict) else {}
     return {
         "parser_revision": str(value.get("parser_revision") or "")[:24],
+        "candidate_detected": bool(value.get("candidate_detected")),
         "invoice_candidates": safe_candidates,
         "secondary_candidate_counts": safe_counts,
         "selected_candidate_type": str(value.get("selected_candidate_type") or "")[:64] or None,
+        "model_normalized_value": re.sub(
+            r"[^A-Za-z0-9]", "", str(value.get("model_normalized_value") or "")
+        )[:128]
+        or None,
+        "selected_candidate_normalized_value": re.sub(
+            r"[^A-Za-z0-9]", "", str(value.get("selected_candidate_normalized_value") or "")
+        )[:128]
+        or None,
         "reconciliation_action": str(value.get("reconciliation_action") or "")[:128] or None,
         "ambiguity_reason": str(value.get("ambiguity_reason") or "")[:128] or None,
+        "conflict_reason": str(value.get("conflict_reason") or "")[:128] or None,
         "invoice_date": {
             "status": str(invoice_date.get("status") or "")[:32] or None,
             "candidate_count": _bounded_nonnegative_int(invoice_date.get("candidate_count"), 99),

@@ -396,9 +396,9 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
         self.assertIn(metadata_review, [row["job_id"] for row in report["review_rows"]])
         self.assertIn(accounting_failed, [row["job_id"] for row in report["review_rows"]])
 
-    def test_v6_rates_use_comparable_denominators_and_never_exceed_one_hundred_percent(self):
+    def test_v7_rates_use_comparable_denominators_and_never_exceed_one_hundred_percent(self):
         self._add_run(
-            shadow_version="v2-sol-text-v6",
+            shadow_version="v2-sol-text-v7",
             validation_status="passed",
             strict_match=True,
             accounting_safety_status="passed",
@@ -408,7 +408,7 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
             invoice_number_evidence_status="confirmed",
         )
         self._add_run(
-            shadow_version="v2-sol-text-v6",
+            shadow_version="v2-sol-text-v7",
             validation_status="failed",
             strict_match=True,
             accounting_safety_status="passed",
@@ -418,7 +418,7 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
             invoice_number_evidence_status="missing",
         )
         self._add_run(
-            shadow_version="v2-sol-text-v6",
+            shadow_version="v2-sol-text-v7",
             validation_status="passed",
             strict_match=False,
             accounting_safety_status="passed",
@@ -428,7 +428,7 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
             invoice_number_evidence_status="confirmed",
         )
         self._add_run(
-            shadow_version="v2-sol-text-v6",
+            shadow_version="v2-sol-text-v7",
             validation_status="failed",
             strict_match=None,
             accounting_safety_status="failed",
@@ -439,8 +439,8 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
         )
 
         report = benchmark.build_benchmark_report(
-            benchmark.load_benchmark_rows(self.engine, shadow_version="v2-sol-text-v6"),
-            {"shadow_version": "v2-sol-text-v6"},
+            benchmark.load_benchmark_rows(self.engine, shadow_version="v2-sol-text-v7"),
+            {"shadow_version": "v2-sol-text-v7"},
         )
         rates = report["rates"]
 
