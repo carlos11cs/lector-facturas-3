@@ -5416,10 +5416,10 @@ def _fast_text_invoice_prompt(company_context: Optional[Dict[str, Any]]) -> str:
     )
 
 
-# V9 parses document identifiers through one typed grammar.  Labels and source
+# V10 parses document identifiers through one typed grammar. Labels and source
 # text are normalized only in memory; neither the compact document text nor its
 # surrounding fragments are persisted by the shadow benchmark.
-_FAST_TEXT_INVOICE_PARSER_REVISION = "v9"
+_FAST_TEXT_INVOICE_PARSER_REVISION = "v10"
 _FAST_TEXT_REPRESENTATION_VERSION = "native_compact_v1"
 _FAST_TEXT_IDENTIFIER_TYPES = {
     "invoice_number",
@@ -5788,17 +5788,39 @@ def _find_fast_text_model_value_matches(
     return matches
 
 
-def _fast_text_label_precedes_match(
-    lines: List[Tuple[int, str]], label_match: re.Match, match: Dict[str, Any], line_index: int
+def _fast_text_label_is_locally_associated_with_match(
+    lines: List[Tuple[int, str]],
+    label_match: re.Match,
+    match: Dict[str, Any],
+    line_index: int,
+    *,
+    allow_reversed_layout: bool,
 ) -> bool:
-    """Require a direct label-to-ID gap with no unrelated alphanumeric token."""
-    if match["start_line"] == line_index:
+    """Require an adjacent label/ID relationship with no intervening token.
+
+    PyMuPDF can invert nearby header fragments in its reading order.  Accept the
+    invoice label immediately before *or* after the complete matched ID, but
+    never bridge an unrelated word, a non-adjacent line or a second identifier.
+    """
+    if match["start_line"] == line_index and label_match.end() <= match["start"]:
         gap = lines[line_index][1][label_match.end() : match["start"]]
     elif match["start_line"] == line_index + 1:
         gap = (
             lines[line_index][1][label_match.end() :]
             + "\n"
             + lines[line_index + 1][1][: match["start"]]
+        )
+    elif (
+        allow_reversed_layout
+        and match["end_line"] == line_index
+        and match["end"] <= label_match.start()
+    ):
+        gap = lines[line_index][1][match["end"] : label_match.start()]
+    elif allow_reversed_layout and match["end_line"] + 1 == line_index:
+        gap = (
+            lines[match["end_line"]][1][match["end"] :]
+            + "\n"
+            + lines[line_index][1][: label_match.start()]
         )
     else:
         return False
@@ -5822,7 +5844,17 @@ def _find_fast_text_model_value_contexts(
         for line_index, (_, line) in enumerate(lines):
             for label_match in label_pattern.finditer(line):
                 for match in matches:
-                    if not _fast_text_label_precedes_match(lines, label_match, match, line_index):
+                    if not _fast_text_label_is_locally_associated_with_match(
+                        lines,
+                        label_match,
+                        match,
+                        line_index,
+                        allow_reversed_layout=(
+                            candidate_type == "invoice_number"
+                            and strength == "strong"
+                            and label_type != "invoice_context"
+                        ),
+                    ):
                         continue
                     key = (candidate_type, label_type, line_index, match["start_line"], match["start"])
                     if key in seen:
@@ -5844,7 +5876,7 @@ def _find_fast_text_model_value_contexts(
 def _inspect_fast_text_model_invoice_number_evidence(
     text: str, normalized_model_value: Optional[str]
 ) -> Dict[str, Any]:
-    """Verify V9's model value against the exact compact model input text."""
+    """Verify V10's model value against the exact compact model input text."""
     representation = _fast_text_document_representation(text)
     matches = _find_fast_text_model_value_matches(
         text, normalized_model_value, representation
@@ -5864,7 +5896,13 @@ def _inspect_fast_text_model_invoice_number_evidence(
         if _fast_text_has_guarded_generic_invoice_context(text, generic_contexts)
         else []
     )
-    if invoice_contexts:
+    if len(matches) > 1:
+        selected = None
+        status = "ambiguous_match"
+    elif invoice_contexts and secondary_contexts:
+        selected = None
+        status = "conflicting_identifier_context"
+    elif invoice_contexts:
         selected = invoice_contexts[0]
         status = "strong_invoice_label"
     elif guarded_generic_contexts:
@@ -5943,7 +5981,7 @@ def _build_fast_text_invoice_parser_diagnostics(
     return {
         "parser_revision": _FAST_TEXT_INVOICE_PARSER_REVISION,
         "candidate_detected": bool(candidates),
-        # Keep invoice_candidates for older diagnostic readers; V9 names the
+        # Keep invoice_candidates for older diagnostic readers; V10 names the
         # same bounded label-first evidence explicitly.
         "invoice_candidates": label_first_candidates,
         "label_first_candidates": label_first_candidates,
@@ -6085,13 +6123,14 @@ def _inspect_fast_text_invoice_number_evidence(text: str) -> Dict[str, Any]:
 def _reconcile_fast_text_invoice_number(
     invoice_number: Optional[str], document_text: str
 ) -> Tuple[Optional[str], List[str], List[str], str, Dict[str, Any]]:
-    """Confirm V9's full model value before using label-first evidence.
+    """Confirm V10's full model value before using label-first evidence.
 
     Native PDF text can place unrelated header values next to an invoice label.
-    A complete model identifier directly associated with a typed invoice label
-    therefore takes precedence over label-first candidates.  The latter remain
-    fail-closed fallback evidence for missing, secondary or contradictory model
-    values.
+    A unique complete model identifier directly associated with a typed invoice
+    label therefore takes precedence over label-first candidates. The local
+    association accepts either reading-order direction to tolerate layout
+    artifacts, while multiple matches and contradictory typed contexts remain
+    fail-closed fallback evidence.
     """
     evidence = _inspect_fast_text_invoice_number_evidence(document_text)
     normalized_model_number = _normalize_fast_text_identifier(invoice_number)
@@ -6112,6 +6151,36 @@ def _reconcile_fast_text_invoice_number(
         return invoice_number, [], ["invoice_number_evidence_ambiguous"], "ambiguous", diagnostics
 
     context_status = model_evidence["model_value_invoice_context_status"]
+    if context_status in {"ambiguous_match", "conflicting_identifier_context"}:
+        diagnostics = _build_fast_text_invoice_parser_diagnostics(
+            evidence,
+            selected_candidate_type=None,
+            action=(
+                "review_ambiguous_complete_model_value_matches"
+                if context_status == "ambiguous_match"
+                else "review_conflicting_model_value_contexts"
+            ),
+            ambiguity_reason=(
+                "multiple_complete_model_value_matches"
+                if context_status == "ambiguous_match"
+                else None
+            ),
+            model_normalized_value=normalized_model_number,
+            conflict_reason=(
+                None
+                if context_status == "ambiguous_match"
+                else "model_value_has_invoice_and_secondary_contexts"
+            ),
+            model_evidence=model_evidence,
+        )
+        issue = (
+            "invoice_number_evidence_ambiguous"
+            if context_status == "ambiguous_match"
+            else "invoice_number_conflicts_with_explicit_label"
+        )
+        status = "ambiguous" if context_status == "ambiguous_match" else "conflict"
+        return invoice_number, [], [issue], status, diagnostics
+
     if context_status in {"strong_invoice_label", "guarded_generic_document_number"}:
         selected_context = model_evidence.get("selected_context") or {}
         diagnostics = _build_fast_text_invoice_parser_diagnostics(

@@ -398,7 +398,7 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
 
     def test_v7_rates_use_comparable_denominators_and_never_exceed_one_hundred_percent(self):
         self._add_run(
-            shadow_version="v2-sol-text-v9",
+            shadow_version="v2-sol-text-v10",
             validation_status="passed",
             strict_match=True,
             accounting_safety_status="passed",
@@ -408,7 +408,7 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
             invoice_number_evidence_status="confirmed",
         )
         self._add_run(
-            shadow_version="v2-sol-text-v9",
+            shadow_version="v2-sol-text-v10",
             validation_status="failed",
             strict_match=True,
             accounting_safety_status="passed",
@@ -418,7 +418,7 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
             invoice_number_evidence_status="missing",
         )
         self._add_run(
-            shadow_version="v2-sol-text-v9",
+            shadow_version="v2-sol-text-v10",
             validation_status="passed",
             strict_match=False,
             accounting_safety_status="passed",
@@ -428,7 +428,7 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
             invoice_number_evidence_status="confirmed",
         )
         self._add_run(
-            shadow_version="v2-sol-text-v9",
+            shadow_version="v2-sol-text-v10",
             validation_status="failed",
             strict_match=None,
             accounting_safety_status="failed",
@@ -439,8 +439,8 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
         )
 
         report = benchmark.build_benchmark_report(
-            benchmark.load_benchmark_rows(self.engine, shadow_version="v2-sol-text-v9"),
-            {"shadow_version": "v2-sol-text-v9"},
+            benchmark.load_benchmark_rows(self.engine, shadow_version="v2-sol-text-v10"),
+            {"shadow_version": "v2-sol-text-v10"},
         )
         rates = report["rates"]
 
