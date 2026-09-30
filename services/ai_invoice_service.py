@@ -3731,6 +3731,7 @@ def prepare_invoice_v2_fast_text(
     base_result: Dict[str, Any] = {
         "eligible": False,
         "reason": "not_pdf",
+        "text_representation_version": _FAST_TEXT_REPRESENTATION_VERSION,
         "page_count": 0,
         "native_text_chars": 0,
         "sent_text_chars": 0,
@@ -5415,10 +5416,11 @@ def _fast_text_invoice_prompt(company_context: Optional[Dict[str, Any]]) -> str:
     )
 
 
-# V8 parses document identifiers through one typed grammar.  Labels and source
+# V9 parses document identifiers through one typed grammar.  Labels and source
 # text are normalized only in memory; neither the compact document text nor its
 # surrounding fragments are persisted by the shadow benchmark.
-_FAST_TEXT_INVOICE_PARSER_REVISION = "v8"
+_FAST_TEXT_INVOICE_PARSER_REVISION = "v9"
+_FAST_TEXT_REPRESENTATION_VERSION = "native_compact_v1"
 _FAST_TEXT_IDENTIFIER_TYPES = {
     "invoice_number",
     "order_reference",
@@ -5515,11 +5517,38 @@ def _normalize_fast_text_parser_line(value: Any) -> str:
 
 
 def _fast_text_parser_lines(text: str) -> List[Tuple[int, str]]:
+    """Return the normalized lines from V2's in-memory document representation."""
     return [
         (index, normalized)
         for index, raw_line in enumerate((text or "").splitlines())
         if (normalized := _normalize_fast_text_parser_line(raw_line))
     ]
+
+
+def _fast_text_document_representation(text: str) -> Dict[str, Any]:
+    """Create the shared V2 text projection used by the model verifier.
+
+    ``text`` is exactly the page-labelled compact string sent to Responses API.
+    This helper only creates in-memory normalized lines and token locations for
+    deterministic matching; it neither extracts the PDF again nor persists text.
+    """
+    lines = _fast_text_parser_lines(text)
+    tokens: List[Dict[str, Any]] = []
+    for line_index, (_, line) in enumerate(lines):
+        for match in re.finditer(r"[A-Z0-9]+", line):
+            tokens.append(
+                {
+                    "line_index": line_index,
+                    "start": match.start(),
+                    "end": match.end(),
+                    "value": match.group(0),
+                }
+            )
+    return {
+        "version": _FAST_TEXT_REPRESENTATION_VERSION,
+        "lines": lines,
+        "tokens": tokens,
+    }
 
 
 def _fast_text_identifier_components(value: str) -> List[re.Match]:
@@ -5572,7 +5601,7 @@ def _extract_fast_text_identifier_value(
 
 
 def _extract_fast_text_typed_identifiers(text: str) -> List[Dict[str, Any]]:
-    """Extract typed candidates using the common V8 document-label grammar."""
+    """Extract typed candidates using the common V9 document-label grammar."""
     lines = _fast_text_parser_lines(text)
     candidates: List[Dict[str, Any]] = []
     seen = set()
@@ -5672,111 +5701,157 @@ def _limited_invoice_parser_candidates(
     ][:limit]
 
 
-def _fast_text_model_identifier_pattern(normalized_value: str) -> re.Pattern:
-    """Match canonical identifier characters while tolerating typography."""
-    separator = r"[\s._/\-]*"
-    return re.compile(separator.join(re.escape(character) for character in normalized_value))
+def _fast_text_tokens_are_contiguous(
+    representation: Dict[str, Any], previous: Dict[str, Any], current: Dict[str, Any]
+) -> bool:
+    """Allow typography-only gaps within a single document identifier."""
+    line_delta = current["line_index"] - previous["line_index"]
+    lines = representation["lines"]
+    if line_delta == 0:
+        gap = lines[previous["line_index"]][1][previous["end"] : current["start"]]
+    elif line_delta == 1:
+        gap = (
+            lines[previous["line_index"]][1][previous["end"] :]
+            + "\n"
+            + lines[current["line_index"]][1][: current["start"]]
+        )
+    else:
+        return False
+    return not any(character.isalnum() for character in gap)
 
 
-def _fast_text_identifier_has_complete_suffix(value: str, end: int) -> bool:
-    """Reject a model value that is only a prefix of a longer identifier."""
-    remainder = value[end:]
-    if not remainder:
-        return True
-    if remainder[0].isalnum():
-        return False
-    continuation = re.match(r"([\s._/\-]+)([A-Z0-9]+)", remainder)
-    if not continuation:
-        return True
-    separators, next_component = continuation.groups()
-    if any(separator in separators for separator in "._/-"):
-        return False
-    return not any(character.isdigit() for character in next_component)
-
-
-def _fast_text_identifier_has_complete_prefix(value: str, start: int) -> bool:
-    """Reject a model value that is only the final component of another ID."""
-    prefix = value[:start]
-    if not prefix:
-        return True
-    if prefix[-1].isalnum():
-        return False
-    preceding = re.search(r"([A-Z0-9]+)([\s._/\-]+)$", prefix)
-    if not preceding:
-        return True
-    previous_component, separators = preceding.groups()
-    if any(separator in separators for separator in "._/-"):
-        return False
-    return not any(character.isdigit() for character in previous_component)
+def _fast_text_model_match_has_complete_boundaries(
+    representation: Dict[str, Any], start_index: int, end_index: int
+) -> bool:
+    """Reject prefix/suffix fragments while allowing label words around an ID."""
+    tokens = representation["tokens"]
+    first = tokens[start_index]
+    last = tokens[end_index]
+    if start_index > 0:
+        previous = tokens[start_index - 1]
+        if _fast_text_tokens_are_contiguous(representation, previous, first) and any(
+            character.isdigit() for character in previous["value"]
+        ):
+            return False
+    if end_index + 1 < len(tokens):
+        following = tokens[end_index + 1]
+        if _fast_text_tokens_are_contiguous(representation, last, following) and any(
+            character.isdigit() for character in following["value"]
+        ):
+            return False
+    return True
 
 
 def _find_fast_text_model_value_matches(
-    text: str, normalized_model_value: Optional[str]
-) -> List[Dict[str, int]]:
-    """Find complete model-value occurrences without accepting suffix fragments."""
-    if not normalized_model_value:
-        return []
-    normalized_text = "\n".join(line for _, line in _fast_text_parser_lines(text))
-    pattern = _fast_text_model_identifier_pattern(normalized_model_value)
-    return [
-        {"start": match.start(), "end": match.end()}
-        for match in pattern.finditer(normalized_text)
-        if _fast_text_identifier_has_complete_prefix(normalized_text, match.start())
-        and _fast_text_identifier_has_complete_suffix(normalized_text, match.end())
-    ]
-
-
-def _find_fast_text_model_value_contexts(
-    text: str, normalized_model_value: Optional[str]
+    text: str,
+    normalized_model_value: Optional[str],
+    representation: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Find the complete model value directly after a typed document label.
+    """Find full IDs by canonical token sequence in V2's shared document text.
 
-    The label and identifier may be split across the next compact-text line,
-    but no intervening alphanumeric token is accepted. This prevents a final
-    series such as ``0625`` from inheriting the label of ``2025IR 0625``.
+    The sequence retains every alphanumeric component and may only bridge
+    typography-only gaps. It therefore accepts ``SF - 012516`` for
+    ``SF012516`` but never accepts ``0625`` as ``2025IR0625``.
     """
     if not normalized_model_value:
         return []
-    model_pattern = _fast_text_model_identifier_pattern(normalized_model_value)
-    lines = _fast_text_parser_lines(text)
+    representation = representation or _fast_text_document_representation(text)
+    tokens = representation["tokens"]
+    matches: List[Dict[str, Any]] = []
+    for start_index, first in enumerate(tokens):
+        sequence = ""
+        for end_index in range(start_index, min(len(tokens), start_index + 16)):
+            current = tokens[end_index]
+            if end_index > start_index and not _fast_text_tokens_are_contiguous(
+                representation, tokens[end_index - 1], current
+            ):
+                break
+            sequence += current["value"]
+            if not normalized_model_value.startswith(sequence):
+                break
+            if sequence != normalized_model_value:
+                continue
+            if not _fast_text_model_match_has_complete_boundaries(
+                representation, start_index, end_index
+            ):
+                break
+            matches.append(
+                {
+                    "start_line": first["line_index"],
+                    "start": first["start"],
+                    "end_line": current["line_index"],
+                    "end": current["end"],
+                    "method": "exact" if start_index == end_index else "canonical_sequence",
+                }
+            )
+            break
+    return matches
+
+
+def _fast_text_label_precedes_match(
+    lines: List[Tuple[int, str]], label_match: re.Match, match: Dict[str, Any], line_index: int
+) -> bool:
+    """Require a direct label-to-ID gap with no unrelated alphanumeric token."""
+    if match["start_line"] == line_index:
+        gap = lines[line_index][1][label_match.end() : match["start"]]
+    elif match["start_line"] == line_index + 1:
+        gap = (
+            lines[line_index][1][label_match.end() :]
+            + "\n"
+            + lines[line_index + 1][1][: match["start"]]
+        )
+    else:
+        return False
+    return not any(character.isalnum() for character in gap)
+
+
+def _find_fast_text_model_value_contexts(
+    text: str,
+    normalized_model_value: Optional[str],
+    matches: List[Dict[str, Any]],
+    representation: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Associate complete canonical matches with the nearest typed document label."""
+    if not normalized_model_value or not matches:
+        return []
+    lines = (representation or _fast_text_document_representation(text))["lines"]
     contexts: List[Dict[str, Any]] = []
     seen = set()
     for candidate_type, label_type, strength, expression in _FAST_TEXT_IDENTIFIER_LABEL_GRAMMAR:
         label_pattern = re.compile(r"(?<![A-Z0-9])(?:" + expression + r")(?![A-Z0-9])")
-        for line_position, (_, line) in enumerate(lines):
-            window = line
-            if line_position + 1 < len(lines):
-                window = f"{line}\n{lines[line_position + 1][1]}"
+        for line_index, (_, line) in enumerate(lines):
             for label_match in label_pattern.finditer(line):
-                remainder = window[label_match.end() :]
-                value_match = re.match(r"^[\s:#\-]*" + model_pattern.pattern, remainder)
-                if not value_match or not _fast_text_identifier_has_complete_suffix(
-                    remainder, value_match.end()
-                ):
-                    continue
-                key = (candidate_type, label_type, line_position)
-                if key in seen:
-                    continue
-                seen.add(key)
-                contexts.append(
-                    {
-                        "type": candidate_type,
-                        "candidate_type": candidate_type,
-                        "normalized_value": normalized_model_value,
-                        "label_type": label_type,
-                        "evidence_strength": strength,
-                        "position": line_position,
-                    }
-                )
+                for match in matches:
+                    if not _fast_text_label_precedes_match(lines, label_match, match, line_index):
+                        continue
+                    key = (candidate_type, label_type, line_index, match["start_line"], match["start"])
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    contexts.append(
+                        {
+                            "type": candidate_type,
+                            "candidate_type": candidate_type,
+                            "normalized_value": normalized_model_value,
+                            "label_type": label_type,
+                            "evidence_strength": strength,
+                            "position": line_index,
+                        }
+                    )
     return contexts
 
 
 def _inspect_fast_text_model_invoice_number_evidence(
     text: str, normalized_model_value: Optional[str]
 ) -> Dict[str, Any]:
-    """Verify the V8 model value before using label-first candidates as fallback."""
-    matches = _find_fast_text_model_value_matches(text, normalized_model_value)
-    contexts = _find_fast_text_model_value_contexts(text, normalized_model_value)
+    """Verify V9's model value against the exact compact model input text."""
+    representation = _fast_text_document_representation(text)
+    matches = _find_fast_text_model_value_matches(
+        text, normalized_model_value, representation
+    )
+    contexts = _find_fast_text_model_value_contexts(
+        text, normalized_model_value, matches, representation
+    )
     invoice_contexts = [context for context in contexts if context["type"] == "invoice_number"]
     generic_contexts = [
         context for context in contexts if context["type"] == "generic_document_number"
@@ -5805,9 +5880,19 @@ def _inspect_fast_text_model_invoice_number_evidence(
         selected = None
         status = "not_found"
     return {
+        "text_representation_version": _FAST_TEXT_REPRESENTATION_VERSION,
+        "model_value_found": bool(matches),
         "model_value_found_in_native_text": bool(matches),
         "model_value_match_count": len(matches),
+        "model_value_match_method": (
+            "exact"
+            if any(match["method"] == "exact" for match in matches)
+            else "canonical_sequence"
+            if matches
+            else "none"
+        ),
         "model_value_invoice_context_status": status,
+        "context_label_type": selected.get("label_type") if selected else None,
         "model_value_context_label_type": selected.get("label_type") if selected else None,
         "model_value_context_candidate_type": selected.get("type") if selected else None,
         "selected_context": selected,
@@ -5858,7 +5943,7 @@ def _build_fast_text_invoice_parser_diagnostics(
     return {
         "parser_revision": _FAST_TEXT_INVOICE_PARSER_REVISION,
         "candidate_detected": bool(candidates),
-        # Keep invoice_candidates for older diagnostic readers; V8 names the
+        # Keep invoice_candidates for older diagnostic readers; V9 names the
         # same bounded label-first evidence explicitly.
         "invoice_candidates": label_first_candidates,
         "label_first_candidates": label_first_candidates,
@@ -5867,16 +5952,21 @@ def _build_fast_text_invoice_parser_diagnostics(
         "selected_candidate": selected_candidate,
         "model_normalized_value": model_normalized_value,
         "selected_candidate_normalized_value": selected_candidate_normalized_value,
+        "text_representation_version": model_evidence.get("text_representation_version"),
+        "model_value_found": bool(model_evidence.get("model_value_found")),
         "model_value_found_in_native_text": bool(
             model_evidence.get("model_value_found_in_native_text")
         ),
         "model_value_match_count": int(model_evidence.get("model_value_match_count") or 0),
+        "model_value_match_method": model_evidence.get("model_value_match_method"),
         "model_value_invoice_context_status": model_evidence.get(
             "model_value_invoice_context_status"
         ),
+        "context_label_type": model_evidence.get("context_label_type"),
         "model_value_context_label_type": model_evidence.get(
             "model_value_context_label_type"
         ),
+        "label_first_candidate": label_first_candidates[0] if label_first_candidates else None,
         "reconciliation_action": action,
         "ambiguity_reason": ambiguity_reason,
         "conflict_reason": conflict_reason,
@@ -5995,7 +6085,7 @@ def _inspect_fast_text_invoice_number_evidence(text: str) -> Dict[str, Any]:
 def _reconcile_fast_text_invoice_number(
     invoice_number: Optional[str], document_text: str
 ) -> Tuple[Optional[str], List[str], List[str], str, Dict[str, Any]]:
-    """Confirm V8's full model value before using label-first evidence.
+    """Confirm V9's full model value before using label-first evidence.
 
     Native PDF text can place unrelated header values next to an invoice label.
     A complete model identifier directly associated with a typed invoice label

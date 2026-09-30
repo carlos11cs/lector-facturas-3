@@ -127,13 +127,16 @@ prioridad. V2 solo se inicia cuando no hay trabajo V1 activo; no usa OCR ni env�
 el PDF, imágenes o texto completo a telemetría. Los resultados comparativos se
 guardan en `invoice_analysis_shadow_runs` y el PDF privado se borra tras V2 o al
 alcanzar el TTL ya existente.
-La variante actual queda identificada como `v2-sol-text-v8`; las ejecuciones
+La variante actual queda identificada como `v2-sol-text-v9`; las ejecuciones
 históricas conservan su versión original y la tabla permite
 comparar varias variantes del mismo trabajo mediante `job_id + shadow_version`.
-V8 confirma el valor completo extraído por el modelo sólo cuando aparece junto
-a una etiqueta fuerte de factura. Los candidatos obtenidos etiqueta-primero se
-mantienen como diagnóstico y fallback conservador, para no confundir números
-reordenados por el texto nativo del PDF con el número de factura real. Pedido,
+V9 verifica el valor completo extraído por el modelo contra la misma
+representación compacta enviada al modelo, mediante secuencias canónicas de
+tokens. Acepta sólo separadores tipográficos entre todos los componentes y exige
+límites completos, por lo que nunca equipara un prefijo o sufijo a otro ID. Los
+candidatos obtenidos etiqueta-primero se mantienen como diagnóstico y fallback
+conservador, para no confundir números reordenados por el texto nativo del PDF
+con el número de factura real. Pedido,
 albarán y otras referencias quedan separados. Un número genérico
 de documento solo puede confirmar bajo una cabecera de factura inmediata. Mantiene
 la reconciliación conservadora de fecha de factura. Los diagnósticos acotados se guardan en
@@ -151,15 +154,15 @@ a S3 y no modifica trabajos, métricas ni resultados.
 ```bash
 # Un lote concreto
 python scripts/invoice_v2_benchmark.py \
-  --version v2-sol-text-v8 \
+  --version v2-sol-text-v9 \
   --batch-id TU_BATCH_ID
 
 # Las últimas 50 ejecuciones de la variante
-python scripts/invoice_v2_benchmark.py --version v2-sol-text-v8 --latest 50
+python scripts/invoice_v2_benchmark.py --version v2-sol-text-v9 --latest 50
 
 # Un rango de trabajos
 python scripts/invoice_v2_benchmark.py \
-  --version v2-sol-text-v8 \
+  --version v2-sol-text-v9 \
   --job-min 40 --job-max 120
 ```
 

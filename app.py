@@ -547,7 +547,7 @@ invoice_analysis_shadow_runs_table = Table(
     Column("metadata_quality_status", String),
     Column("metadata_issues_json", Text),
     Column("invoice_number_evidence_status", String),
-    # Bounded V8 parser metadata. It never contains document text or context.
+    # Bounded V9 parser metadata. It never contains document text or context.
     Column("invoice_parser_diagnostics_json", Text),
     Column("error_type", String),
     Column("attempt_count", Integer, nullable=False, server_default=text("0")),
@@ -6249,7 +6249,7 @@ def async_invoice_analysis_is_available():
     return ASYNC_INVOICE_ANALYSIS_ENABLED and has_private_object_storage()
 
 
-INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v8"
+INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v9"
 INVOICE_V2_SHADOW_ROUTE = "v2_fast_text_native"
 
 
@@ -7301,7 +7301,7 @@ def _bounded_nonnegative_int(value, maximum):
 
 
 def _safe_invoice_parser_diagnostics(value):
-    """Whitelist compact V8 parser metadata without retaining source context."""
+    """Whitelist compact V9 parser metadata without retaining source context."""
     if not isinstance(value, dict):
         return None
 
@@ -7339,13 +7339,14 @@ def _safe_invoice_parser_diagnostics(value):
     return {
         "parser_revision": str(value.get("parser_revision") or "")[:24],
         "candidate_detected": bool(value.get("candidate_detected")),
-        # invoice_candidates remains for older diagnostic readers.  The V8
+        # invoice_candidates remains for older diagnostic readers.  The V9
         # field makes its label-first, fallback-only role explicit.
         "invoice_candidates": safe_candidates,
         "label_first_candidates": safe_candidates,
         "secondary_candidate_counts": safe_counts,
         "selected_candidate_type": str(value.get("selected_candidate_type") or "")[:64] or None,
         "selected_candidate": selected_candidate,
+        "label_first_candidate": safe_candidate(value.get("label_first_candidate")),
         "model_normalized_value": re.sub(
             r"[^A-Za-z0-9]", "", str(value.get("model_normalized_value") or "")
         )[:128]
@@ -7354,6 +7355,11 @@ def _safe_invoice_parser_diagnostics(value):
             r"[^A-Za-z0-9]", "", str(value.get("selected_candidate_normalized_value") or "")
         )[:128]
         or None,
+        "text_representation_version": str(
+            value.get("text_representation_version") or ""
+        )[:64]
+        or None,
+        "model_value_found": bool(value.get("model_value_found")),
         "model_value_found_in_native_text": bool(value.get("model_value_found_in_native_text")),
         "model_value_match_count": _bounded_nonnegative_int(
             value.get("model_value_match_count"), 999
@@ -7362,6 +7368,9 @@ def _safe_invoice_parser_diagnostics(value):
             value.get("model_value_invoice_context_status") or ""
         )[:64]
         or None,
+        "model_value_match_method": str(value.get("model_value_match_method") or "")[:32]
+        or None,
+        "context_label_type": str(value.get("context_label_type") or "")[:64] or None,
         "model_value_context_label_type": str(
             value.get("model_value_context_label_type") or ""
         )[:64]
