@@ -5480,8 +5480,11 @@ _FAST_TEXT_RELATIVE_PAYMENT_TERMS_PATTERN = re.compile(
     r"(?<![0-9/])(?:RECIBO\s+)?([1-9][0-9]{0,2})\s+D[IÍ]AS\s+(?:A\s+)?FECHA\s+FACTURA\b",
     flags=re.IGNORECASE,
 )
+# Native invoices commonly render their issue date with a two-digit year.  The
+# established Ledged date normalizer owns the century policy; this pattern only
+# finds an explicitly invoice-labelled candidate for that normalizer.
 _FAST_TEXT_INVOICE_DATE_PATTERN = re.compile(
-    r"(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{4})(?!\d)"
+    r"(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4})(?!\d)"
 )
 _FAST_TEXT_DATE_EXCLUSION_PATTERN = re.compile(
     r"\b(?:VENCIMIENTO|PAGO|ENTREGA|PEDIDO|ALBARAN|EXPEDICION|ENVIO|DUE|PAYMENT|DELIVERY|ORDER|SHIP(?:PING)?)\b"
@@ -6387,25 +6390,81 @@ def _normalize_fast_text_date(value: Any) -> Optional[str]:
 
 
 def _inspect_fast_text_invoice_date_evidence(document_text: str) -> Dict[str, Any]:
-    """Find one invoice-context date, excluding due, delivery and order dates."""
-    candidates: List[str] = []
+    """Find one invoice-context date from a bounded labelled relationship.
+
+    A label and its date may be split by the PDF reading order.  Accept only a
+    date on the label line or immediately following a strong invoice-date
+    label; this is deliberately narrower than a document-wide date search.
+    """
+    candidates: Dict[str, Dict[str, Any]] = {}
     has_invoice_context = _fast_text_document_has_invoice_context(document_text)
-    for position, (_, line) in enumerate(_fast_text_parser_lines(document_text)):
+    lines = _fast_text_parser_lines(document_text)
+    for position, (_, line) in enumerate(lines):
         if _FAST_TEXT_DATE_EXCLUSION_PATTERN.search(line):
             continue
         strong_context = bool(_FAST_TEXT_INVOICE_DATE_STRONG_PATTERN.search(line))
         contextual_date = bool(_FAST_TEXT_INVOICE_DATE_CONTEXTUAL_PATTERN.search(line))
-        if not strong_context and not (contextual_date and has_invoice_context and position <= 12):
+        previous_line = lines[position - 1][1] if position else ""
+        previous_is_strong_label = bool(
+            _FAST_TEXT_INVOICE_DATE_STRONG_PATTERN.search(previous_line)
+        ) and not _FAST_TEXT_DATE_EXCLUSION_PATTERN.search(previous_line)
+        if not strong_context and not previous_is_strong_label and not (
+            contextual_date and has_invoice_context and position <= 12
+        ):
             continue
         for match in _FAST_TEXT_INVOICE_DATE_PATTERN.finditer(line):
             normalized = _normalize_fast_text_date(match.group(0))
-            if normalized and normalized not in candidates:
-                candidates.append(normalized)
+            if not normalized:
+                continue
+            if previous_is_strong_label and not strong_context:
+                match_method = "next_line_strong_invoice_date_label"
+            elif strong_context:
+                match_method = "same_line_strong_invoice_date_label"
+            else:
+                match_method = "contextual_invoice_date_label"
+            # A two-digit date with day <= 12 is not sufficient to choose a
+            # day/month convention for the automatic fast path. It remains a
+            # review item even though Ledged can preserve the model value.
+            ambiguous_numeric = len(match.group(3)) == 2 and int(match.group(1)) <= 12
+            existing = candidates.get(normalized)
+            if existing is None:
+                candidates[normalized] = {
+                    "match_method": match_method,
+                    "ambiguous_numeric": ambiguous_numeric,
+                }
+            elif not ambiguous_numeric:
+                # A four-digit or day-unambiguous occurrence of the same date
+                # is stronger than an earlier ambiguous two-digit rendering.
+                existing["ambiguous_numeric"] = False
+                existing["match_method"] = match_method
     if len(candidates) == 1:
-        return {"status": "unambiguous", "invoice_date": candidates[0], "candidate_count": 1}
+        invoice_date, candidate = next(iter(candidates.items()))
+        if candidate["ambiguous_numeric"]:
+            return {
+                "status": "ambiguous",
+                "invoice_date": None,
+                "candidate_count": 1,
+                "match_method": "ambiguous_two_digit_invoice_date",
+            }
+        return {
+            "status": "unambiguous",
+            "invoice_date": invoice_date,
+            "candidate_count": 1,
+            "match_method": candidate["match_method"],
+        }
     if len(candidates) > 1:
-        return {"status": "ambiguous", "invoice_date": None, "candidate_count": len(candidates)}
-    return {"status": "missing", "invoice_date": None, "candidate_count": 0}
+        return {
+            "status": "ambiguous",
+            "invoice_date": None,
+            "candidate_count": len(candidates),
+            "match_method": "multiple_invoice_date_candidates",
+        }
+    return {
+        "status": "missing",
+        "invoice_date": None,
+        "candidate_count": 0,
+        "match_method": "invoice_date_label",
+    }
 
 
 def _reconcile_fast_text_invoice_date(
@@ -6417,6 +6476,10 @@ def _reconcile_fast_text_invoice_date(
     diagnostics = {
         "status": evidence["status"],
         "candidate_count": evidence["candidate_count"],
+        "match_method": evidence["match_method"],
+        "model_matches_evidence": bool(
+            normalized_model_date and normalized_model_date == evidence.get("invoice_date")
+        ),
         "reconciliation_action": "kept_model_date",
     }
     if evidence["status"] == "ambiguous":
@@ -6429,6 +6492,7 @@ def _reconcile_fast_text_invoice_date(
         diagnostics["reconciliation_action"] = "confirmed_exact_invoice_date"
         return normalized_model_date, [], [], diagnostics
     diagnostics["reconciliation_action"] = "corrected_from_explicit_invoice_date"
+    diagnostics["model_matches_evidence"] = True
     return (
         evidence["invoice_date"],
         ["invoice_date_corrected_from_explicit_label"],
@@ -6514,7 +6578,9 @@ def _fast_text_local_context(lines: List[str], line_index: int) -> str:
     return "\n".join(lines[start:end])
 
 
-def _verify_fast_text_document_type(document_text: str) -> Dict[str, Any]:
+def _verify_fast_text_document_type(
+    document_text: str, invoice_number_verification: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     lines = _fast_text_lines_with_positions(document_text)
     invoice_lines = [
         line
@@ -6542,6 +6608,16 @@ def _verify_fast_text_document_type(document_text: str) -> Dict[str, Any]:
             match_count=len(contradictory_lines),
             context_type="non_invoice",
             reason="document_header_is_not_an_unambiguous_invoice",
+        )
+    # A number already confirmed under a typed, strong invoice label is
+    # sufficient proof of document type. Do not require a second, unrelated
+    # standalone FACTURA heading that may have been displaced by PDF layout.
+    if (invoice_number_verification or {}).get("status") == "confirmed":
+        return _fast_text_verification(
+            "confirmed",
+            match_method="confirmed_invoice_identifier",
+            match_count=max(int((invoice_number_verification or {}).get("match_count") or 1), 1),
+            context_type="invoice",
         )
     return _fast_text_verification(
         "review",
@@ -6748,16 +6824,131 @@ def _fast_text_money_values_in_line(line: str) -> List[Decimal]:
     return values
 
 
+_FAST_TEXT_TABLE_VALUE_HEADER_PATTERN = re.compile(
+    r"\b(?:IMPORTE|AMOUNT|CUOTA|VALOR|EUROS?|CANTIDAD)\b"
+)
+
+
+def _fast_text_is_label_only_money_table_line(field: str, line: str) -> bool:
+    """Allow a short header bridge, never arbitrary intervening prose."""
+    if _fast_text_money_values_in_line(line):
+        return False
+    remainder = line
+    remainder = _FAST_TEXT_MONEY_CONTEXT_PATTERNS[field].sub(" ", remainder)
+    remainder = _FAST_TEXT_TABLE_VALUE_HEADER_PATTERN.sub(" ", remainder)
+    return bool(line.strip()) and not re.search(r"[A-Z0-9]", remainder)
+
+
+def _fast_text_labeled_money_context_values(
+    field: str, lines: List[str], line_index: int
+) -> List[Decimal]:
+    """Read one bounded label-to-value relationship from native text.
+
+    PDF extraction can place a table's amount header between a semantic label
+    and its value. We may bridge at most two label-only lines; prose, another
+    row or any unlabelled material ends the relationship.
+    """
+    pattern = _FAST_TEXT_MONEY_CONTEXT_PATTERNS[field]
+    line = lines[line_index]
+    values = _fast_text_money_values_in_line(line)
+    if pattern.search(line):
+        if values:
+            return values
+        for offset in (1, 2):
+            next_index = line_index + offset
+            if next_index >= len(lines):
+                break
+            candidate_line = lines[next_index]
+            candidate_values = _fast_text_money_values_in_line(candidate_line)
+            if candidate_values:
+                return candidate_values
+            if not _fast_text_is_label_only_money_table_line(field, candidate_line):
+                break
+        return []
+
+    if line_index:
+        previous = lines[line_index - 1]
+        if pattern.search(previous) and not _fast_text_money_values_in_line(previous):
+            return values
+    return []
+
+
+def _verify_fast_text_optional_adjustment_field(
+    field: str,
+    proposed_value: Any,
+    document_text: str,
+    *,
+    accounting_equation_confirmed: bool,
+) -> Dict[str, Any]:
+    """Distinguish an absent adjustment from a missing required amount.
+
+    A null/zero retention or surcharge is only non-applicable after checking
+    that the native text has no labelled material amount and the invoice
+    equation independently closes without that adjustment.
+    """
+    proposed = _money_decimal(proposed_value)
+    if proposed is not None and abs(proposed) > Decimal("0.01"):
+        return _verify_fast_text_monetary_field(field, proposed_value, document_text)
+
+    lines = _fast_text_lines_with_positions(document_text)
+    pattern = _FAST_TEXT_MONEY_CONTEXT_PATTERNS[field]
+    label_seen = False
+    labelled_values: List[Decimal] = []
+    for line_index, line in enumerate(lines):
+        if not pattern.search(line):
+            continue
+        label_seen = True
+        labelled_values.extend(
+            _fast_text_labeled_money_context_values(field, lines, line_index)
+        )
+
+    material_values = [
+        value for value in labelled_values if abs(value) > Decimal("0.01")
+    ]
+    if material_values:
+        return _fast_text_verification(
+            "contradiction",
+            match_method="labelled_adjustment",
+            match_count=len(material_values),
+            context_type=field,
+            reason=f"{field}_zero_differs_from_document_context",
+        )
+    if label_seen and not labelled_values:
+        return _fast_text_verification(
+            "review",
+            match_method="labelled_adjustment",
+            context_type=field,
+            reason=f"{field}_label_without_amount",
+        )
+    if label_seen:
+        return _fast_text_verification(
+            "not_applicable",
+            match_method="document_zero_adjustment",
+            match_count=len(labelled_values),
+            context_type=field,
+        )
+    if accounting_equation_confirmed:
+        return _fast_text_verification(
+            "not_applicable",
+            match_method="no_document_adjustment",
+            context_type=field,
+        )
+    return _fast_text_verification(
+        "review",
+        match_method="missing_adjustment_context",
+        context_type=field,
+        reason=f"{field}_not_applicable_unproven",
+    )
+
+
 def _verify_fast_text_monetary_field(
-    field: str, proposed_value: Any, document_text: str, *, optional_when_zero: bool = False
+    field: str, proposed_value: Any, document_text: str
 ) -> Dict[str, Any]:
     proposed = _money_decimal(proposed_value)
     if proposed is None:
         return _fast_text_verification(
             "review", match_method="missing", reason=f"{field}_missing"
         )
-    if optional_when_zero and abs(proposed) <= Decimal("0.01"):
-        return _fast_text_verification("not_applicable", match_method="zero_not_applicable")
     pattern = _FAST_TEXT_MONEY_CONTEXT_PATTERNS[field]
     lines = _fast_text_lines_with_positions(document_text)
     document_matches = 0
@@ -6766,16 +6957,13 @@ def _verify_fast_text_monetary_field(
     for line_index, line in enumerate(lines):
         values = _fast_text_money_values_in_line(line)
         document_matches += sum(abs(value - proposed) <= Decimal("0.01") for value in values)
-        current_has_label = bool(pattern.search(line))
-        previous = lines[line_index - 1] if line_index else ""
-        previous_values = _fast_text_money_values_in_line(previous)
-        previous_is_header = bool(pattern.search(previous)) and not previous_values
-        if not current_has_label and not previous_is_header:
+        contextual_line_values = _fast_text_labeled_money_context_values(
+            field, lines, line_index
+        )
+        if not contextual_line_values:
             continue
-        if not values and current_has_label and line_index + 1 < len(lines):
-            values = _fast_text_money_values_in_line(lines[line_index + 1])
-        contextual_values.update(values)
-        if any(abs(value - proposed) <= Decimal("0.01") for value in values):
+        contextual_values.update(contextual_line_values)
+        if any(abs(value - proposed) <= Decimal("0.01") for value in contextual_line_values):
             semantic_matches += 1
     if semantic_matches:
         return _fast_text_verification(
@@ -6799,6 +6987,48 @@ def _verify_fast_text_monetary_field(
         context_type=field if document_matches else None,
         reason=(f"{field}_missing_context" if document_matches else f"{field}_not_found"),
     )
+
+
+_FAST_TEXT_VAT_TABLE_BASE_PATTERN = re.compile(r"\b(?:BASE\s+IMPONIBLE|BASE|TAXABLE\s+BASE)\b")
+_FAST_TEXT_VAT_TABLE_AMOUNT_PATTERN = re.compile(
+    r"\b(?:IVA|VAT|CUOTA(?:\s+TRIBUTARIA)?|IMPUESTO)\b"
+)
+
+
+def _fast_text_has_vat_table_header(value: str) -> bool:
+    """Recognize a fiscal table header, not a generic mention of VAT."""
+    return bool(
+        _FAST_TEXT_VAT_TABLE_BASE_PATTERN.search(value)
+        and _FAST_TEXT_VAT_TABLE_AMOUNT_PATTERN.search(value)
+    )
+
+
+def _fast_text_single_tax_line_in_bounded_table(
+    lines: List[str], rate: Any, base: Decimal, vat: Decimal
+) -> bool:
+    """Confirm one VAT row when column extraction split its cells by lines.
+
+    This intentionally handles only a single material tax line with one rate
+    in a small header-plus-row block. Multiple-rate tables remain fail-closed
+    unless the existing local-row verifier can prove each line independently.
+    """
+    rate_pattern = re.compile(
+        rf"(?<![0-9]){re.escape(format(float(rate), 'g'))}(?:[.,]0+)?\s*%(?![0-9])"
+    )
+    for start in range(len(lines)):
+        header = "\n".join(lines[start : min(len(lines), start + 2)])
+        if not _fast_text_has_vat_table_header(header):
+            continue
+        block = "\n".join(lines[start : min(len(lines), start + 5)])
+        if len(rate_pattern.findall(block)) != 1:
+            continue
+        values = _fast_text_money_values_in_line(block)
+        if (
+            any(abs(value - base) <= Decimal("0.01") for value in values)
+            and any(abs(value - vat) <= Decimal("0.01") for value in values)
+        ):
+            return True
+    return False
 
 
 def _verify_fast_text_vat_breakdown(
@@ -6836,6 +7066,12 @@ def _verify_fast_text_vat_breakdown(
             ):
                 line_confirmed = True
                 break
+        if (
+            not line_confirmed
+            and len(material_lines) == 1
+            and _fast_text_single_tax_line_in_bounded_table(lines, rate, base, vat)
+        ):
+            line_confirmed = True
         if not line_confirmed:
             return _fast_text_verification(
                 "review",
@@ -6884,9 +7120,16 @@ def _verify_fast_text_invoice_date(
     invoice_date: Optional[str], date_diagnostics: Dict[str, Any]
 ) -> Dict[str, Any]:
     status = date_diagnostics.get("status")
-    if status == "unambiguous" and invoice_date:
+    if (
+        status == "unambiguous"
+        and invoice_date
+        and date_diagnostics.get("model_matches_evidence")
+    ):
         return _fast_text_verification(
-            "confirmed", match_method="invoice_date_label", match_count=1, context_type="invoice_date"
+            "confirmed",
+            match_method=str(date_diagnostics.get("match_method") or "invoice_date_label"),
+            match_count=1,
+            context_type="invoice_date",
         )
     if status == "ambiguous":
         return _fast_text_verification(
@@ -6990,15 +7233,19 @@ def _verify_fast_text_document(
         document_text,
         registered_company_tax_id=registered_company_tax_id,
     )
+    invoice_number = _verify_fast_text_invoice_number(
+        invoice_number_evidence_status, invoice_parser_diagnostics
+    )
+    accounting_equation = _verify_fast_text_accounting_equation(normalized)
     verification = {
-        "document_type": _verify_fast_text_document_type(document_text),
+        "document_type": _verify_fast_text_document_type(
+            document_text, invoice_number
+        ),
         "supplier_tax_id": supplier_tax_id,
         "provider_name": _verify_fast_text_provider_name(
             normalized.get("provider_name"), document_text, supplier_tax_id
         ),
-        "invoice_number": _verify_fast_text_invoice_number(
-            invoice_number_evidence_status, invoice_parser_diagnostics
-        ),
+        "invoice_number": invoice_number,
         "invoice_date": _verify_fast_text_invoice_date(
             normalized.get("invoice_date"), invoice_date_diagnostics
         ),
@@ -7011,17 +7258,17 @@ def _verify_fast_text_document(
         "vat_breakdown": _verify_fast_text_vat_breakdown(
             normalized.get("vat_breakdown") or [], document_text
         ),
-        "withholding_amount": _verify_fast_text_monetary_field(
+        "withholding_amount": _verify_fast_text_optional_adjustment_field(
             "withholding_amount",
             normalized.get("withholding_amount"),
             document_text,
-            optional_when_zero=True,
+            accounting_equation_confirmed=accounting_equation["status"] == "confirmed",
         ),
-        "other_taxes_amount": _verify_fast_text_monetary_field(
+        "other_taxes_amount": _verify_fast_text_optional_adjustment_field(
             "other_taxes_amount",
             normalized.get("other_taxes"),
             document_text,
-            optional_when_zero=True,
+            accounting_equation_confirmed=accounting_equation["status"] == "confirmed",
         ),
         "total_amount": _verify_fast_text_monetary_field(
             "total_amount", normalized.get("total_amount"), document_text
@@ -7033,7 +7280,7 @@ def _verify_fast_text_document(
             document_text,
             deterministic_corrections,
         ),
-        "accounting_equation": _verify_fast_text_accounting_equation(normalized),
+        "accounting_equation": accounting_equation,
     }
     verification["document_text"] = _fast_text_verification(
         "confirmed" if document_text_complete else "review",

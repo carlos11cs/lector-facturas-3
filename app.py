@@ -524,7 +524,7 @@ invoice_analysis_shadow_runs_table = Table(
     Column("page_count", Integer),
     Column("native_text_chars", Integer),
     Column("sent_text_chars", Integer),
-    # V11 records only source size/completeness, never the source text itself.
+    # V12 records only source size/completeness, never the source text itself.
     Column("document_text_complete", Boolean),
     Column("document_text_chars_original", Integer),
     Column("document_text_chars_used", Integer),
@@ -542,7 +542,7 @@ invoice_analysis_shadow_runs_table = Table(
     # Strict rollout gate; unlike overall_match, this also requires the supplier tax ID.
     Column("strict_accounting_match", Boolean),
     Column("comparison_json", Text),
-    # V11 keeps the historical comparator intact and adds a separate complete
+    # V12 keeps the historical comparator intact and adds a separate complete
     # comparison that also covers other taxes and currency.
     Column("full_document_match", Boolean),
     Column("full_document_comparison_json", Text),
@@ -555,7 +555,7 @@ invoice_analysis_shadow_runs_table = Table(
     Column("metadata_quality_status", String),
     Column("metadata_issues_json", Text),
     Column("invoice_number_evidence_status", String),
-    # Bounded V11 parser metadata. It never contains document text or context.
+    # Bounded V12 parser metadata. It never contains document text or context.
     Column("invoice_parser_diagnostics_json", Text),
     Column("document_verification_json", Text),
     Column("fast_path_decision", String),
@@ -6284,7 +6284,7 @@ def async_invoice_analysis_is_available():
     return ASYNC_INVOICE_ANALYSIS_ENABLED and has_private_object_storage()
 
 
-INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v11"
+INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v12"
 INVOICE_V2_SHADOW_ROUTE = "v2_fast_text_native"
 
 
@@ -7391,7 +7391,7 @@ def _safe_invoice_parser_diagnostics(value):
     return {
         "parser_revision": str(value.get("parser_revision") or "")[:24],
         "candidate_detected": bool(value.get("candidate_detected")),
-        # invoice_candidates remains for older diagnostic readers. The V11
+        # invoice_candidates remains for older diagnostic readers. The V12
         # field makes its label-first, fallback-only role explicit.
         "invoice_candidates": safe_candidates,
         "label_first_candidates": safe_candidates,
@@ -7465,7 +7465,7 @@ _INVOICE_V2_DOCUMENT_VERIFICATION_STATES = {
 
 
 def _safe_invoice_v2_document_verification(value):
-    """Persist only bounded V11 verification metadata, never source fragments."""
+    """Persist only bounded V12 verification metadata, never source fragments."""
     if not isinstance(value, dict):
         return None
     safe = {}
@@ -7789,7 +7789,7 @@ def _normalize_shadow_currency(value):
 
 
 def _compare_invoice_v1_and_v2_full_document(v1_result, v2_result):
-    """Compare the complete V11 benchmark contract without changing legacy strict."""
+    """Compare the complete V12 benchmark contract without changing legacy strict."""
     legacy = _compare_invoice_v1_and_v2(v1_result, v2_result)
     v1 = _canonical_v1_shadow_result(v1_result)
     v2 = _canonical_v2_shadow_result(v2_result)
@@ -8302,7 +8302,7 @@ def _run_claimed_invoice_v2_shadow_run(run):
         except (TypeError, json.JSONDecodeError):
             v1_result = {}
         # Benchmark comparison is deliberately independent from both the
-        # historical V2 validation and the new V11 verifier decision. It is
+        # historical V2 validation and the new V12 verifier decision. It is
         # available for every structured shadow result, including fallbacks.
         comparison = _compare_invoice_v1_and_v2(v1_result, result)
         full_document_comparison = _compare_invoice_v1_and_v2_full_document(

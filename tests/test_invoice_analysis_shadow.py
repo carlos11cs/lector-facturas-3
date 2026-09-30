@@ -1453,6 +1453,134 @@ class TestInvoiceV2FastText(unittest.TestCase):
         self.assertEqual(american["status"], "confirmed")
         self.assertEqual(line_item["status"], "review")
 
+    def test_v12_treats_null_adjustments_as_not_applicable_after_document_check(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Proveedor Demo SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        structured["invoice"] = {
+            "invoice_number": "F-1", "issue_date": "2026-09-01", "currency": "EUR"
+        }
+        structured["taxes"] = [{"taxable_base": 100, "vat_rate": 21, "vat_amount": 21}]
+        structured["totals"] = {
+            "taxable_base": 100,
+            "vat_amount": 21,
+            "withholding": None,
+            "other_taxes": None,
+            "total": 121,
+        }
+
+        result = self._analyze_fast_text(structured, self._complete_invoice_text())
+
+        self.assertEqual(result["fast_path_decision"], "accept_v2")
+        self.assertEqual(
+            result["document_verification"]["withholding_amount"]["status"],
+            "not_applicable",
+        )
+        self.assertEqual(
+            result["document_verification"]["other_taxes_amount"]["status"],
+            "not_applicable",
+        )
+
+    def test_v12_never_marks_labelled_material_adjustment_as_not_applicable(self):
+        verification = invoice_service._verify_fast_text_optional_adjustment_field(
+            "withholding_amount",
+            None,
+            "RETENCION IRPF: -15,00 EUR",
+            accounting_equation_confirmed=True,
+        )
+
+        self.assertEqual(verification["status"], "contradiction")
+        self.assertEqual(
+            verification["reason"], "withholding_amount_zero_differs_from_document_context"
+        )
+
+    def test_v12_confirms_unambiguous_two_digit_invoice_date_on_next_line(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Proveedor Demo SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        structured["invoice"] = {
+            "invoice_number": "F-1", "issue_date": "2026-09-16", "currency": "EUR"
+        }
+        structured["taxes"] = [{"taxable_base": 100, "vat_rate": 21, "vat_amount": 21}]
+        structured["totals"] = {
+            "taxable_base": 100,
+            "vat_amount": 21,
+            "withholding": 0,
+            "other_taxes": 0,
+            "total": 121,
+        }
+        text = self._complete_invoice_text().replace(
+            "FECHA FACTURA: 01/09/2026", "FECHA FACTURA\n16/09/26"
+        )
+
+        result = self._analyze_fast_text(structured, text)
+
+        self.assertEqual(result["invoice_date"], "2026-09-16")
+        self.assertEqual(result["document_verification"]["invoice_date"]["status"], "confirmed")
+        self.assertEqual(
+            result["document_verification"]["invoice_date"]["match_method"],
+            "next_line_strong_invoice_date_label",
+        )
+
+    def test_v12_keeps_ambiguous_two_digit_date_out_of_fast_path(self):
+        evidence = invoice_service._inspect_fast_text_invoice_date_evidence(
+            "FECHA FACTURA: 07/08/26"
+        )
+
+        self.assertEqual(evidence["status"], "ambiguous")
+        self.assertIsNone(evidence["invoice_date"])
+
+    def test_v12_uses_confirmed_invoice_identifier_as_document_type_proof(self):
+        invoice_number = invoice_service._fast_text_verification(
+            "confirmed",
+            match_method="exact",
+            match_count=1,
+            context_type="invoice_number_short_prefix",
+        )
+
+        verification = invoice_service._verify_fast_text_document_type(
+            "Nº FACT. F-1", invoice_number
+        )
+
+        self.assertEqual(verification["status"], "confirmed")
+        self.assertEqual(verification["match_method"], "confirmed_invoice_identifier")
+
+    def test_v12_confirms_bounded_label_to_value_table_and_rejects_other_headers(self):
+        bounded = invoice_service._verify_fast_text_monetary_field(
+            "total_amount", 121, "TOTAL FACTURA\nIMPORTE\n121,00 EUR"
+        )
+        crossed = invoice_service._verify_fast_text_monetary_field(
+            "total_amount", 121, "TOTAL FACTURA\nIVA\n21,00 EUR\n121,00 EUR"
+        )
+
+        self.assertEqual(bounded["status"], "confirmed")
+        self.assertEqual(crossed["status"], "review")
+
+    def test_v12_confirms_one_vat_row_split_by_a_bounded_table_layout(self):
+        verification = invoice_service._verify_fast_text_vat_breakdown(
+            [{"rate": 21, "base": 100, "vat_amount": 21}],
+            "TIPO IVA BASE IMPONIBLE CUOTA\n21%\n100,00 EUR\n21,00 EUR",
+        )
+
+        self.assertEqual(verification["status"], "confirmed")
+
+    def test_v12_keeps_multiple_rate_vat_table_fail_closed_when_rows_are_split(self):
+        verification = invoice_service._verify_fast_text_vat_breakdown(
+            [
+                {"rate": 10, "base": 100, "vat_amount": 10},
+                {"rate": 21, "base": 100, "vat_amount": 21},
+            ],
+            "TIPO IVA BASE IMPONIBLE CUOTA\n10%\n100,00 EUR\n21%\n10,00 EUR\n21%\n100,00 EUR\n21,00 EUR",
+        )
+
+        self.assertEqual(verification["status"], "review")
+
     def test_v11_supplier_tax_id_rejects_registered_recipient_and_ambiguous_identity(self):
         recipient = invoice_service._verify_fast_text_supplier_tax_id(
             "B05410667",
@@ -1717,7 +1845,7 @@ class TestInvoiceV2ShadowQueue(unittest.TestCase):
                 .order_by(ledger_app.invoice_analysis_shadow_runs_table.c.shadow_version)
             ).scalars().all()
 
-        self.assertEqual(runs, ["v2-next-text-v1", "v2-sol-text-v11"])
+        self.assertEqual(runs, ["v2-next-text-v1", "v2-sol-text-v12"])
 
     def test_ineligible_shadow_is_recorded_without_retaining_source(self):
         job_id = self._create_completed_job()
