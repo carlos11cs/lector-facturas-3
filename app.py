@@ -524,6 +524,10 @@ invoice_analysis_shadow_runs_table = Table(
     Column("page_count", Integer),
     Column("native_text_chars", Integer),
     Column("sent_text_chars", Integer),
+    # V11 records only source size/completeness, never the source text itself.
+    Column("document_text_complete", Boolean),
+    Column("document_text_chars_original", Integer),
+    Column("document_text_chars_used", Integer),
     Column("text_reduction_ratio", Float),
     Column("result_json", Text),
     Column("provider_match", Boolean),
@@ -538,6 +542,10 @@ invoice_analysis_shadow_runs_table = Table(
     # Strict rollout gate; unlike overall_match, this also requires the supplier tax ID.
     Column("strict_accounting_match", Boolean),
     Column("comparison_json", Text),
+    # V11 keeps the historical comparator intact and adds a separate complete
+    # comparison that also covers other taxes and currency.
+    Column("full_document_match", Boolean),
+    Column("full_document_comparison_json", Text),
     # Compact validation codes for benchmark diagnosis; never document evidence.
     Column("validation_errors_json", Text),
     # V5 separates fiscal/accounting integrity from document metadata quality.
@@ -547,8 +555,11 @@ invoice_analysis_shadow_runs_table = Table(
     Column("metadata_quality_status", String),
     Column("metadata_issues_json", Text),
     Column("invoice_number_evidence_status", String),
-    # Bounded V9 parser metadata. It never contains document text or context.
+    # Bounded V11 parser metadata. It never contains document text or context.
     Column("invoice_parser_diagnostics_json", Text),
+    Column("document_verification_json", Text),
+    Column("fast_path_decision", String),
+    Column("fast_path_reasons_json", Text),
     Column("error_type", String),
     Column("attempt_count", Integer, nullable=False, server_default=text("0")),
     Column("lease_token", String),
@@ -1555,6 +1566,30 @@ def init_db():
     )
     add_column_if_missing(
         "invoice_analysis_shadow_runs", "invoice_parser_diagnostics_json", "TEXT"
+    )
+    add_column_if_missing(
+        "invoice_analysis_shadow_runs", "document_text_complete", "BOOLEAN"
+    )
+    add_column_if_missing(
+        "invoice_analysis_shadow_runs", "document_text_chars_original", "INTEGER"
+    )
+    add_column_if_missing(
+        "invoice_analysis_shadow_runs", "document_text_chars_used", "INTEGER"
+    )
+    add_column_if_missing(
+        "invoice_analysis_shadow_runs", "document_verification_json", "TEXT"
+    )
+    add_column_if_missing(
+        "invoice_analysis_shadow_runs", "fast_path_decision", "VARCHAR"
+    )
+    add_column_if_missing(
+        "invoice_analysis_shadow_runs", "fast_path_reasons_json", "TEXT"
+    )
+    add_column_if_missing(
+        "invoice_analysis_shadow_runs", "full_document_match", "BOOLEAN"
+    )
+    add_column_if_missing(
+        "invoice_analysis_shadow_runs", "full_document_comparison_json", "TEXT"
     )
     # The queue uses status/expiry/age to claim work, company/status/age to
     # enforce fairness, and the batch index for progressive client polling.
@@ -6249,7 +6284,7 @@ def async_invoice_analysis_is_available():
     return ASYNC_INVOICE_ANALYSIS_ENABLED and has_private_object_storage()
 
 
-INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v10"
+INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v11"
 INVOICE_V2_SHADOW_ROUTE = "v2_fast_text_native"
 
 
@@ -6299,6 +6334,11 @@ def _create_invoice_v2_shadow_run(job, prepared_text):
         "page_count": max(int(prepared_text.get("page_count") or 0), 0),
         "native_text_chars": max(int(prepared_text.get("native_text_chars") or 0), 0),
         "sent_text_chars": max(int(prepared_text.get("sent_text_chars") or 0), 0),
+        "document_text_complete": bool(prepared_text.get("document_text_complete")),
+        "document_text_chars_original": max(
+            int(prepared_text.get("native_text_chars") or 0), 0
+        ),
+        "document_text_chars_used": max(int(prepared_text.get("sent_text_chars") or 0), 0),
         "text_reduction_ratio": prepared_text.get("size_reduction_ratio"),
         "result_json": None,
         "provider_match": None,
@@ -6312,6 +6352,8 @@ def _create_invoice_v2_shadow_run(job, prepared_text):
         "overall_match": None,
         "strict_accounting_match": None,
         "comparison_json": None,
+        "full_document_match": None,
+        "full_document_comparison_json": None,
         "validation_errors_json": None,
         "accounting_safety_status": None,
         "accounting_safety_issues_json": None,
@@ -6319,6 +6361,16 @@ def _create_invoice_v2_shadow_run(job, prepared_text):
         "metadata_issues_json": None,
         "invoice_number_evidence_status": None,
         "invoice_parser_diagnostics_json": None,
+        "document_verification_json": None,
+        "fast_path_decision": "fallback_v1" if status == "skipped" else None,
+        "fast_path_reasons_json": (
+            json.dumps(
+                [f"eligibility:{str(prepared_text.get('reason') or 'unknown')[:255]}"],
+                separators=(",", ":"),
+            )
+            if status == "skipped"
+            else None
+        ),
         "error_type": None,
         "attempt_count": 0,
         "lease_token": None,
@@ -7301,7 +7353,7 @@ def _bounded_nonnegative_int(value, maximum):
 
 
 def _safe_invoice_parser_diagnostics(value):
-    """Whitelist compact V9 parser metadata without retaining source context."""
+    """Whitelist compact parser metadata without retaining source context."""
     if not isinstance(value, dict):
         return None
 
@@ -7339,7 +7391,7 @@ def _safe_invoice_parser_diagnostics(value):
     return {
         "parser_revision": str(value.get("parser_revision") or "")[:24],
         "candidate_detected": bool(value.get("candidate_detected")),
-        # invoice_candidates remains for older diagnostic readers.  The V9
+        # invoice_candidates remains for older diagnostic readers. The V11
         # field makes its label-first, fallback-only role explicit.
         "invoice_candidates": safe_candidates,
         "label_first_candidates": safe_candidates,
@@ -7385,6 +7437,53 @@ def _safe_invoice_parser_diagnostics(value):
             or None,
         },
     }
+
+
+_INVOICE_V2_DOCUMENT_VERIFICATION_FIELDS = {
+    "document_text",
+    "document_type",
+    "supplier_tax_id",
+    "provider_name",
+    "invoice_number",
+    "invoice_date",
+    "base_amount",
+    "vat_amount",
+    "vat_breakdown",
+    "withholding_amount",
+    "other_taxes_amount",
+    "total_amount",
+    "currency",
+    "payment_dates",
+    "accounting_equation",
+}
+_INVOICE_V2_DOCUMENT_VERIFICATION_STATES = {
+    "confirmed",
+    "review",
+    "contradiction",
+    "not_applicable",
+}
+
+
+def _safe_invoice_v2_document_verification(value):
+    """Persist only bounded V11 verification metadata, never source fragments."""
+    if not isinstance(value, dict):
+        return None
+    safe = {}
+    for field in sorted(_INVOICE_V2_DOCUMENT_VERIFICATION_FIELDS):
+        item = value.get(field)
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "")
+        if status not in _INVOICE_V2_DOCUMENT_VERIFICATION_STATES:
+            continue
+        safe[field] = {
+            "status": status,
+            "match_method": str(item.get("match_method") or "")[:64] or None,
+            "match_count": _bounded_nonnegative_int(item.get("match_count"), 999),
+            "context_type": str(item.get("context_type") or "")[:64] or None,
+            "reason": str(item.get("reason") or "")[:128] or None,
+        }
+    return safe
 
 
 def _normalize_shadow_comparison_text(value, *, entity=False):
@@ -7571,6 +7670,10 @@ def _canonical_v1_shadow_result(v1_result):
             result.get("withholding_amount"), totals.get("withholding")
         ),
         "total_amount": _shadow_first_value(result.get("total_amount"), totals.get("total")),
+        "other_taxes": _shadow_first_value(
+            result.get("other_taxes"), totals.get("other_taxes")
+        ),
+        "currency": _shadow_first_value(result.get("currency"), invoice.get("currency")),
         "vat_breakdown": (
             result.get("vat_breakdown")
             if result.get("vat_breakdown") is not None
@@ -7596,6 +7699,8 @@ def _canonical_v2_shadow_result(v2_result):
         "vat_amount": result.get("vat_amount"),
         "withholding_amount": result.get("withholding_amount"),
         "total_amount": result.get("total_amount"),
+        "other_taxes": result.get("other_taxes"),
+        "currency": result.get("currency"),
         "vat_breakdown": result.get("vat_breakdown"),
         "payment_dates": result.get("payment_dates"),
     }
@@ -7678,6 +7783,56 @@ def _compare_invoice_v1_and_v2(v1_result, v2_result):
     }
 
 
+def _normalize_shadow_currency(value):
+    normalized = str(value or "").strip().upper()
+    return {"€": "EUR", "US$": "USD", "$": "USD", "£": "GBP"}.get(normalized, normalized)
+
+
+def _compare_invoice_v1_and_v2_full_document(v1_result, v2_result):
+    """Compare the complete V11 benchmark contract without changing legacy strict."""
+    legacy = _compare_invoice_v1_and_v2(v1_result, v2_result)
+    v1 = _canonical_v1_shadow_result(v1_result)
+    v2 = _canonical_v2_shadow_result(v2_result)
+    supplier_tax_id_match = _normalize_shadow_tax_id(v1.get("supplier_tax_id")) == _normalize_shadow_tax_id(
+        v2.get("supplier_tax_id")
+    )
+    other_taxes_match = _shadow_amount_matches(v1.get("other_taxes"), v2.get("other_taxes"))
+    currency_match = _normalize_shadow_currency(v1.get("currency")) == _normalize_shadow_currency(
+        v2.get("currency")
+    )
+    vat_amount_match = _shadow_amount_matches(v1.get("vat_amount"), v2.get("vat_amount"))
+    vat_breakdown_match = _shadow_vat_breakdown_matches(
+        v1.get("vat_breakdown"), v2.get("vat_breakdown")
+    )
+    checks = {
+        "provider_match": legacy["provider_match"],
+        "supplier_tax_id_match": supplier_tax_id_match,
+        "invoice_number_match": legacy["invoice_number_match"],
+        "invoice_date_match": legacy["invoice_date_match"],
+        "tax_base_match": legacy["tax_base_match"],
+        "vat_amount_match": vat_amount_match,
+        "vat_breakdown_match": vat_breakdown_match,
+        "withholding_match": legacy["withholding_match"],
+        "other_taxes_match": other_taxes_match,
+        "total_match": legacy["total_match"],
+        "currency_match": currency_match,
+    }
+    differences = [field for field, matches in checks.items() if not matches]
+    return {
+        "full_document_match": not differences,
+        "full_document_comparison_json": json.dumps(
+            {
+                "different_fields": differences,
+                "provider_match_reason": json.loads(legacy["comparison_json"]).get(
+                    "provider_match_reason"
+                ),
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    }
+
+
 _INVOICE_V2_SHADOW_COMPARISON_FIELDS = (
     "provider_match",
     "invoice_number_match",
@@ -7690,6 +7845,8 @@ _INVOICE_V2_SHADOW_COMPARISON_FIELDS = (
     "overall_match",
     "strict_accounting_match",
     "comparison_json",
+    "full_document_match",
+    "full_document_comparison_json",
 )
 
 
@@ -7723,12 +7880,6 @@ def recalculate_invoice_v2_shadow_comparisons(
             invoice_analysis_jobs_table.c.id == invoice_analysis_shadow_runs_table.c.job_id,
         )
         .where(invoice_analysis_shadow_runs_table.c.status == "completed")
-        .where(
-            or_(
-                invoice_analysis_shadow_runs_table.c.validation_status == "passed",
-                invoice_analysis_shadow_runs_table.c.accounting_safety_status == "passed",
-            )
-        )
         .where(invoice_analysis_shadow_runs_table.c.result_json.is_not(None))
         .where(invoice_analysis_jobs_table.c.result_json.is_not(None))
         .order_by(invoice_analysis_shadow_runs_table.c.id.asc())
@@ -7759,7 +7910,16 @@ def recalculate_invoice_v2_shadow_comparisons(
         if not isinstance(v1_result, dict) or not isinstance(v2_result, dict):
             skipped += 1
             continue
-        recalculated.append((row["id"], _compare_invoice_v1_and_v2(v1_result, v2_result)))
+        legacy_comparison = _compare_invoice_v1_and_v2(v1_result, v2_result)
+        recalculated.append(
+            (
+                row["id"],
+                {
+                    **legacy_comparison,
+                    **_compare_invoice_v1_and_v2_full_document(v1_result, v2_result),
+                },
+            )
+        )
 
     updated = 0
     if apply and recalculated:
@@ -7770,12 +7930,6 @@ def recalculate_invoice_v2_shadow_comparisons(
                     invoice_analysis_shadow_runs_table.update()
                     .where(invoice_analysis_shadow_runs_table.c.id == run_id)
                     .where(invoice_analysis_shadow_runs_table.c.status == "completed")
-                    .where(
-                        or_(
-                            invoice_analysis_shadow_runs_table.c.validation_status == "passed",
-                            invoice_analysis_shadow_runs_table.c.accounting_safety_status == "passed",
-                        )
-                    )
                     .values(
                         **{
                             field: comparison.get(field)
@@ -7894,6 +8048,7 @@ def _finish_invoice_v2_shadow_run(
     telemetry=None,
     result=None,
     comparison=None,
+    full_document_comparison=None,
     error_type=None,
 ):
     completed_at = datetime.utcnow().isoformat()
@@ -7917,6 +8072,13 @@ def _finish_invoice_v2_shadow_run(
                 "page_count": max(int(prepared_text.get("page_count") or 0), 0),
                 "native_text_chars": max(int(prepared_text.get("native_text_chars") or 0), 0),
                 "sent_text_chars": max(int(prepared_text.get("sent_text_chars") or 0), 0),
+                "document_text_complete": bool(prepared_text.get("document_text_complete")),
+                "document_text_chars_original": max(
+                    int(prepared_text.get("native_text_chars") or 0), 0
+                ),
+                "document_text_chars_used": max(
+                    int(prepared_text.get("sent_text_chars") or 0), 0
+                ),
                 "text_reduction_ratio": prepared_text.get("size_reduction_ratio"),
             }
         )
@@ -7969,6 +8131,37 @@ def _finish_invoice_v2_shadow_run(
                 separators=(",", ":"),
                 sort_keys=True,
             )
+        document_verification = _safe_invoice_v2_document_verification(
+            result.get("document_verification")
+        )
+        if document_verification is not None:
+            values["document_verification_json"] = json.dumps(
+                document_verification,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        if result.get("fast_path_decision") in {"accept_v2", "fallback_v1"}:
+            values["fast_path_decision"] = result["fast_path_decision"]
+        fast_path_reasons = result.get("fast_path_reasons")
+        if isinstance(fast_path_reasons, list):
+            values["fast_path_reasons_json"] = json.dumps(
+                [str(reason)[:160] for reason in fast_path_reasons if str(reason).strip()][:32],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        for field in (
+            "document_text_complete",
+            "document_text_chars_original",
+            "document_text_chars_used",
+        ):
+            if field in result:
+                value = result.get(field)
+                values[field] = (
+                    bool(value)
+                    if field == "document_text_complete"
+                    else max(int(value or 0), 0)
+                )
         for issue_field, database_field in (
             ("accounting_safety_issues", "accounting_safety_issues_json"),
             ("metadata_issues", "metadata_issues_json"),
@@ -7997,6 +8190,15 @@ def _finish_invoice_v2_shadow_run(
                     "strict_accounting_match",
                     "comparison_json",
                 )
+            }
+        )
+    if isinstance(full_document_comparison, dict):
+        values.update(
+            {
+                "full_document_match": full_document_comparison.get("full_document_match"),
+                "full_document_comparison_json": full_document_comparison.get(
+                    "full_document_comparison_json"
+                ),
             }
         )
     with engine.begin() as conn:
@@ -8094,15 +8296,18 @@ def _run_claimed_invoice_v2_shadow_run(run):
             )
             return True
         comparison = None
-        if (
-            result.get("validation_status") == "passed"
-            or result.get("accounting_safety_status") == "passed"
-        ):
-            try:
-                v1_result = json.loads(run.get("v1_result_json") or "{}")
-            except (TypeError, json.JSONDecodeError):
-                v1_result = {}
-            comparison = _compare_invoice_v1_and_v2(v1_result, result)
+        full_document_comparison = None
+        try:
+            v1_result = json.loads(run.get("v1_result_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            v1_result = {}
+        # Benchmark comparison is deliberately independent from both the
+        # historical V2 validation and the new V11 verifier decision. It is
+        # available for every structured shadow result, including fallbacks.
+        comparison = _compare_invoice_v1_and_v2(v1_result, result)
+        full_document_comparison = _compare_invoice_v1_and_v2_full_document(
+            v1_result, result
+        )
         source_released = _finish_invoice_v2_shadow_run(
             run,
             status="completed",
@@ -8111,6 +8316,7 @@ def _run_claimed_invoice_v2_shadow_run(run):
             telemetry=telemetry,
             result=result,
             comparison=comparison,
+            full_document_comparison=full_document_comparison,
         )
         return True
     except Exception as exc:

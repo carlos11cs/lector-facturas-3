@@ -127,25 +127,27 @@ prioridad. V2 solo se inicia cuando no hay trabajo V1 activo; no usa OCR ni env�
 el PDF, imágenes o texto completo a telemetría. Los resultados comparativos se
 guardan en `invoice_analysis_shadow_runs` y el PDF privado se borra tras V2 o al
 alcanzar el TTL ya existente.
-La variante actual queda identificada como `v2-sol-text-v10`; las ejecuciones
-históricas conservan su versión original y la tabla permite
-comparar varias variantes del mismo trabajo mediante `job_id + shadow_version`.
-V10 verifica el valor completo extraído por el modelo contra la misma
-representación compacta enviada al modelo, mediante secuencias canónicas de
-tokens. Acepta sólo separadores tipográficos entre todos los componentes y exige
-límites completos, por lo que nunca equipara un prefijo o sufijo a otro ID. Los
-candidatos obtenidos etiqueta-primero se mantienen como diagnóstico y fallback
-conservador, para no confundir números reordenados por el texto nativo del PDF
-con el número de factura real. También confirma un valor completo único cuando
-una etiqueta fuerte de factura queda inmediatamente antes o después por un
-artefacto de orden de lectura, pero nunca si hay otro identificador, una etiqueta
-secundaria, varias coincidencias o una distancia no local. Pedido, albarán y
-otras referencias quedan separados. Un número genérico
-de documento solo puede confirmar bajo una cabecera de factura inmediata. Mantiene
-la reconciliación conservadora de fecha de factura. Los diagnósticos acotados se guardan en
-`invoice_parser_diagnostics_json`: solo incluye tipos, valores normalizados de
-identificadores de factura, recuentos y decisiones; nunca texto nativo,
-fragmentos, prompts, imágenes o PDFs.
+La variante actual queda identificada como `v2-sol-text-v11`; las ejecuciones
+históricas conservan su versión original y la tabla permite comparar varias
+variantes del mismo trabajo mediante `job_id + shadow_version`. V11 mantiene
+separados la extracción V2, la verificación documental determinista y la
+comparación V1/V2 de benchmark. La decisión diagnóstica `accept_v2` o
+`fallback_v1` nunca consulta V1: exige PDF digital completo y sin truncar,
+documento inequívocamente clasificado como factura, y confirmación documental
+de todos los campos críticos aplicables. Incluye identidad fiscal del emisor,
+número y fecha de factura, importes, desglose de IVA, retención, otros impuestos,
+total, moneda y ecuación contable. Las fechas de pago se verifican por separado:
+son informativas y no bloquean una decisión contablemente segura.
+
+El número de factura se prueba primero contra el valor completo propuesto por el
+modelo y un contexto local de factura; no acepta prefijos, sufijos ni pedidos o
+albaranes. La identidad fiscal del proveedor se verifica contra el documento y
+no puede coincidir con la empresa receptora registrada. Los importes requieren
+una coincidencia monetaria completa en contexto semántico, no solo una ecuación
+que cuadre. Los diagnósticos persistidos son acotados (`status`, método, recuento,
+contexto y motivo): nunca guardan texto nativo, fragmentos, prompts, imágenes o
+PDFs. V11 sigue siendo exclusivamente shadow: V1 es siempre el único resultado
+visible y contable.
 
 #### Informe de benchmark persistido
 
@@ -157,25 +159,25 @@ a S3 y no modifica trabajos, métricas ni resultados.
 ```bash
 # Un lote concreto
 python scripts/invoice_v2_benchmark.py \
-  --version v2-sol-text-v10 \
+  --version v2-sol-text-v11 \
   --batch-id TU_BATCH_ID
 
 # Las últimas 50 ejecuciones de la variante
-python scripts/invoice_v2_benchmark.py --version v2-sol-text-v10 --latest 50
+python scripts/invoice_v2_benchmark.py --version v2-sol-text-v11 --latest 50
 
 # Un rango de trabajos
 python scripts/invoice_v2_benchmark.py \
-  --version v2-sol-text-v10 \
+  --version v2-sol-text-v11 \
   --job-min 40 --job-max 120
 ```
 
 El informe muestra elegibilidad, validación, `strict_accounting_match`,
-seguridad contable y calidad de metadata por separado, con denominadores
-comparables para evitar porcentajes inválidos, latencias y tokens V1/V2,
-discrepancias por campo, motivos de exclusión y los `job_id` que requieren
-revisión. No imprime PDFs, nombres de archivo, texto extraído, prompts ni
-payloads de resultados. `safe_fast_path_candidate` y `fully_confirmed_fast_path_candidate`
-son solo métricas de benchmark: no cambian la ruta oficial V1.
+`full_document_match`, seguridad contable y calidad de metadata por separado;
+además de las decisiones V11, truncamientos, motivos de fallback y campos que
+no pudieron verificarse. No imprime PDFs, nombres de archivo, texto extraído,
+prompts ni payloads de resultados. `safe_fast_path_candidate`,
+`fully_confirmed_fast_path_candidate` y `accept_v2` son métricas de benchmark:
+no cambian la ruta oficial V1.
 
 ### Descartar un análisis pendiente
 

@@ -30,6 +30,14 @@ _COMPARISON_FIELD_LABELS = {
     "total_match": "total_amount",
     "due_date_match": "payment_dates",
 }
+_FULL_DOCUMENT_COMPARISON_FIELD_LABELS = {
+    **_COMPARISON_FIELD_LABELS,
+    "supplier_tax_id_match": "supplier_tax_id",
+    "vat_amount_match": "vat_amount",
+    "vat_breakdown_match": "vat_breakdown",
+    "other_taxes_match": "other_taxes_amount",
+    "currency_match": "currency",
+}
 _REVIEWABLE_V2_STATUSES = {"failed", "error"}
 _PENDING_V2_STATUSES = {"queued", "processing", "retrying"}
 _TOKEN_FIELDS = (
@@ -184,6 +192,15 @@ def _comparison_differences(row: Mapping[str, Any]) -> set[str]:
     return differences
 
 
+def _full_document_comparison_differences(row: Mapping[str, Any]) -> set[str]:
+    comparison = _safe_json_dict(row.get("full_document_comparison_json"))
+    return {
+        _FULL_DOCUMENT_COMPARISON_FIELD_LABELS[field]
+        for field in comparison.get("different_fields", [])
+        if field in _FULL_DOCUMENT_COMPARISON_FIELD_LABELS
+    }
+
+
 def _numeric_values(rows: Iterable[Mapping[str, Any]], field: str) -> list[float]:
     values = []
     for row in rows:
@@ -274,6 +291,34 @@ def build_benchmark_report(rows: Sequence[Mapping[str, Any]], scope: Mapping[str
     ]
     strict_match_rows = [row for row in normalized_rows if row.get("strict_accounting_match") is True]
     strict_mismatch_rows = [row for row in normalized_rows if row.get("strict_accounting_match") is False]
+    accept_v2_rows = [
+        row
+        for row in normalized_rows
+        if row.get("eligible") is True
+        and row.get("status") == "completed"
+        and row.get("fast_path_decision") == "accept_v2"
+    ]
+    fallback_v1_rows = [
+        row
+        for row in normalized_rows
+        if row.get("eligible") is True
+        and row.get("status") == "completed"
+        and row.get("fast_path_decision") == "fallback_v1"
+    ]
+    full_document_match_rows = [
+        row for row in normalized_rows if row.get("full_document_match") is True
+    ]
+    full_document_mismatch_rows = [
+        row for row in normalized_rows if row.get("full_document_match") is False
+    ]
+    full_document_accept_matches = [
+        row for row in accept_v2_rows if row.get("full_document_match") is True
+    ]
+    truncated_rows = [
+        row
+        for row in normalized_rows
+        if row.get("document_text_complete") is False
+    ]
     comparable_rows = [
         row
         for row in normalized_rows
@@ -411,6 +456,26 @@ def build_benchmark_report(rows: Sequence[Mapping[str, Any]], scope: Mapping[str
             if isinstance(code, str) and code.strip():
                 validation_error_counts[code.strip()] += 1
 
+    fast_path_reason_counts: Counter[str] = Counter()
+    verification_nonconfirmed: dict[str, set[int]] = defaultdict(set)
+    for row in normalized_rows:
+        for reason in _safe_json_list(row.get("fast_path_reasons_json")):
+            if isinstance(reason, str) and reason.strip():
+                fast_path_reason_counts[reason.strip()] += 1
+        verification = _safe_json_dict(row.get("document_verification_json"))
+        for field, detail in verification.items():
+            if not isinstance(detail, dict) or detail.get("status") in {"confirmed", "not_applicable"}:
+                continue
+            if isinstance(row.get("job_id"), int):
+                verification_nonconfirmed[field].add(row["job_id"])
+
+    full_document_discrepancies: dict[str, set[int]] = defaultdict(set)
+    for row in full_document_mismatch_rows:
+        if not isinstance(row.get("job_id"), int):
+            continue
+        for field in _full_document_comparison_differences(row):
+            full_document_discrepancies[field].add(row["job_id"])
+
     ineligible_reasons = Counter(
         str(row.get("eligibility_reason") or "unknown")
         for row in normalized_rows
@@ -471,6 +536,11 @@ def build_benchmark_report(rows: Sequence[Mapping[str, Any]], scope: Mapping[str
             "validation_failed": len(validation_failed_rows),
             "strict_match": len(strict_match_rows),
             "strict_mismatch": len(strict_mismatch_rows),
+            "accept_v2_shadow": len(accept_v2_rows),
+            "fallback_v1_shadow": len(fallback_v1_rows),
+            "full_document_match": len(full_document_match_rows),
+            "full_document_mismatch": len(full_document_mismatch_rows),
+            "document_text_truncated": len(truncated_rows),
             "pending": len(pending_rows),
             "technical_error": len(technical_error_rows),
             "accounting_safety_passed": len(accounting_safe_rows),
@@ -543,9 +613,26 @@ def build_benchmark_report(rows: Sequence[Mapping[str, Any]], scope: Mapping[str
             "fully_confirmed_fast_path_candidate_of_eligible_completed": _percent(
                 len(fully_confirmed_rows), len(eligible_completed_rows)
             ),
+            "accept_v2_shadow_of_eligible_completed": _percent(
+                len(accept_v2_rows), len(eligible_completed_rows)
+            ),
+            "full_document_match_of_accept_v2_shadow": _percent(
+                len(full_document_accept_matches), len(accept_v2_rows)
+            ),
         },
         "safe_fast_path_candidate_count": len(safe_fast_path_rows),
         "fully_confirmed_fast_path_candidate_count": len(fully_confirmed_rows),
+        "fast_path": {
+            "reasons": dict(sorted(fast_path_reason_counts.items())),
+            "verification_failures": {
+                field: {"count": len(job_ids), "job_ids": sorted(job_ids)}
+                for field, job_ids in sorted(verification_nonconfirmed.items())
+            },
+            "full_document_discrepancies": {
+                field: {"count": len(job_ids), "job_ids": sorted(job_ids)}
+                for field, job_ids in sorted(full_document_discrepancies.items())
+            },
+        },
         "latency": {
             "v1_processing_ms": v1_latency,
             "v2_total_ms": v2_latency,
@@ -640,7 +727,15 @@ def load_benchmark_rows(
             shadow_runs.c.metadata_issues_json,
             shadow_runs.c.invoice_number_evidence_status,
             shadow_runs.c.comparison_json,
+            shadow_runs.c.full_document_match,
+            shadow_runs.c.full_document_comparison_json,
             shadow_runs.c.validation_errors_json,
+            shadow_runs.c.document_text_complete,
+            shadow_runs.c.document_text_chars_original,
+            shadow_runs.c.document_text_chars_used,
+            shadow_runs.c.document_verification_json,
+            shadow_runs.c.fast_path_decision,
+            shadow_runs.c.fast_path_reasons_json,
             shadow_runs.c.error_type,
             shadow_runs.c.preprocessing_ms,
             shadow_runs.c.openai_ms,
@@ -708,6 +803,7 @@ def render_benchmark_report(report: Mapping[str, Any]) -> str:
     volume = report["volume"]
     rates = report["rates"]
     latency = report["latency"]
+    fast_path = report["fast_path"]
     lines = [
         "Ledged Invoice Engine V2 - benchmark persistido",
         "=" * 54,
@@ -720,6 +816,8 @@ def render_benchmark_report(report: Mapping[str, Any]) -> str:
         f"  Completados V2: {volume['completed']} | Pendientes: {volume['pending']} | Error técnico: {volume['technical_error']}",
         f"  Validación: passed={volume['validation_passed']} | failed={volume['validation_failed']}",
         f"  Strict accounting: true={volume['strict_match']} | false={volume['strict_mismatch']}",
+        f"  Full document match: true={volume['full_document_match']} | false={volume['full_document_mismatch']}",
+        f"  Texto truncado: {volume['document_text_truncated']}",
         "",
         "ACCOUNTING SAFETY (V5+)",
         f"  Passed: {volume['accounting_safety_passed']} | Failed: {volume['accounting_safety_failed']} | Sin evaluar: {volume['accounting_safety_unassessed']}",
@@ -741,6 +839,11 @@ def render_benchmark_report(report: Mapping[str, Any]) -> str:
         f"  Safe fast path candidate (solo benchmark): {report['safe_fast_path_candidate_count']} ({_format_percent(rates['safe_fast_path_candidate'])})",
         f"  Requerirían fallback a V1 (conceptual): {_format_percent(rates['requires_v1_fallback'])}",
         f"  Fallback por accounting: {volume['fallback_accounting']} | por metadata: {volume['fallback_metadata']} | no elegibles: {volume['fallback_not_eligible']} | sin evaluar o strict mismatch: {volume['fallback_unassessed_or_mismatch']}",
+        "",
+        "DECISIÓN DOCUMENTAL V11 (SOLO SHADOW)",
+        f"  ACCEPT_V2: {volume['accept_v2_shadow']} ({_format_percent(rates['accept_v2_shadow_of_eligible_completed'])} de elegibles completados)",
+        f"  FALLBACK_V1: {volume['fallback_v1_shadow']}",
+        f"  Full document match entre ACCEPT_V2: {_format_percent(rates['full_document_match_of_accept_v2_shadow'])}",
         "",
         "LATENCIA (ms)",
         "  Fuente                         n       media       p50       p95",
@@ -793,6 +896,30 @@ def render_benchmark_report(report: Mapping[str, Any]) -> str:
     else:
         lines.append("  Ninguno")
 
+    lines.extend(["", "MOTIVOS DE FALLBACK V11"])
+    if fast_path["reasons"]:
+        lines.extend(f"  {reason}: {count}" for reason, count in fast_path["reasons"].items())
+    else:
+        lines.append("  Sin datos V11 en el alcance seleccionado.")
+
+    lines.extend(["", "VERIFICACIÓN DOCUMENTAL V11"])
+    if fast_path["verification_failures"]:
+        lines.extend(
+            f"  {field}: {detail['count']} | jobs: {_format_job_ids(detail['job_ids'])}"
+            for field, detail in fast_path["verification_failures"].items()
+        )
+    else:
+        lines.append("  Sin fallos de verificación documentados.")
+
+    lines.extend(["", "DISCREPANCIAS COMPLETAS V11"])
+    if fast_path["full_document_discrepancies"]:
+        lines.extend(
+            f"  {field}: {detail['count']} | jobs: {_format_job_ids(detail['job_ids'])}"
+            for field, detail in fast_path["full_document_discrepancies"].items()
+        )
+    else:
+        lines.append("  Sin datos de comparación completa en el alcance seleccionado.")
+
     lines.extend(["", "ELEGIBILIDAD: motivos de exclusión"])
     if report["eligibility_reasons"]:
         lines.extend(
@@ -835,7 +962,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Informe read-only para benchmarks persistidos de Invoice Engine V2."
     )
-    parser.add_argument("--version", required=True, help="Versión shadow, por ejemplo v2-sol-text-v4.")
+    parser.add_argument("--version", required=True, help="Versión shadow, por ejemplo v2-sol-text-v11.")
     parser.add_argument("--batch-id", help="Restringe el informe a un lote persistido.")
     parser.add_argument("--job-min", type=_positive_int, help="Job ID mínimo inclusivo.")
     parser.add_argument("--job-max", type=_positive_int, help="Job ID máximo inclusivo.")

@@ -52,6 +52,12 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
         metadata_quality_status=None,
         metadata_issues=None,
         invoice_number_evidence_status=None,
+        document_text_complete=None,
+        document_verification=None,
+        fast_path_decision=None,
+        fast_path_reasons=None,
+        full_document_match=None,
+        full_document_comparison=None,
         comparison=None,
         validation_errors=None,
         error_type=None,
@@ -194,6 +200,20 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
                     if metadata_issues is not None
                     else None,
                     invoice_number_evidence_status=invoice_number_evidence_status,
+                    document_text_complete=document_text_complete,
+                    document_text_chars_original=1000 if document_text_complete is not None else None,
+                    document_text_chars_used=1000 if document_text_complete is not None else None,
+                    document_verification_json=json.dumps(document_verification)
+                    if document_verification is not None
+                    else None,
+                    fast_path_decision=fast_path_decision,
+                    fast_path_reasons_json=json.dumps(fast_path_reasons)
+                    if fast_path_reasons is not None
+                    else None,
+                    full_document_match=full_document_match,
+                    full_document_comparison_json=json.dumps(full_document_comparison)
+                    if full_document_comparison is not None
+                    else None,
                     error_type=error_type,
                     attempt_count=1,
                     lease_token=None,
@@ -453,6 +473,58 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
         self.assertEqual(report["volume"]["fallback_metadata"], 1)
         self.assertEqual(report["volume"]["fallback_unassessed_or_mismatch"], 1)
         self.assertTrue(all(0 <= value <= 100 for value in rates.values() if value is not None))
+
+    def test_v11_report_separates_shadow_decision_verification_and_full_comparison(self):
+        accepted = self._add_run(
+            shadow_version="v2-sol-text-v11",
+            fast_path_decision="accept_v2",
+            document_text_complete=True,
+            document_verification={
+                "base_amount": {"status": "confirmed"},
+                "currency": {"status": "confirmed"},
+            },
+            full_document_match=True,
+            full_document_comparison={"different_fields": []},
+        )
+        fallback = self._add_run(
+            shadow_version="v2-sol-text-v11",
+            fast_path_decision="fallback_v1",
+            fast_path_reasons=[
+                "document_text:document_text_truncated",
+                "currency:currency_missing_or_unsupported",
+            ],
+            document_text_complete=False,
+            document_verification={
+                "document_text": {"status": "review"},
+                "currency": {"status": "review"},
+            },
+            full_document_match=False,
+            full_document_comparison={
+                "different_fields": ["other_taxes_match", "currency_match"]
+            },
+        )
+
+        report = benchmark.build_benchmark_report(
+            benchmark.load_benchmark_rows(self.engine, shadow_version="v2-sol-text-v11"),
+            {"shadow_version": "v2-sol-text-v11"},
+        )
+
+        self.assertEqual(report["volume"]["accept_v2_shadow"], 1)
+        self.assertEqual(report["volume"]["fallback_v1_shadow"], 1)
+        self.assertEqual(report["volume"]["document_text_truncated"], 1)
+        self.assertEqual(report["rates"]["accept_v2_shadow_of_eligible_completed"], 50.0)
+        self.assertEqual(report["rates"]["full_document_match_of_accept_v2_shadow"], 100.0)
+        self.assertEqual(report["fast_path"]["reasons"]["currency:currency_missing_or_unsupported"], 1)
+        self.assertEqual(
+            report["fast_path"]["verification_failures"]["currency"]["job_ids"], [fallback]
+        )
+        self.assertEqual(
+            report["fast_path"]["full_document_discrepancies"]["currency"]["job_ids"],
+            [fallback],
+        )
+        self.assertIn(accepted, [row["job_id"] for row in benchmark.load_benchmark_rows(
+            self.engine, shadow_version="v2-sol-text-v11"
+        )])
 
 
 if __name__ == "__main__":

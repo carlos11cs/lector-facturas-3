@@ -3735,6 +3735,7 @@ def prepare_invoice_v2_fast_text(
         "page_count": 0,
         "native_text_chars": 0,
         "sent_text_chars": 0,
+        "document_text_complete": False,
         "size_reduction_ratio": None,
         "text": "",
     }
@@ -3770,6 +3771,7 @@ def prepare_invoice_v2_fast_text(
         base_result["reason"] = "native_text_insufficient"
         return base_result
 
+    document_text_complete = True
     max_chars = _get_invoice_v2_fast_text_max_chars()
     if len(compact_text) > max_chars:
         # Keep document headers and final tax/total blocks instead of silently
@@ -3778,6 +3780,7 @@ def prepare_invoice_v2_fast_text(
         head_size = max(1, int((max_chars - len(marker)) * 0.6))
         tail_size = max(1, max_chars - len(marker) - head_size)
         compact_text = compact_text[:head_size] + marker + compact_text[-tail_size:]
+        document_text_complete = False
 
     sent_text_chars = len(compact_text)
     base_result.update(
@@ -3785,6 +3788,7 @@ def prepare_invoice_v2_fast_text(
             "eligible": True,
             "reason": "native_text_sufficient",
             "sent_text_chars": sent_text_chars,
+            "document_text_complete": document_text_complete,
             "size_reduction_ratio": round(
                 max(0.0, 1 - (sent_text_chars / max(native_text_chars, 1))), 4
             ),
@@ -5416,20 +5420,11 @@ def _fast_text_invoice_prompt(company_context: Optional[Dict[str, Any]]) -> str:
     )
 
 
-# V10 parses document identifiers through one typed grammar. Labels and source
+# V11 parses document identifiers through one typed grammar. Labels and source
 # text are normalized only in memory; neither the compact document text nor its
 # surrounding fragments are persisted by the shadow benchmark.
-_FAST_TEXT_INVOICE_PARSER_REVISION = "v10"
+_FAST_TEXT_INVOICE_PARSER_REVISION = "v11"
 _FAST_TEXT_REPRESENTATION_VERSION = "native_compact_v1"
-_FAST_TEXT_IDENTIFIER_TYPES = {
-    "invoice_number",
-    "order_reference",
-    "delivery_note",
-    "customer_reference",
-    "generic_document_number",
-    "product_reference",
-    "unknown",
-}
 _FAST_TEXT_SECONDARY_IDENTIFIER_TYPES = {
     "order_reference",
     "delivery_note",
@@ -5444,7 +5439,7 @@ _FAST_TEXT_NUMBER_MARKER_NORMALIZATION_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 _FAST_TEXT_IDENTIFIER_LABEL_GRAMMAR = (
-    # Invoice labels.  A bare FACTURA form remains strong only after the
+    # Invoice labels. A bare FACTURA form remains strong only after the
     # extractor verifies one immediate structured identifier.
     ("invoice_number", "invoice_number_prefix", "strong", r"NUMERO\s+(?:DE\s+)?FACTURA"),
     ("invoice_number", "invoice_number_short_prefix", "strong", r"NUMERO\s+(?:DE\s+)?FACT\.?"),
@@ -5495,6 +5490,48 @@ _FAST_TEXT_INVOICE_DATE_STRONG_PATTERN = re.compile(
     r"\b(?:FECHA\s+(?:DE\s+)?FACTURA|FACTURA\b.*\bFECHA|INVOICE\s+DATE)\b"
 )
 _FAST_TEXT_INVOICE_DATE_CONTEXTUAL_PATTERN = re.compile(r"\bDE\s+FECHA\b")
+_FAST_TEXT_DOCUMENT_INVOICE_PATTERN = re.compile(r"\b(?:FACTURA|INVOICE)\b")
+_FAST_TEXT_DOCUMENT_NON_INVOICE_PATTERN = re.compile(
+    r"\b(?:PROFORMA|PEDIDO|ALBARAN|DELIVERY|ORDER|PRESUPUESTO|QUOTE)\b"
+)
+_FAST_TEXT_PROVIDER_CONTEXT_PATTERN = re.compile(
+    r"\b(?:PROVEEDOR|EMISOR(?:A)?|VENDEDOR|SUPPLIER|ISSUER|REMITENTE|"
+    r"DATOS\s+DEL\s+EMISOR|FROM)\b"
+)
+_FAST_TEXT_RECIPIENT_CONTEXT_PATTERN = re.compile(
+    r"\b(?:CLIENTE|RECEPTOR|DESTINATARIO|COMPRADOR|BILL\s+TO|SHIP\s+TO|"
+    r"DIRECCION\s+DE\s+ENTREGA|DELIVERY|TO)\b"
+)
+_FAST_TEXT_TAX_ID_CONTEXT_PATTERN = re.compile(
+    r"\b(?:N\s*\.?\s*I\s*\.?\s*F\s*\.?|C\s*\.?\s*I\s*\.?\s*F\s*\.?|"
+    r"VAT|TAX\s*ID|IDENTIFICACION\s+FISCAL)\b"
+)
+_FAST_TEXT_TAX_ID_TOKEN_PATTERN = re.compile(
+    r"(?<![A-Z0-9])(?:[A-Z]{2}[\s.-]?)?(?:[A-Z]\s*\d(?:[\s.-]?\d){6}[\s.-]?[A-Z0-9]|"
+    r"\d(?:[\s.-]?\d){7}[\s.-]?[A-Z])(?![A-Z0-9])"
+)
+_FAST_TEXT_MONEY_TOKEN_PATTERN = re.compile(
+    r"(?<![A-Z0-9])(?:EUR|USD|GBP|US\$|€|£)?\s*[-+]?"
+    r"(?:\d{1,3}(?:[.,\s]\d{3})+|\d+)(?:[.,]\d{2})?\s*"
+    r"(?:EUR|USD|GBP|US\$|€|£)?(?![A-Z0-9])",
+    flags=re.IGNORECASE,
+)
+_FAST_TEXT_MONEY_CONTEXT_PATTERNS = {
+    "base_amount": re.compile(r"\b(?:BASE\s+IMPONIBLE|BASE\b|SUBTOTAL|TAXABLE\s+BASE)\b"),
+    "vat_amount": re.compile(r"\b(?:TOTAL\s+IVA|IVA|VAT|IMPUESTO)\b"),
+    "withholding_amount": re.compile(r"\b(?:RETENCION|IRPF|WITHHOLDING)\b"),
+    "other_taxes_amount": re.compile(
+        r"\b(?:OTROS\s+IMPUESTOS|OTHER\s+TAXES|RECARGO(?:\s+DE\s+EQUIVALENCIA)?)\b"
+    ),
+    "total_amount": re.compile(
+        r"\b(?:TOTAL\s+(?:FACTURA|A\s+PAGAR|GENERAL)|IMPORTE\s+TOTAL|TOTAL\s*[:#-])\b"
+    ),
+}
+_FAST_TEXT_CURRENCY_MARKERS = {
+    "EUR": re.compile(r"(?:€|\bEUR\b)", flags=re.IGNORECASE),
+    "USD": re.compile(r"(?:US\$|\bUSD\b)", flags=re.IGNORECASE),
+    "GBP": re.compile(r"(?:£|\bGBP\b)", flags=re.IGNORECASE),
+}
 
 
 def _normalize_fast_text_identifier(value: Any) -> Optional[str]:
@@ -5601,7 +5638,7 @@ def _extract_fast_text_identifier_value(
 
 
 def _extract_fast_text_typed_identifiers(text: str) -> List[Dict[str, Any]]:
-    """Extract typed candidates using the common V9 document-label grammar."""
+    """Extract typed candidates using the shared V11 document-label grammar."""
     lines = _fast_text_parser_lines(text)
     candidates: List[Dict[str, Any]] = []
     seen = set()
@@ -5876,7 +5913,7 @@ def _find_fast_text_model_value_contexts(
 def _inspect_fast_text_model_invoice_number_evidence(
     text: str, normalized_model_value: Optional[str]
 ) -> Dict[str, Any]:
-    """Verify V10's model value against the exact compact model input text."""
+    """Verify V11's model value against the exact compact model input text."""
     representation = _fast_text_document_representation(text)
     matches = _find_fast_text_model_value_matches(
         text, normalized_model_value, representation
@@ -5981,7 +6018,7 @@ def _build_fast_text_invoice_parser_diagnostics(
     return {
         "parser_revision": _FAST_TEXT_INVOICE_PARSER_REVISION,
         "candidate_detected": bool(candidates),
-        # Keep invoice_candidates for older diagnostic readers; V10 names the
+        # Keep invoice_candidates for older diagnostic readers; V11 names the
         # same bounded label-first evidence explicitly.
         "invoice_candidates": label_first_candidates,
         "label_first_candidates": label_first_candidates,
@@ -6123,7 +6160,7 @@ def _inspect_fast_text_invoice_number_evidence(text: str) -> Dict[str, Any]:
 def _reconcile_fast_text_invoice_number(
     invoice_number: Optional[str], document_text: str
 ) -> Tuple[Optional[str], List[str], List[str], str, Dict[str, Any]]:
-    """Confirm V10's full model value before using label-first evidence.
+    """Confirm V11's full model value before using label-first evidence.
 
     Native PDF text can place unrelated header values next to an invoice label.
     A unique complete model identifier directly associated with a typed invoice
@@ -6138,6 +6175,33 @@ def _reconcile_fast_text_invoice_number(
         document_text, normalized_model_number
     )
 
+    context_status = model_evidence["model_value_invoice_context_status"]
+
+    # A unique complete model value immediately tied to a typed, strong invoice
+    # label is stronger than unrelated label-first candidates elsewhere in the
+    # compact reading order. This is the only path that can override a remote
+    # candidate ambiguity; an identifier with local secondary context still
+    # falls through to the fail-closed conflict branch below.
+    if (
+        context_status in {"strong_invoice_label", "guarded_generic_document_number"}
+        and evidence["status"] != "ambiguous"
+    ):
+        selected_context = model_evidence.get("selected_context") or {}
+        diagnostics = _build_fast_text_invoice_parser_diagnostics(
+            evidence,
+            selected_candidate_type=selected_context.get("type"),
+            action=(
+                "confirmed_model_value_from_strong_invoice_label"
+                if context_status == "strong_invoice_label"
+                else "confirmed_model_value_from_guarded_generic_document_number"
+            ),
+            ambiguity_reason=None,
+            model_normalized_value=normalized_model_number,
+            selected_candidate_normalized_value=normalized_model_number,
+            model_evidence=model_evidence,
+        )
+        return invoice_number, [], [], "confirmed", diagnostics
+
     if evidence["status"] in {"ambiguous", "contextual_ambiguous", "generic_ambiguous"}:
         diagnostics = _build_fast_text_invoice_parser_diagnostics(
             evidence,
@@ -6150,7 +6214,6 @@ def _reconcile_fast_text_invoice_number(
         )
         return invoice_number, [], ["invoice_number_evidence_ambiguous"], "ambiguous", diagnostics
 
-    context_status = model_evidence["model_value_invoice_context_status"]
     if context_status in {"ambiguous_match", "conflicting_identifier_context"}:
         diagnostics = _build_fast_text_invoice_parser_diagnostics(
             evidence,
@@ -6180,23 +6243,6 @@ def _reconcile_fast_text_invoice_number(
         )
         status = "ambiguous" if context_status == "ambiguous_match" else "conflict"
         return invoice_number, [], [issue], status, diagnostics
-
-    if context_status in {"strong_invoice_label", "guarded_generic_document_number"}:
-        selected_context = model_evidence.get("selected_context") or {}
-        diagnostics = _build_fast_text_invoice_parser_diagnostics(
-            evidence,
-            selected_candidate_type=selected_context.get("type"),
-            action=(
-                "confirmed_model_value_from_strong_invoice_label"
-                if context_status == "strong_invoice_label"
-                else "confirmed_model_value_from_guarded_generic_document_number"
-            ),
-            ambiguity_reason=None,
-            model_normalized_value=normalized_model_number,
-            selected_candidate_normalized_value=normalized_model_number,
-            model_evidence=model_evidence,
-        )
-        return invoice_number, [], [], "confirmed", diagnostics
 
     expected_number = evidence.get("invoice_number")
     normalized_expected_number = _normalize_fast_text_identifier(expected_number)
@@ -6421,6 +6467,599 @@ def _reconcile_fast_text_payment_dates(
     return [due_date], ["due_date_derived_from_payment_terms"]
 
 
+_FAST_TEXT_VERIFICATION_STATES = {"confirmed", "review", "contradiction", "not_applicable"}
+_FAST_TEXT_FAST_PATH_CRITICAL_FIELDS = (
+    "document_type",
+    "supplier_tax_id",
+    "invoice_number",
+    "invoice_date",
+    "base_amount",
+    "vat_amount",
+    "vat_breakdown",
+    "withholding_amount",
+    "other_taxes_amount",
+    "total_amount",
+    "currency",
+)
+
+
+def _fast_text_verification(
+    status: str,
+    *,
+    match_method: str,
+    match_count: int = 0,
+    context_type: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return bounded, source-free evidence suitable for shadow persistence."""
+    if status not in _FAST_TEXT_VERIFICATION_STATES:
+        raise ValueError(f"Unsupported V2 document verification status: {status}")
+    return {
+        "status": status,
+        "match_method": match_method[:64],
+        "match_count": max(0, min(int(match_count or 0), 999)),
+        "context_type": (context_type or "")[:64] or None,
+        "reason": (reason or "")[:128] or None,
+    }
+
+
+def _fast_text_lines_with_positions(text: str) -> List[str]:
+    return [line for _, line in _fast_text_parser_lines(text)]
+
+
+def _fast_text_local_context(lines: List[str], line_index: int) -> str:
+    """Use only a small line window; never infer document-wide relationships."""
+    start = max(0, line_index - 1)
+    end = min(len(lines), line_index + 2)
+    return "\n".join(lines[start:end])
+
+
+def _verify_fast_text_document_type(document_text: str) -> Dict[str, Any]:
+    lines = _fast_text_lines_with_positions(document_text)
+    invoice_lines = [
+        line
+        for line in lines[:20]
+        if _FAST_TEXT_DOCUMENT_INVOICE_PATTERN.search(line)
+        and not _FAST_TEXT_DOCUMENT_NON_INVOICE_PATTERN.search(line)
+    ]
+    if invoice_lines:
+        return _fast_text_verification(
+            "confirmed",
+            match_method="invoice_header",
+            match_count=len(invoice_lines),
+            context_type="invoice",
+        )
+    contradictory_lines = [
+        line
+        for line in lines[:20]
+        if _FAST_TEXT_DOCUMENT_INVOICE_PATTERN.search(line)
+        and _FAST_TEXT_DOCUMENT_NON_INVOICE_PATTERN.search(line)
+    ]
+    if contradictory_lines:
+        return _fast_text_verification(
+            "contradiction",
+            match_method="non_invoice_header",
+            match_count=len(contradictory_lines),
+            context_type="non_invoice",
+            reason="document_header_is_not_an_unambiguous_invoice",
+        )
+    return _fast_text_verification(
+        "review",
+        match_method="invoice_header",
+        reason="invoice_document_type_not_confirmed",
+    )
+
+
+def _fast_text_tax_identifier_candidates(document_text: str) -> List[Dict[str, Any]]:
+    lines = _fast_text_lines_with_positions(document_text)
+    candidates: List[Dict[str, Any]] = []
+    seen = set()
+    for line_index, line in enumerate(lines):
+        # Fiscal labels commonly precede the identifier. Do not include the
+        # following party line, which could belong to the opposite side.
+        context = "\n".join(lines[max(0, line_index - 1) : line_index + 1])
+        for match in _FAST_TEXT_TAX_ID_TOKEN_PATTERN.finditer(line):
+            normalized = _normalize_fast_text_tax_id(match.group(0))
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            candidates.append(
+                {
+                    "value": normalized,
+                    "line_index": line_index,
+                    "provider_context": bool(_FAST_TEXT_PROVIDER_CONTEXT_PATTERN.search(context)),
+                    "recipient_context": bool(_FAST_TEXT_RECIPIENT_CONTEXT_PATTERN.search(context)),
+                    "tax_context": bool(_FAST_TEXT_TAX_ID_CONTEXT_PATTERN.search(context)),
+                }
+            )
+    return candidates
+
+
+def _verify_fast_text_supplier_tax_id(
+    supplier_tax_id: Optional[str],
+    document_text: str,
+    *,
+    registered_company_tax_id: Optional[str],
+) -> Dict[str, Any]:
+    normalized = _normalize_fast_text_tax_id(supplier_tax_id)
+    registered = _normalize_fast_text_tax_id(registered_company_tax_id)
+    if not normalized:
+        return _fast_text_verification(
+            "review", match_method="missing", reason="supplier_tax_id_missing"
+        )
+    if registered and normalized == registered:
+        return _fast_text_verification(
+            "contradiction",
+            match_method="registered_company_tax_id",
+            context_type="recipient",
+            reason="supplier_tax_id_matches_registered_company",
+        )
+    candidates = _fast_text_tax_identifier_candidates(document_text)
+    matches = [candidate for candidate in candidates if candidate["value"] == normalized]
+    if not matches:
+        return _fast_text_verification(
+            "review", match_method="full_identifier", reason="supplier_tax_id_not_found"
+        )
+    if any(candidate["recipient_context"] for candidate in matches):
+        return _fast_text_verification(
+            "contradiction",
+            match_method="full_identifier",
+            match_count=len(matches),
+            context_type="recipient",
+            reason="supplier_tax_id_in_recipient_context",
+        )
+    if any(candidate["provider_context"] for candidate in matches):
+        return _fast_text_verification(
+            "confirmed",
+            match_method="full_identifier",
+            match_count=len(matches),
+            context_type="provider",
+        )
+    candidate_values = {candidate["value"] for candidate in candidates}
+    if candidate_values == {normalized} or (
+        registered and candidate_values.issubset({normalized, registered})
+    ):
+        return _fast_text_verification(
+            "confirmed",
+            match_method="unique_document_tax_id",
+            match_count=len(matches),
+            context_type="tax_id",
+        )
+    return _fast_text_verification(
+        "review",
+        match_method="full_identifier",
+        match_count=len(matches),
+        context_type="tax_id",
+        reason="multiple_unattributed_tax_ids",
+    )
+
+
+def _normalize_fast_text_entity_for_verification(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    tokens = re.findall(r"[A-Za-z0-9]+", normalized.upper())
+    legal_suffixes = {"SL", "SLU", "SA", "SAL", "SCP", "LLC", "LTD", "INC"}
+    return "".join(token for token in tokens if token not in legal_suffixes)
+
+
+def _verify_fast_text_provider_name(
+    provider_name: Optional[str], document_text: str, supplier_tax_verification: Dict[str, Any]
+) -> Dict[str, Any]:
+    normalized = _normalize_fast_text_entity_for_verification(provider_name)
+    if not normalized:
+        return _fast_text_verification(
+            "review", match_method="missing", reason="provider_name_missing"
+        )
+    lines = _fast_text_lines_with_positions(document_text)
+    matches = [
+        line_index
+        for line_index, line in enumerate(lines)
+        if normalized in _normalize_fast_text_entity_for_verification(line)
+    ]
+    if not matches:
+        return _fast_text_verification(
+            "review", match_method="normalized_name", reason="provider_name_not_found"
+        )
+    def party_context(line_index: int) -> str:
+        # A party label may be on the preceding line, but looking ahead can
+        # associate the supplier label with the next recipient name. An
+        # explicit label on the name's own line takes precedence over a
+        # preceding, unrelated party label.
+        current_line = lines[line_index]
+        if (
+            _FAST_TEXT_PROVIDER_CONTEXT_PATTERN.search(current_line)
+            or _FAST_TEXT_RECIPIENT_CONTEXT_PATTERN.search(current_line)
+        ):
+            return current_line
+        return "\n".join(lines[max(0, line_index - 1) : line_index + 1])
+
+    recipient_matches = [
+        line_index
+        for line_index in matches
+        if _FAST_TEXT_RECIPIENT_CONTEXT_PATTERN.search(party_context(line_index))
+    ]
+    provider_matches = [
+        line_index
+        for line_index in matches
+        if _FAST_TEXT_PROVIDER_CONTEXT_PATTERN.search(party_context(line_index))
+    ]
+    # A name found only on the recipient side is a concrete party-role
+    # contradiction. A verified supplier tax ID cannot make that contradictory
+    # provider proposal safe to accept.
+    if recipient_matches and not provider_matches:
+        return _fast_text_verification(
+            "contradiction",
+            match_method="normalized_name",
+            match_count=len(matches),
+            context_type="recipient",
+            reason="provider_name_in_recipient_context",
+        )
+    return _fast_text_verification(
+        "confirmed",
+        match_method="normalized_name",
+        match_count=len(matches),
+        context_type=(
+            "provider"
+            if provider_matches
+            else "document"
+        ),
+    )
+
+
+def _parse_fast_text_money(value: Any) -> Optional[Decimal]:
+    raw = str(value or "").upper().replace("€", "").replace("£", "")
+    raw = raw.replace("EUR", "").replace("USD", "").replace("GBP", "").replace("US$", "")
+    raw = re.sub(r"\s+", "", raw)
+    if not raw or not re.fullmatch(r"[-+]?\d[\d.,]*", raw):
+        return None
+    sign = -1 if raw.startswith("-") else 1
+    raw = raw.lstrip("+-")
+    if "," in raw and "." in raw:
+        decimal_separator = "," if raw.rfind(",") > raw.rfind(".") else "."
+        thousands_separator = "." if decimal_separator == "," else ","
+        normalized = raw.replace(thousands_separator, "").replace(decimal_separator, ".")
+    elif "," in raw or "." in raw:
+        separator = "," if "," in raw else "."
+        left, right = raw.rsplit(separator, 1)
+        if len(right) == 2:
+            normalized = left.replace(separator, "") + "." + right
+        elif len(right) == 3:
+            normalized = raw.replace(separator, "")
+        else:
+            return None
+    else:
+        normalized = raw
+    try:
+        return (Decimal(sign) * Decimal(normalized)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _fast_text_money_values_in_line(line: str) -> List[Decimal]:
+    values = []
+    for match in _FAST_TEXT_MONEY_TOKEN_PATTERN.finditer(line):
+        if match.end() < len(line) and line[match.end()] == "%":
+            continue
+        value = _parse_fast_text_money(match.group(0))
+        if value is not None:
+            values.append(value)
+    return values
+
+
+def _verify_fast_text_monetary_field(
+    field: str, proposed_value: Any, document_text: str, *, optional_when_zero: bool = False
+) -> Dict[str, Any]:
+    proposed = _money_decimal(proposed_value)
+    if proposed is None:
+        return _fast_text_verification(
+            "review", match_method="missing", reason=f"{field}_missing"
+        )
+    if optional_when_zero and abs(proposed) <= Decimal("0.01"):
+        return _fast_text_verification("not_applicable", match_method="zero_not_applicable")
+    pattern = _FAST_TEXT_MONEY_CONTEXT_PATTERNS[field]
+    lines = _fast_text_lines_with_positions(document_text)
+    document_matches = 0
+    semantic_matches = 0
+    contextual_values = set()
+    for line_index, line in enumerate(lines):
+        values = _fast_text_money_values_in_line(line)
+        document_matches += sum(abs(value - proposed) <= Decimal("0.01") for value in values)
+        current_has_label = bool(pattern.search(line))
+        previous = lines[line_index - 1] if line_index else ""
+        previous_values = _fast_text_money_values_in_line(previous)
+        previous_is_header = bool(pattern.search(previous)) and not previous_values
+        if not current_has_label and not previous_is_header:
+            continue
+        if not values and current_has_label and line_index + 1 < len(lines):
+            values = _fast_text_money_values_in_line(lines[line_index + 1])
+        contextual_values.update(values)
+        if any(abs(value - proposed) <= Decimal("0.01") for value in values):
+            semantic_matches += 1
+    if semantic_matches:
+        return _fast_text_verification(
+            "confirmed",
+            match_method="contextual_monetary_value",
+            match_count=semantic_matches,
+            context_type=field,
+        )
+    if contextual_values and len(contextual_values) == 1:
+        return _fast_text_verification(
+            "contradiction",
+            match_method="contextual_monetary_value",
+            match_count=document_matches,
+            context_type=field,
+            reason=f"{field}_differs_from_document_context",
+        )
+    return _fast_text_verification(
+        "review",
+        match_method="document_value" if document_matches else "not_found",
+        match_count=document_matches,
+        context_type=field if document_matches else None,
+        reason=(f"{field}_missing_context" if document_matches else f"{field}_not_found"),
+    )
+
+
+def _verify_fast_text_vat_breakdown(
+    taxes: List[Dict[str, Any]], document_text: str
+) -> Dict[str, Any]:
+    material_lines = [
+        line
+        for line in taxes or []
+        if abs(_money_decimal(line.get("base")) or Decimal("0")) > Decimal("0.01")
+        or abs(_money_decimal(line.get("vat_amount")) or Decimal("0")) > Decimal("0.01")
+    ]
+    if not material_lines:
+        return _fast_text_verification("not_applicable", match_method="zero_tax_lines")
+    lines = _fast_text_lines_with_positions(document_text)
+    confirmed = 0
+    for tax_line in material_lines:
+        rate = tax_line.get("rate")
+        base = _money_decimal(tax_line.get("base"))
+        vat = _money_decimal(tax_line.get("vat_amount"))
+        if rate is None or base is None or vat is None:
+            return _fast_text_verification(
+                "review", match_method="incomplete_tax_line", reason="vat_breakdown_incomplete"
+            )
+        rate_pattern = re.compile(
+            rf"(?<![0-9]){re.escape(format(float(rate), 'g'))}(?:[.,]0+)?\s*%(?![0-9])"
+        )
+        line_confirmed = False
+        for line_index, line in enumerate(lines):
+            context = _fast_text_local_context(lines, line_index)
+            values = _fast_text_money_values_in_line(context)
+            if (
+                rate_pattern.search(context)
+                and any(abs(value - base) <= Decimal("0.01") for value in values)
+                and any(abs(value - vat) <= Decimal("0.01") for value in values)
+            ):
+                line_confirmed = True
+                break
+        if not line_confirmed:
+            return _fast_text_verification(
+                "review",
+                match_method="tax_row",
+                match_count=confirmed,
+                context_type="vat_breakdown",
+                reason="vat_breakdown_line_not_documented",
+            )
+        confirmed += 1
+    return _fast_text_verification(
+        "confirmed", match_method="tax_row", match_count=confirmed, context_type="vat_breakdown"
+    )
+
+
+def _verify_fast_text_currency(currency: Optional[str], document_text: str) -> Dict[str, Any]:
+    normalized = str(currency or "").upper().strip()
+    if normalized not in _FAST_TEXT_CURRENCY_MARKERS:
+        return _fast_text_verification(
+            "review", match_method="currency_marker", reason="currency_missing_or_unsupported"
+        )
+    detected = {
+        code
+        for code, pattern in _FAST_TEXT_CURRENCY_MARKERS.items()
+        if pattern.search(document_text or "")
+    }
+    if normalized in detected and detected == {normalized}:
+        return _fast_text_verification(
+            "confirmed", match_method="currency_marker", match_count=1, context_type=normalized
+        )
+    if normalized not in detected:
+        return _fast_text_verification(
+            "contradiction",
+            match_method="currency_marker",
+            match_count=len(detected),
+            reason="currency_differs_from_document",
+        )
+    return _fast_text_verification(
+        "review",
+        match_method="currency_marker",
+        match_count=len(detected),
+        reason="multiple_document_currencies",
+    )
+
+
+def _verify_fast_text_invoice_date(
+    invoice_date: Optional[str], date_diagnostics: Dict[str, Any]
+) -> Dict[str, Any]:
+    status = date_diagnostics.get("status")
+    if status == "unambiguous" and invoice_date:
+        return _fast_text_verification(
+            "confirmed", match_method="invoice_date_label", match_count=1, context_type="invoice_date"
+        )
+    if status == "ambiguous":
+        return _fast_text_verification(
+            "review", match_method="invoice_date_label", reason="invoice_date_evidence_ambiguous"
+        )
+    return _fast_text_verification(
+        "review", match_method="invoice_date_label", reason="invoice_date_not_documented"
+    )
+
+
+def _verify_fast_text_invoice_number(
+    invoice_number_evidence_status: str, diagnostics: Dict[str, Any]
+) -> Dict[str, Any]:
+    if invoice_number_evidence_status == "confirmed":
+        return _fast_text_verification(
+            "confirmed",
+            match_method=str(diagnostics.get("model_value_match_method") or "label_first"),
+            match_count=diagnostics.get("model_value_match_count") or 1,
+            context_type=diagnostics.get("model_value_context_label_type"),
+        )
+    if invoice_number_evidence_status in {"ambiguous", "conflict"}:
+        return _fast_text_verification(
+            "contradiction",
+            match_method="invoice_identifier",
+            match_count=diagnostics.get("model_value_match_count") or 0,
+            reason=diagnostics.get("conflict_reason") or diagnostics.get("ambiguity_reason"),
+        )
+    return _fast_text_verification(
+        "review",
+        match_method="invoice_identifier",
+        match_count=diagnostics.get("model_value_match_count") or 0,
+        reason=diagnostics.get("conflict_reason") or "invoice_number_not_confirmed",
+    )
+
+
+def _verify_fast_text_payment_dates(
+    payment_dates: List[str],
+    invoice_date: Optional[str],
+    document_text: str,
+    deterministic_corrections: List[str],
+) -> Dict[str, Any]:
+    if not payment_dates:
+        return _fast_text_verification("not_applicable", match_method="no_payment_dates")
+    if "due_date_derived_from_payment_terms" in deterministic_corrections:
+        return _fast_text_verification(
+            "confirmed", match_method="deterministic_payment_terms", match_count=len(payment_dates)
+        )
+    explicit_dates = _find_due_dates_in_due_context(document_text)
+    normalized_payment_dates = []
+    for value in payment_dates:
+        normalized = _normalize_fast_text_date(value)
+        if normalized and normalized not in normalized_payment_dates:
+            normalized_payment_dates.append(normalized)
+    if explicit_dates == normalized_payment_dates:
+        return _fast_text_verification(
+            "confirmed", match_method="explicit_due_date", match_count=len(payment_dates)
+        )
+    if explicit_dates:
+        return _fast_text_verification(
+            "contradiction", match_method="explicit_due_date", reason="payment_dates_differ_from_document"
+        )
+    return _fast_text_verification(
+        "review", match_method="due_date_context", reason="payment_dates_not_documented"
+    )
+
+
+def _verify_fast_text_accounting_equation(normalized: Dict[str, Any]) -> Dict[str, Any]:
+    base = _money_decimal(normalized.get("base_amount"))
+    vat = _money_decimal(normalized.get("vat_amount"))
+    withholding = _money_decimal(normalized.get("withholding_amount")) or Decimal("0.00")
+    other_taxes = _money_decimal(normalized.get("other_taxes")) or Decimal("0.00")
+    total = _money_decimal(normalized.get("total_amount"))
+    if base is None or vat is None or total is None:
+        return _fast_text_verification(
+            "review", match_method="accounting_equation", reason="accounting_values_missing"
+        )
+    expected = (base + vat + other_taxes - abs(withholding)).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+    if abs(expected - total) > Decimal("0.01"):
+        return _fast_text_verification(
+            "contradiction", match_method="accounting_equation", reason="accounting_equation_mismatch"
+        )
+    return _fast_text_verification("confirmed", match_method="accounting_equation")
+
+
+def _verify_fast_text_document(
+    normalized: Dict[str, Any],
+    document_text: str,
+    *,
+    document_text_complete: bool,
+    registered_company_tax_id: Optional[str],
+    invoice_number_evidence_status: str,
+    invoice_parser_diagnostics: Dict[str, Any],
+    invoice_date_diagnostics: Dict[str, Any],
+    deterministic_corrections: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    """Verify V2 proposals against compact native text without extracting anew."""
+    supplier_tax_id = _verify_fast_text_supplier_tax_id(
+        normalized.get("supplier_tax_id"),
+        document_text,
+        registered_company_tax_id=registered_company_tax_id,
+    )
+    verification = {
+        "document_type": _verify_fast_text_document_type(document_text),
+        "supplier_tax_id": supplier_tax_id,
+        "provider_name": _verify_fast_text_provider_name(
+            normalized.get("provider_name"), document_text, supplier_tax_id
+        ),
+        "invoice_number": _verify_fast_text_invoice_number(
+            invoice_number_evidence_status, invoice_parser_diagnostics
+        ),
+        "invoice_date": _verify_fast_text_invoice_date(
+            normalized.get("invoice_date"), invoice_date_diagnostics
+        ),
+        "base_amount": _verify_fast_text_monetary_field(
+            "base_amount", normalized.get("base_amount"), document_text
+        ),
+        "vat_amount": _verify_fast_text_monetary_field(
+            "vat_amount", normalized.get("vat_amount"), document_text
+        ),
+        "vat_breakdown": _verify_fast_text_vat_breakdown(
+            normalized.get("vat_breakdown") or [], document_text
+        ),
+        "withholding_amount": _verify_fast_text_monetary_field(
+            "withholding_amount",
+            normalized.get("withholding_amount"),
+            document_text,
+            optional_when_zero=True,
+        ),
+        "other_taxes_amount": _verify_fast_text_monetary_field(
+            "other_taxes_amount",
+            normalized.get("other_taxes"),
+            document_text,
+            optional_when_zero=True,
+        ),
+        "total_amount": _verify_fast_text_monetary_field(
+            "total_amount", normalized.get("total_amount"), document_text
+        ),
+        "currency": _verify_fast_text_currency(normalized.get("currency"), document_text),
+        "payment_dates": _verify_fast_text_payment_dates(
+            normalized.get("payment_dates") or [],
+            normalized.get("invoice_date"),
+            document_text,
+            deterministic_corrections,
+        ),
+        "accounting_equation": _verify_fast_text_accounting_equation(normalized),
+    }
+    verification["document_text"] = _fast_text_verification(
+        "confirmed" if document_text_complete else "review",
+        match_method="complete_native_text" if document_text_complete else "truncated_native_text",
+        reason=None if document_text_complete else "document_text_truncated",
+    )
+    return verification
+
+
+def _decide_fast_text_fast_path(
+    verification: Dict[str, Dict[str, Any]],
+) -> Tuple[str, List[str]]:
+    """Return a shadow-only, fail-closed V2 decision independent of V1."""
+    reasons: List[str] = []
+    for field in ("document_text",) + _FAST_TEXT_FAST_PATH_CRITICAL_FIELDS + ("accounting_equation",):
+        result = verification.get(field) or {}
+        status = result.get("status")
+        if status in {"confirmed", "not_applicable"}:
+            continue
+        reasons.append(f"{field}:{result.get('reason') or status or 'not_confirmed'}")
+    provider_status = (verification.get("provider_name") or {}).get("status")
+    if provider_status == "contradiction":
+        reasons.append("provider_name:provider_identity_contradiction")
+    return ("accept_v2", []) if not reasons else ("fallback_v1", list(dict.fromkeys(reasons)))
+
+
 def _normalize_fast_text_invoice(structured_data: Dict[str, Any]) -> Dict[str, Any]:
     supplier = structured_data.get("supplier") or {}
     customer = structured_data.get("customer") or {}
@@ -6629,6 +7268,14 @@ def analyze_invoice_v2_fast_text(
             "analysis_status": "skipped",
             "validation_status": "not_applicable",
             "eligibility_reason": prepared.get("reason") or "not_eligible",
+            "document_text_complete": False,
+            "document_text_chars_original": max(int(prepared.get("native_text_chars") or 0), 0),
+            "document_text_chars_used": max(int(prepared.get("sent_text_chars") or 0), 0),
+            "document_verification": {},
+            "fast_path_decision": "fallback_v1",
+            "fast_path_reasons": [
+                f"eligibility:{prepared.get('reason') or 'not_eligible'}"
+            ],
         }
         return _invoice_analysis_telemetry_result(result, telemetry, return_telemetry)
 
@@ -6663,6 +7310,8 @@ def analyze_invoice_v2_fast_text(
                 "detail": exc.detail,
                 "metadata": exc.metadata,
             },
+            "fast_path_decision": "fallback_v1",
+            "fast_path_reasons": ["analysis:v2_response_unavailable"],
         }
         return _invoice_analysis_telemetry_result(result, telemetry, return_telemetry)
     except RuntimeError as exc:
@@ -6671,6 +7320,8 @@ def analyze_invoice_v2_fast_text(
             "validation_status": "not_run",
             "eligibility_reason": prepared.get("reason"),
             "analysis_error": {"status": "configuration_error", "detail": str(exc)},
+            "fast_path_decision": "fallback_v1",
+            "fast_path_reasons": ["analysis:v2_configuration_error"],
         }
         return _invoice_analysis_telemetry_result(result, telemetry, return_telemetry)
 
@@ -6735,6 +7386,25 @@ def analyze_invoice_v2_fast_text(
         and safety_assessment["metadata_quality_status"] == "confirmed"
         else "failed"
     )
+    document_text_complete = bool(
+        prepared.get(
+            "document_text_complete",
+            prepared.get("sent_text_chars") == prepared.get("native_text_chars"),
+        )
+    )
+    document_verification = _verify_fast_text_document(
+        normalized,
+        prepared["text"],
+        document_text_complete=document_text_complete,
+        registered_company_tax_id=normalized_company_context.get("company_tax_id"),
+        invoice_number_evidence_status=invoice_number_evidence_status,
+        invoice_parser_diagnostics=invoice_parser_diagnostics,
+        invoice_date_diagnostics=invoice_date_diagnostics,
+        deterministic_corrections=correction_codes,
+    )
+    fast_path_decision, fast_path_reasons = _decide_fast_text_fast_path(
+        document_verification
+    )
     telemetry["validation_ms"] = round((time.monotonic() - validation_started) * 1000)
     result = {
         "analysis_status": "ok" if validation_status == "passed" else "failed",
@@ -6747,6 +7417,12 @@ def analyze_invoice_v2_fast_text(
             **invoice_parser_diagnostics,
             "invoice_date": invoice_date_diagnostics,
         },
+        "document_text_complete": document_text_complete,
+        "document_text_chars_original": max(int(prepared.get("native_text_chars") or 0), 0),
+        "document_text_chars_used": max(int(prepared.get("sent_text_chars") or 0), 0),
+        "document_verification": document_verification,
+        "fast_path_decision": fast_path_decision,
+        "fast_path_reasons": fast_path_reasons,
         **safety_assessment,
         **normalized,
     }

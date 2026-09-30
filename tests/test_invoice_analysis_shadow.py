@@ -89,6 +89,21 @@ class TestInvoiceV2FastText(unittest.TestCase):
                 prepared_text=prepared,
             )
 
+    def _complete_invoice_text(self, *, currency="EUR", base="100,00", vat="21,00", total="121,00"):
+        marker = {"EUR": "EUR", "USD": "USD", "GBP": "GBP"}[currency]
+        return (
+            "FACTURA\n"
+            "PROVEEDOR: Proveedor Demo, S.L.\n"
+            "NIF: B12345678\n"
+            "CLIENTE: Cliente Demo SL\n"
+            "NIF: B87654321\n"
+            "Nº FACTURA F-1\n"
+            "FECHA FACTURA: 01/09/2026\n"
+            f"BASE IMPONIBLE: {base} {marker}\n"
+            f"IVA 21%: {vat} {marker}\n"
+            f"TOTAL FACTURA: {total} {marker}"
+        )
+
     def test_digital_pdf_is_eligible_and_keeps_page_boundaries(self):
         payload = _digital_pdf_bytes(
             [
@@ -759,7 +774,7 @@ class TestInvoiceV2FastText(unittest.TestCase):
         result = self._analyze_fast_text(structured, source)
 
         diagnostics = result["invoice_parser_diagnostics"]
-        self.assertEqual(diagnostics["parser_revision"], "v10")
+        self.assertEqual(diagnostics["parser_revision"], "v11")
         self.assertLessEqual(len(diagnostics["invoice_candidates"]), 3)
         self.assertLessEqual(len(diagnostics["label_first_candidates"]), 3)
         self.assertTrue(diagnostics["model_value_found_in_native_text"])
@@ -1006,7 +1021,7 @@ class TestInvoiceV2FastText(unittest.TestCase):
 
                 diagnostics = result["invoice_parser_diagnostics"]
                 self.assertEqual(result["invoice_number_evidence_status"], "confirmed")
-                self.assertEqual(diagnostics["parser_revision"], "v10")
+                self.assertEqual(diagnostics["parser_revision"], "v11")
                 self.assertEqual(
                     diagnostics["text_representation_version"], "native_compact_v1"
                 )
@@ -1330,6 +1345,203 @@ class TestInvoiceV2FastText(unittest.TestCase):
         self.assertIn("supplier_tax_id_matches_registered_customer", issues)
         self.assertIn("supplier_matches_customer", issues)
 
+    def test_v11_accepts_only_documentally_confirmed_complete_invoice(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Proveedor Demo SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        structured["invoice"] = {
+            "invoice_number": "F-1", "issue_date": "2026-09-01", "currency": "EUR"
+        }
+        structured["taxes"] = [{"taxable_base": 100, "vat_rate": 21, "vat_amount": 21}]
+        structured["totals"] = {
+            "taxable_base": 100,
+            "vat_amount": 21,
+            "withholding": 0,
+            "other_taxes": 0,
+            "total": 121,
+        }
+        result = self._analyze_fast_text(structured, self._complete_invoice_text())
+
+        self.assertEqual(result["fast_path_decision"], "accept_v2")
+        self.assertEqual(result["document_verification"]["document_type"]["status"], "confirmed")
+        self.assertEqual(result["document_verification"]["supplier_tax_id"]["status"], "confirmed")
+        self.assertEqual(result["document_verification"]["vat_breakdown"]["status"], "confirmed")
+        self.assertEqual(result["document_verification"]["currency"]["status"], "confirmed")
+        self.assertEqual(result["document_verification"]["withholding_amount"]["status"], "not_applicable")
+
+    def test_v11_truncated_text_never_accepts_fast_path(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Proveedor Demo SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        structured["invoice"] = {
+            "invoice_number": "F-1", "issue_date": "2026-09-01", "currency": "EUR"
+        }
+        structured["taxes"] = [{"taxable_base": 100, "vat_rate": 21, "vat_amount": 21}]
+        structured["totals"] = {
+            "taxable_base": 100,
+            "vat_amount": 21,
+            "withholding": 0,
+            "other_taxes": 0,
+            "total": 121,
+        }
+        text = self._complete_invoice_text()
+        prepared = {
+            "eligible": True,
+            "reason": "native_text_sufficient",
+            "page_count": 1,
+            "native_text_chars": len(text) + 100,
+            "sent_text_chars": len(text),
+            "document_text_complete": False,
+            "text": "[PÁGINA 1]\n" + text,
+        }
+        with patch.object(invoice_service, "_get_client", return_value=object()), patch.object(
+            invoice_service, "_get_invoice_model", return_value="gpt-5.6-sol"
+        ), patch.object(invoice_service, "_call_invoice_responses", return_value=structured):
+            result = invoice_service.analyze_invoice_v2_fast_text(
+                file_bytes=b"unused",
+                filename="factura.pdf",
+                mime_type="application/pdf",
+                prepared_text=prepared,
+            )
+
+        self.assertEqual(result["fast_path_decision"], "fallback_v1")
+        self.assertIn("document_text:document_text_truncated", result["fast_path_reasons"])
+
+    def test_v11_rejects_documentary_monetary_difference_despite_valid_equation(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Proveedor Demo SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        structured["invoice"] = {
+            "invoice_number": "F-1", "issue_date": "2026-09-01", "currency": "EUR"
+        }
+        structured["taxes"] = [{"taxable_base": 100, "vat_rate": 21, "vat_amount": 21}]
+        structured["totals"] = {
+            "taxable_base": 100,
+            "vat_amount": 21,
+            "withholding": 0,
+            "other_taxes": 0,
+            "total": 121,
+        }
+        source = self._complete_invoice_text(base="110,00", vat="11,00", total="121,00")
+        result = self._analyze_fast_text(structured, source)
+
+        self.assertEqual(result["accounting_safety_status"], "passed")
+        self.assertEqual(result["document_verification"]["base_amount"]["status"], "contradiction")
+        self.assertEqual(result["fast_path_decision"], "fallback_v1")
+
+    def test_v11_monetary_parser_accepts_european_and_us_formats_but_not_line_items(self):
+        european = invoice_service._verify_fast_text_monetary_field(
+            "base_amount", 1250.00, "BASE IMPONIBLE: € 1.250,00"
+        )
+        american = invoice_service._verify_fast_text_monetary_field(
+            "base_amount", 1250.00, "TAXABLE BASE: US$ 1,250.00"
+        )
+        line_item = invoice_service._verify_fast_text_monetary_field(
+            "total_amount", 1250.00, "ARTICULO SERVICIO 1.250,00 EUR"
+        )
+
+        self.assertEqual(european["status"], "confirmed")
+        self.assertEqual(american["status"], "confirmed")
+        self.assertEqual(line_item["status"], "review")
+
+    def test_v11_supplier_tax_id_rejects_registered_recipient_and_ambiguous_identity(self):
+        recipient = invoice_service._verify_fast_text_supplier_tax_id(
+            "B05410667",
+            "CLIENTE: KALOS HEALTH AND BEAUTY SL\nNIF B05410667",
+            registered_company_tax_id="B05410667",
+        )
+        ambiguous = invoice_service._verify_fast_text_supplier_tax_id(
+            "B12345678",
+            "NIF B12345678\nNIF B87654321",
+            registered_company_tax_id=None,
+        )
+
+        self.assertEqual(recipient["status"], "contradiction")
+        self.assertEqual(ambiguous["status"], "review")
+
+    def test_v11_provider_name_in_recipient_context_forces_fallback(self):
+        supplier_tax_verification = invoice_service._fast_text_verification(
+            "confirmed",
+            match_method="full_identifier",
+            context_type="provider",
+        )
+
+        verification = invoice_service._verify_fast_text_provider_name(
+            "Cliente Demo SL",
+            "PROVEEDOR: Proveedor Demo SL\nCLIENTE: Cliente Demo SL",
+            supplier_tax_verification,
+        )
+
+        self.assertEqual(verification["status"], "contradiction")
+        self.assertEqual(verification["reason"], "provider_name_in_recipient_context")
+
+    def test_v11_currency_requires_one_documentary_currency(self):
+        self.assertEqual(
+            invoice_service._verify_fast_text_currency("EUR", "TOTAL FACTURA: 121,00 €")[
+                "status"
+            ],
+            "confirmed",
+        )
+        self.assertEqual(
+            invoice_service._verify_fast_text_currency(
+                "EUR", "TOTAL EUR 121,00\nTOTAL USD 130,00"
+            )["status"],
+            "review",
+        )
+
+    def test_v11_model_first_confirmation_survives_remote_label_first_noise(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Proveedor Demo SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        structured["invoice"]["invoice_number"] = "A141949"
+        bogus_evidence = {
+            "status": "contextual_ambiguous",
+            "invoice_number": None,
+            "invoice_candidates": [],
+            "reference_identifiers": set(),
+            "candidates": [],
+            "selected_candidate_type": None,
+        }
+        with patch.object(
+            invoice_service,
+            "_inspect_fast_text_invoice_number_evidence",
+            return_value=bogus_evidence,
+        ):
+            result = self._analyze_fast_text(structured, "Nº FACTURA A141949")
+
+        self.assertEqual(result["invoice_number_evidence_status"], "confirmed")
+        self.assertEqual(
+            result["invoice_parser_diagnostics"]["reconciliation_action"],
+            "confirmed_model_value_from_strong_invoice_label",
+        )
+
+    def test_v11_multiple_strong_invoice_ids_remain_fail_closed(self):
+        structured = _fast_text_invoice_payload(
+            supplier_name="Proveedor Demo SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        structured["invoice"]["invoice_number"] = "F-1"
+        result = self._analyze_fast_text(
+            structured, "Nº FACTURA F-1\nFACTURA Nº F-2"
+        )
+
+        self.assertEqual(result["invoice_number_evidence_status"], "ambiguous")
+        self.assertEqual(result["fast_path_decision"], "fallback_v1")
+
 
 class TestInvoiceV2ShadowQueue(unittest.TestCase):
     def setUp(self):
@@ -1505,7 +1717,7 @@ class TestInvoiceV2ShadowQueue(unittest.TestCase):
                 .order_by(ledger_app.invoice_analysis_shadow_runs_table.c.shadow_version)
             ).scalars().all()
 
-        self.assertEqual(runs, ["v2-next-text-v1", "v2-sol-text-v10"])
+        self.assertEqual(runs, ["v2-next-text-v1", "v2-sol-text-v11"])
 
     def test_ineligible_shadow_is_recorded_without_retaining_source(self):
         job_id = self._create_completed_job()
@@ -1865,6 +2077,67 @@ class TestInvoiceV2ShadowQueue(unittest.TestCase):
                 self.assertTrue(comparison["overall_match"])
                 self.assertTrue(comparison["strict_accounting_match"])
 
+    def test_v11_full_document_comparison_adds_other_taxes_and_currency(self):
+        v1 = self._v1_production_result("Q000144/2026")
+        v1["other_taxes"] = 5.0
+        v1["currency"] = "EUR"
+        v2 = self._v2_result("Q000144/2026")
+        v2["other_taxes"] = 5.0
+        v2["currency"] = "EUR"
+
+        matching = ledger_app._compare_invoice_v1_and_v2_full_document(v1, v2)
+        self.assertTrue(matching["full_document_match"])
+
+        v2["other_taxes"] = 0.0
+        v2["currency"] = "USD"
+        mismatch = ledger_app._compare_invoice_v1_and_v2_full_document(v1, v2)
+
+        self.assertFalse(mismatch["full_document_match"])
+        fields = json.loads(mismatch["full_document_comparison_json"])["different_fields"]
+        self.assertIn("other_taxes_match", fields)
+        self.assertIn("currency_match", fields)
+
+    def test_v11_full_document_comparison_separates_vat_amount_and_breakdown(self):
+        v1 = self._v1_production_result("Q000144/2026")
+        v1["currency"] = "EUR"
+        v2 = self._v2_result("Q000144/2026")
+        v2["currency"] = "EUR"
+
+        v2["vat_amount"] = 20.0
+        amount_mismatch = ledger_app._compare_invoice_v1_and_v2_full_document(v1, v2)
+        amount_fields = json.loads(amount_mismatch["full_document_comparison_json"])[
+            "different_fields"
+        ]
+        self.assertIn("vat_amount_match", amount_fields)
+        self.assertNotIn("vat_breakdown_match", amount_fields)
+
+        v2["vat_amount"] = v1["vat_amount"]
+        v2["vat_breakdown"] = [{"base": 100.0, "rate": 10.0, "vat_amount": 21.0}]
+        breakdown_mismatch = ledger_app._compare_invoice_v1_and_v2_full_document(v1, v2)
+        breakdown_fields = json.loads(breakdown_mismatch["full_document_comparison_json"])[
+            "different_fields"
+        ]
+        self.assertIn("vat_breakdown_match", breakdown_fields)
+
+    def test_v11_document_verification_persistence_whitelists_only_bounded_metadata(self):
+        safe = ledger_app._safe_invoice_v2_document_verification(
+            {
+                "base_amount": {
+                    "status": "confirmed",
+                    "match_method": "contextual_monetary_value",
+                    "match_count": 1,
+                    "context_type": "base_amount",
+                    "reason": None,
+                    "source_text": "BASE IMPONIBLE: 100,00 EUR",
+                },
+                "untrusted_field": {"status": "confirmed", "raw_pdf": "private"},
+            }
+        )
+
+        self.assertEqual(set(safe), {"base_amount"})
+        self.assertNotIn("source_text", safe["base_amount"])
+        self.assertEqual(safe["base_amount"]["match_count"], 1)
+
     def test_shadow_comparison_recalculation_is_dry_run_by_default_and_never_calls_openai(self):
         job_id = self._create_completed_job()
         v1 = self._v1_production_result("Q000144/2026")
@@ -1979,6 +2252,9 @@ class TestInvoiceV2ShadowQueue(unittest.TestCase):
         self.assertIn("metadata_quality_status", ledger_app.invoice_analysis_shadow_runs_table.c)
         self.assertIn("invoice_number_evidence_status", ledger_app.invoice_analysis_shadow_runs_table.c)
         self.assertIn("invoice_parser_diagnostics_json", ledger_app.invoice_analysis_shadow_runs_table.c)
+        self.assertIn("document_verification_json", ledger_app.invoice_analysis_shadow_runs_table.c)
+        self.assertIn("fast_path_decision", ledger_app.invoice_analysis_shadow_runs_table.c)
+        self.assertIn("full_document_match", ledger_app.invoice_analysis_shadow_runs_table.c)
 
 
 if __name__ == "__main__":
