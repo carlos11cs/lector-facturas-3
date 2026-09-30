@@ -5513,6 +5513,9 @@ _FAST_TEXT_TAX_ID_TOKEN_PATTERN = re.compile(
     r"(?<![A-Z0-9])(?:[A-Z]{2}[\s.-]?)?(?:[A-Z]\s*\d(?:[\s.-]?\d){6}[\s.-]?[A-Z0-9]|"
     r"\d(?:[\s.-]?\d){7}[\s.-]?[A-Z])(?![A-Z0-9])"
 )
+_FAST_TEXT_SPANISH_TAX_ID_PATTERN = re.compile(
+    r"^(?:ES)?(?:[A-HJ-NP-SUVW]\d{7}[0-9A-J]|\d{8}[A-Z]|[XYZ]\d{7}[A-Z])$"
+)
 _FAST_TEXT_MONEY_TOKEN_PATTERN = re.compile(
     r"(?<![A-Z0-9])(?:EUR|USD|GBP|US\$|€|£)?\s*[-+]?"
     r"(?:\d{1,3}(?:[.,\s]\d{3})+|\d+)(?:[.,]\d{2})?\s*"
@@ -6389,7 +6392,12 @@ def _normalize_fast_text_date(value: Any) -> Optional[str]:
     return _normalize_date(str(value).replace(".", "/"))
 
 
-def _inspect_fast_text_invoice_date_evidence(document_text: str) -> Dict[str, Any]:
+def _inspect_fast_text_invoice_date_evidence(
+    document_text: str,
+    *,
+    supplier_tax_id: Optional[str] = None,
+    registered_company_tax_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Find one invoice-context date from a bounded labelled relationship.
 
     A label and its date may be split by the PDF reading order.  Accept only a
@@ -6397,6 +6405,11 @@ def _inspect_fast_text_invoice_date_evidence(document_text: str) -> Dict[str, An
     label; this is deliberately narrower than a document-wide date search.
     """
     candidates: Dict[str, Dict[str, Any]] = {}
+    spanish_fiscal_context = _fast_text_spanish_fiscal_context(
+        document_text,
+        supplier_tax_id=supplier_tax_id,
+        registered_company_tax_id=registered_company_tax_id,
+    )
     has_invoice_context = _fast_text_document_has_invoice_context(document_text)
     lines = _fast_text_parser_lines(document_text)
     for position, (_, line) in enumerate(lines):
@@ -6422,10 +6435,14 @@ def _inspect_fast_text_invoice_date_evidence(document_text: str) -> Dict[str, An
                 match_method = "same_line_strong_invoice_date_label"
             else:
                 match_method = "contextual_invoice_date_label"
-            # A two-digit date with day <= 12 is not sufficient to choose a
-            # day/month convention for the automatic fast path. It remains a
-            # review item even though Ledged can preserve the model value.
-            ambiguous_numeric = len(match.group(3)) == 2 and int(match.group(1)) <= 12
+            # Spain's fiscal documents use the established DD/MM/YY policy,
+            # but only after the document itself demonstrates Spanish fiscal
+            # context. Other documents retain the fail-closed ambiguity rule.
+            ambiguous_numeric = (
+                len(match.group(3)) == 2
+                and int(match.group(1)) <= 12
+                and not spanish_fiscal_context
+            )
             existing = candidates.get(normalized)
             if existing is None:
                 candidates[normalized] = {
@@ -6445,12 +6462,14 @@ def _inspect_fast_text_invoice_date_evidence(document_text: str) -> Dict[str, An
                 "invoice_date": None,
                 "candidate_count": 1,
                 "match_method": "ambiguous_two_digit_invoice_date",
+                "spanish_fiscal_context": spanish_fiscal_context,
             }
         return {
             "status": "unambiguous",
             "invoice_date": invoice_date,
             "candidate_count": 1,
             "match_method": candidate["match_method"],
+            "spanish_fiscal_context": spanish_fiscal_context,
         }
     if len(candidates) > 1:
         return {
@@ -6458,25 +6477,36 @@ def _inspect_fast_text_invoice_date_evidence(document_text: str) -> Dict[str, An
             "invoice_date": None,
             "candidate_count": len(candidates),
             "match_method": "multiple_invoice_date_candidates",
+            "spanish_fiscal_context": spanish_fiscal_context,
         }
     return {
         "status": "missing",
         "invoice_date": None,
         "candidate_count": 0,
         "match_method": "invoice_date_label",
+        "spanish_fiscal_context": spanish_fiscal_context,
     }
 
 
 def _reconcile_fast_text_invoice_date(
-    invoice_date: Optional[str], document_text: str
+    invoice_date: Optional[str],
+    document_text: str,
+    *,
+    supplier_tax_id: Optional[str] = None,
+    registered_company_tax_id: Optional[str] = None,
 ) -> Tuple[Optional[str], List[str], List[str], Dict[str, Any]]:
     """Use only one explicit native-text invoice date as deterministic evidence."""
-    evidence = _inspect_fast_text_invoice_date_evidence(document_text)
+    evidence = _inspect_fast_text_invoice_date_evidence(
+        document_text,
+        supplier_tax_id=supplier_tax_id,
+        registered_company_tax_id=registered_company_tax_id,
+    )
     normalized_model_date = _normalize_fast_text_date(invoice_date)
     diagnostics = {
         "status": evidence["status"],
         "candidate_count": evidence["candidate_count"],
         "match_method": evidence["match_method"],
+        "spanish_fiscal_context": evidence["spanish_fiscal_context"],
         "model_matches_evidence": bool(
             normalized_model_date and normalized_model_date == evidence.get("invoice_date")
         ),
@@ -6649,6 +6679,42 @@ def _fast_text_tax_identifier_candidates(document_text: str) -> List[Dict[str, A
                 }
             )
     return candidates
+
+
+def _is_fast_text_spanish_tax_id(value: Optional[str]) -> bool:
+    """Recognize Spanish NIF/CIF/NIE and ES VAT identifiers structurally."""
+    normalized = _normalize_fast_text_tax_id(value)
+    return bool(normalized and _FAST_TEXT_SPANISH_TAX_ID_PATTERN.fullmatch(normalized))
+
+
+def _fast_text_spanish_fiscal_context(
+    document_text: str,
+    *,
+    supplier_tax_id: Optional[str],
+    registered_company_tax_id: Optional[str],
+) -> Optional[str]:
+    """Return Spain's date-format proof only for a confirmed supplier ID.
+
+    A recipient's Spanish tax identifier is common on foreign invoices and
+    cannot establish the issuer's document convention.  The supplier tax ID
+    must therefore be both structurally Spanish and confirmed by the existing
+    party-aware verifier before an ambiguous numeric date uses DD/MM/YY.
+    """
+    normalized_supplier_tax_id = _normalize_fast_text_tax_id(supplier_tax_id)
+    if not _is_fast_text_spanish_tax_id(normalized_supplier_tax_id):
+        return None
+
+    supplier_verification = _verify_fast_text_supplier_tax_id(
+        normalized_supplier_tax_id,
+        document_text,
+        registered_company_tax_id=registered_company_tax_id,
+    )
+    if supplier_verification.get("status") != "confirmed":
+        return None
+
+    if normalized_supplier_tax_id and normalized_supplier_tax_id.startswith("ES"):
+        return "confirmed_spanish_supplier_vat"
+    return "confirmed_spanish_supplier_tax_id"
 
 
 def _verify_fast_text_supplier_tax_id(
@@ -7590,7 +7656,10 @@ def analyze_invoice_v2_fast_text(
         invoice_date_issues,
         invoice_date_diagnostics,
     ) = _reconcile_fast_text_invoice_date(
-        normalized.get("invoice_date"), prepared["text"]
+        normalized.get("invoice_date"),
+        prepared["text"],
+        supplier_tax_id=normalized.get("supplier_tax_id"),
+        registered_company_tax_id=normalized_company_context.get("company_tax_id"),
     )
     normalized["payment_dates"], due_date_corrections = _reconcile_fast_text_payment_dates(
         normalized.get("payment_dates") or [], normalized.get("invoice_date"), prepared["text"]

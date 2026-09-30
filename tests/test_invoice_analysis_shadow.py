@@ -1536,6 +1536,153 @@ class TestInvoiceV2FastText(unittest.TestCase):
         self.assertEqual(evidence["status"], "ambiguous")
         self.assertIsNone(evidence["invoice_date"])
 
+    def test_v13_confirms_ambiguous_numeric_date_for_spanish_fiscal_invoice(self):
+        text = (
+            "FACTURA\n"
+            "PROVEEDOR: Proveedor Demo SL\n"
+            "NIF: B12345678\n"
+            "CLIENTE: Clinica Demo SL\n"
+            "NIF: B05410667\n"
+            "FECHA FACTURA: 07/08/26"
+        )
+        invoice_date, _corrections, issues, diagnostics = (
+            invoice_service._reconcile_fast_text_invoice_date(
+                "2026-08-07",
+                text,
+                supplier_tax_id="B12345678",
+                registered_company_tax_id="B05410667",
+            )
+        )
+        verification = invoice_service._verify_fast_text_invoice_date(
+            invoice_date, diagnostics
+        )
+
+        self.assertEqual(invoice_date, "2026-08-07")
+        self.assertEqual(issues, [])
+        self.assertEqual(
+            diagnostics["spanish_fiscal_context"],
+            "confirmed_spanish_supplier_tax_id",
+        )
+        self.assertEqual(verification["status"], "confirmed")
+
+    def test_v13_applies_day_first_to_spanish_two_digit_invoice_dates(self):
+        text_template = (
+            "FACTURA\n"
+            "PROVEEDOR: Proveedor Demo SL\n"
+            "NIF: B12345678\n"
+            "FECHA FACTURA: {value}"
+        )
+        cases = (
+            ("08/07/26", "2026-07-08"),
+            ("23/08/26", "2026-08-23"),
+        )
+
+        for source_date, expected_date in cases:
+            with self.subTest(source_date=source_date):
+                invoice_date, _corrections, issues, diagnostics = (
+                    invoice_service._reconcile_fast_text_invoice_date(
+                        expected_date,
+                        text_template.format(value=source_date),
+                        supplier_tax_id="B12345678",
+                    )
+                )
+                verification = invoice_service._verify_fast_text_invoice_date(
+                    invoice_date, diagnostics
+                )
+
+                self.assertEqual(invoice_date, expected_date)
+                self.assertEqual(issues, [])
+                self.assertEqual(
+                    diagnostics["spanish_fiscal_context"],
+                    "confirmed_spanish_supplier_tax_id",
+                )
+                self.assertEqual(verification["status"], "confirmed")
+
+    def test_v13_never_uses_spanish_due_date_as_invoice_date(self):
+        evidence = invoice_service._inspect_fast_text_invoice_date_evidence(
+            "FACTURA\nNIF: B12345678\nFECHA VENCIMIENTO: 07/08/26"
+        )
+
+        self.assertEqual(evidence["status"], "missing")
+        self.assertIsNone(evidence["invoice_date"])
+
+    def test_v13_does_not_use_spanish_recipient_to_resolve_foreign_supplier_date(self):
+        text = (
+            "INVOICE\n"
+            "SUPPLIER: Foreign Supplier Inc\n"
+            "VAT ID: DE123456789\n"
+            "RECIPIENT: Clinica Demo SL\n"
+            "NIF: B05410667\n"
+            "INVOICE DATE: 07/08/26"
+        )
+        evidence = invoice_service._inspect_fast_text_invoice_date_evidence(
+            text,
+            supplier_tax_id="DE123456789",
+            registered_company_tax_id="B05410667",
+        )
+        invoice_date, _corrections, _issues, diagnostics = (
+            invoice_service._reconcile_fast_text_invoice_date(
+                "2026-08-07",
+                text,
+                supplier_tax_id="DE123456789",
+                registered_company_tax_id="B05410667",
+            )
+        )
+        verification = invoice_service._verify_fast_text_invoice_date(
+            invoice_date, diagnostics
+        )
+
+        self.assertEqual(evidence["status"], "ambiguous")
+        self.assertIsNone(evidence["spanish_fiscal_context"])
+        self.assertEqual(verification["status"], "review")
+
+    def test_v13_keeps_ambiguous_date_in_review_with_indeterminate_supplier_country(self):
+        text = (
+            "INVOICE\n"
+            "SUPPLIER: Unidentified Provider\n"
+            "RECIPIENT: Clinica Demo SL\n"
+            "NIF: B05410667\n"
+            "INVOICE DATE: 07/08/26"
+        )
+
+        evidence = invoice_service._inspect_fast_text_invoice_date_evidence(
+            text,
+            supplier_tax_id=None,
+            registered_company_tax_id="B05410667",
+        )
+
+        self.assertEqual(evidence["status"], "ambiguous")
+        self.assertIsNone(evidence["spanish_fiscal_context"])
+
+    def test_v13_confirms_ambiguous_date_for_confirmed_spanish_supplier_vat(self):
+        text = (
+            "FACTURA\n"
+            "PROVEEDOR: Proveedor Demo SL\n"
+            "VAT ID: ESB12345678\n"
+            "CLIENTE: Clinica Demo SL\n"
+            "NIF: B05410667\n"
+            "FECHA FACTURA: 07/08/26"
+        )
+        invoice_date, _corrections, issues, diagnostics = (
+            invoice_service._reconcile_fast_text_invoice_date(
+                "2026-08-07",
+                text,
+                supplier_tax_id="ESB12345678",
+                registered_company_tax_id="B05410667",
+            )
+        )
+        verification = invoice_service._verify_fast_text_invoice_date(
+            invoice_date, diagnostics
+        )
+
+        self.assertEqual(invoice_date, "2026-08-07")
+        self.assertEqual(issues, [])
+        self.assertEqual(
+            diagnostics["spanish_fiscal_context"],
+            "confirmed_spanish_supplier_vat",
+        )
+        self.assertEqual(verification["status"], "confirmed")
+
     def test_v12_uses_confirmed_invoice_identifier_as_document_type_proof(self):
         invoice_number = invoice_service._fast_text_verification(
             "confirmed",
@@ -1845,7 +1992,7 @@ class TestInvoiceV2ShadowQueue(unittest.TestCase):
                 .order_by(ledger_app.invoice_analysis_shadow_runs_table.c.shadow_version)
             ).scalars().all()
 
-        self.assertEqual(runs, ["v2-next-text-v1", "v2-sol-text-v12"])
+        self.assertEqual(runs, ["v2-next-text-v1", "v2-sol-text-v13"])
 
     def test_ineligible_shadow_is_recorded_without_retaining_source(self):
         job_id = self._create_completed_job()
