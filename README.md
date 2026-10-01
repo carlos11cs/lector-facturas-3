@@ -63,6 +63,7 @@ export ASYNC_INVOICE_ANALYSIS_LEASE_RENEWAL_SECONDS="60"
 # V2 is a text-only benchmark. Keep it disabled until a controlled test.
 export INVOICE_V2_SHADOW_ENABLED="false"
 export INVOICE_V2_SHADOW_SAMPLE_RATE="0.10"
+export INVOICE_V2_SHADOW_INPUT_REPRESENTATION="legacy"
 export V2_SHADOW_CONCURRENCY="1"
 export INVOICE_V2_FAST_TEXT_MAX_CHARS="30000"
 ```
@@ -127,8 +128,13 @@ prioridad. V2 solo se inicia cuando no hay trabajo V1 activo; no usa OCR ni env�
 el PDF, imágenes o texto completo a telemetría. Los resultados comparativos se
 guardan en `invoice_analysis_shadow_runs` y el PDF privado se borra tras V2 o al
 alcanzar el TTL ya existente.
-La variante actual queda identificada como `v2-sol-text-v14`; las ejecuciones
-históricas conservan su versión original y la tabla permite comparar varias
+`INVOICE_V2_SHADOW_INPUT_REPRESENTATION=legacy` conserva la variante
+`v2-sol-text-v14`. El valor experimental `canonical_layout_v1` selecciona una
+única llamada V2 con texto derivado del Canonical DocumentLayout y la etiqueta
+`v2-sol-canonical-text-v1`; no ejecuta ambas representaciones para una misma
+factura. En ambos casos V1 y el verifier V14 permanecen intactos, y la opción
+canónica sigue desactivada mientras `INVOICE_V2_SHADOW_ENABLED=false`.
+Las ejecuciones históricas conservan su versión original y la tabla permite comparar varias
 variantes del mismo trabajo mediante `job_id + shadow_version`. V14 mantiene
 separados la extracción V2, la verificación documental determinista y la
 comparación V1/V2 de benchmark. La decisión diagnóstica `accept_v2` o

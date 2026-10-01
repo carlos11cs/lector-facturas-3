@@ -1,7 +1,8 @@
-"""Ephemeral PDF representation for the offline canonical-layout experiment.
+"""Ephemeral PDF representation for canonical-layout experiments.
 
-Not imported by either invoice pipeline. Rows and segments describe geometry,
-not fiscal roles, tables, reading-order certainty or an acceptance decision.
+The canonical shadow input imports this module without changing V1 or the
+legacy V2 path. Rows and segments describe geometry, not fiscal roles, tables,
+reading-order certainty or an acceptance decision.
 """
 
 from __future__ import annotations

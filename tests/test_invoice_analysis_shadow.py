@@ -159,6 +159,213 @@ class TestInvoiceV2FastText(unittest.TestCase):
         self.assertEqual(prepared["reason"], "scanned_pdf")
         self.assertEqual(prepared["sent_text_chars"], 0)
 
+    def test_canonical_variant_uses_serializer_and_keeps_legacy_verifier_text(self):
+        payload = _digital_pdf_bytes(
+            [
+                "FACTURA F-100\nProveedor Demo SL B12345678\n"
+                "Fecha 01/09/2026\nBase 100,00 EUR IVA 21,00 EUR Total 121,00 EUR",
+                "CONDICIONES DE PAGO\nVencimiento 01/10/2026\n"
+                "Información fiscal adicional para completar el documento digital",
+            ]
+        )
+        original_serializer = invoice_service.serialize_document_layout
+
+        with patch.object(
+            invoice_service,
+            "serialize_document_layout",
+            wraps=original_serializer,
+        ) as serializer:
+            prepared = invoice_service.prepare_invoice_v2_canonical_text(
+                payload,
+                filename="factura.pdf",
+                mime_type="application/pdf",
+            )
+
+        serializer.assert_called_once()
+        self.assertTrue(prepared["eligible"])
+        self.assertEqual(prepared["input_representation"], "canonical_layout_v1")
+        self.assertEqual(prepared["model_input_text"], prepared["canonical_model_text"])
+        self.assertEqual(prepared["verification_text"], prepared["text"])
+        self.assertIn("[PÁGINA 1]", prepared["canonical_model_text"])
+        self.assertIn("[PÁGINA 2]", prepared["canonical_model_text"])
+        self.assertEqual(prepared["canonical_pages"], 2)
+        self.assertEqual(
+            prepared["canonical_token_count"],
+            len(prepared["_canonical_document_layout"].tokens),
+        )
+
+    def test_canonical_model_text_skips_legacy_normalization_and_keeps_duplicates(self):
+        document = fitz.open()
+        page = document.new_page()
+        page.insert_text((72, 72), "DUPLICADO")
+        page.insert_text((72, 72), "DUPLICADO")
+        page.insert_text(
+            (72, 110),
+            "\n".join(
+                (
+                    "FACTURA F-200",
+                    "PROVEEDOR DEMO SL",
+                    "NIF B12345678",
+                    "CLIENTE DEMO SL",
+                    "FECHA 01/09/2026",
+                    "BASE IMPONIBLE 100,00 EUR",
+                    "IVA 21 POR CIENTO 21,00 EUR",
+                    "TOTAL FACTURA 121,00 EUR",
+                    "CONDICIONES DE PAGO 30 DIAS",
+                    "DIRECCION FISCAL CALLE DEMOSTRACION 1",
+                    "INFORMACION ADICIONAL DEL DOCUMENTO DIGITAL",
+                )
+            ),
+        )
+        payload = document.tobytes()
+        document.close()
+
+        with patch.object(
+            invoice_service,
+            "_normalize_ocr_amount_text",
+            side_effect=lambda value: "SOLO_LEGACY\n" + value,
+        ):
+            prepared = invoice_service.prepare_invoice_v2_canonical_text(
+                payload,
+                filename="duplicados.pdf",
+                mime_type="application/pdf",
+            )
+
+        self.assertTrue(prepared["eligible"])
+        self.assertIn("SOLO_LEGACY", prepared["verification_text"])
+        self.assertNotIn("SOLO_LEGACY", prepared["canonical_model_text"])
+        self.assertEqual(prepared["canonical_full_text"].count("DUPLICADO"), 2)
+
+    def test_canonical_truncation_never_truncates_layout_or_full_text(self):
+        pages = [
+            "\n".join(
+                [
+                    f"FACTURA F-300-{i}",
+                    "PROVEEDOR DEMO SL B12345678",
+                    "FECHA FACTURA 01/09/2026",
+                ]
+                + [
+                    f"CONCEPTO {i}-{number} IMPORTE {number},00 EUR"
+                    for number in range(25)
+                ]
+                + ["BASE 100,00 EUR", "IVA 21,00 EUR", "TOTAL 121,00 EUR"]
+            )
+            for i in range(4)
+        ]
+        payload = _digital_pdf_bytes(pages)
+
+        with patch.dict(
+            "os.environ", {"INVOICE_V2_FAST_TEXT_MAX_CHARS": "1000"}
+        ):
+            prepared = invoice_service.prepare_invoice_v2_canonical_text(
+                payload,
+                filename="larga.pdf",
+                mime_type="application/pdf",
+            )
+
+        self.assertTrue(prepared["eligible"])
+        self.assertTrue(prepared["canonical_truncated"])
+        self.assertFalse(prepared["document_text_complete"])
+        self.assertGreater(
+            prepared["canonical_full_chars"], prepared["canonical_model_chars"]
+        )
+        self.assertEqual(prepared["canonical_model_chars"], 1000)
+        self.assertEqual(len(prepared["canonical_full_text"]), prepared["canonical_full_chars"])
+        self.assertEqual(
+            len(prepared["_canonical_document_layout"].tokens),
+            prepared["canonical_token_count"],
+        )
+
+    def test_canonical_scanned_pdf_keeps_legacy_ineligibility(self):
+        payload = _digital_pdf_bytes([""])
+
+        legacy = invoice_service.prepare_invoice_v2_fast_text(
+            payload, filename="escaneado.pdf", mime_type="application/pdf"
+        )
+        canonical = invoice_service.prepare_invoice_v2_canonical_text(
+            payload, filename="escaneado.pdf", mime_type="application/pdf"
+        )
+
+        self.assertFalse(canonical["eligible"])
+        self.assertEqual(canonical["reason"], legacy["reason"])
+        self.assertIsNone(canonical["_canonical_document_layout"])
+
+    def test_canonical_model_input_isolated_from_legacy_verifier_with_one_call(self):
+        payload = _fast_text_invoice_payload(
+            supplier_name="Proveedor Demo SL",
+            supplier_tax_id="B12345678",
+            customer_name="Cliente Demo SL",
+            customer_tax_id="B87654321",
+        )
+        prepared = {
+            "eligible": True,
+            "reason": "canonical_text_sufficient",
+            "input_representation": "canonical_layout_v1",
+            "page_count": 1,
+            "native_text_chars": 22,
+            "sent_text_chars": 22,
+            "document_text_complete": True,
+            "text": "LEGACY VERIFIER TEXT",
+            "verification_text": "LEGACY VERIFIER TEXT",
+            "model_input_text": "CANONICAL MODEL TEXT",
+        }
+        with patch.object(invoice_service, "_get_client", return_value=object()), patch.object(
+            invoice_service, "_get_invoice_model", return_value="gpt-5.6-sol"
+        ) as get_model, patch.object(
+            invoice_service, "_call_invoice_responses", return_value=payload
+        ) as responses, patch.object(
+            invoice_service,
+            "_reconcile_fast_text_invoice_number",
+            return_value=("Q000081/2026", [], [], "confirmed", {}),
+        ) as reconcile_number, patch.object(
+            invoice_service,
+            "_reconcile_fast_text_invoice_date",
+            return_value=("2026-05-13", [], [], {}),
+        ) as reconcile_date, patch.object(
+            invoice_service,
+            "_reconcile_fast_text_payment_dates",
+            return_value=([], []),
+        ) as reconcile_dates, patch.object(
+            invoice_service, "_validate_fast_text_invoice", return_value=[]
+        ), patch.object(
+            invoice_service,
+            "_assess_fast_text_invoice_safety",
+            return_value={
+                "accounting_safety_status": "passed",
+                "accounting_safety_issues": [],
+                "metadata_quality_status": "confirmed",
+                "metadata_issues": [],
+            },
+        ), patch.object(
+            invoice_service, "_verify_fast_text_document", return_value={}
+        ) as verify_document, patch.object(
+            invoice_service,
+            "_decide_fast_text_fast_path",
+            return_value=("fallback_v1", ["shadow_only"]),
+        ):
+            invoice_service.analyze_invoice_v2_fast_text(
+                file_bytes=b"unused",
+                filename="factura.pdf",
+                mime_type="application/pdf",
+                prepared_text=prepared,
+            )
+
+        get_model.assert_called_once()
+        responses.assert_called_once()
+        request = responses.call_args.kwargs
+        self.assertIs(request["response_schema"], invoice_service.INVOICE_FAST_TEXT_SCHEMA)
+        self.assertEqual(request["route"], "v2_fast_text_canonical")
+        self.assertIn("CANONICAL MODEL TEXT", request["response_input"][0]["content"][1]["text"])
+        self.assertNotIn("LEGACY VERIFIER TEXT", request["response_input"][0]["content"][1]["text"])
+        self.assertEqual(
+            request["response_input"][0]["content"][0]["text"],
+            invoice_service._fast_text_invoice_prompt({}),
+        )
+        self.assertEqual(reconcile_number.call_args.args[1], "LEGACY VERIFIER TEXT")
+        self.assertEqual(reconcile_date.call_args.args[1], "LEGACY VERIFIER TEXT")
+        self.assertEqual(reconcile_dates.call_args.args[2], "LEGACY VERIFIER TEXT")
+        self.assertEqual(verify_document.call_args.args[1], "LEGACY VERIFIER TEXT")
+
     def test_v2_request_uses_text_only_strict_schema_and_store_false(self):
         class FakeResponse:
             model = "gpt-5.6-sol"
@@ -2285,6 +2492,119 @@ class TestInvoiceV2ShadowQueue(unittest.TestCase):
             ).scalars().all()
 
         self.assertEqual(runs, ["v2-next-text-v1", "v2-sol-text-v14"])
+
+    def test_shadow_input_selector_chooses_exactly_one_preparer(self):
+        legacy = self._prepared()
+        canonical = {
+            **self._prepared(),
+            "input_representation": "canonical_layout_v1",
+        }
+        with patch.object(
+            ledger_app, "prepare_invoice_v2_fast_text", return_value=legacy
+        ) as legacy_preparer, patch.object(
+            ledger_app, "prepare_invoice_v2_canonical_text", return_value=canonical
+        ) as canonical_preparer:
+            selected_legacy = ledger_app._prepare_invoice_v2_shadow_input(
+                b"pdf", representation="legacy"
+            )
+            selected_canonical = ledger_app._prepare_invoice_v2_shadow_input(
+                b"pdf", representation="canonical_layout_v1"
+            )
+
+        self.assertIs(selected_legacy, legacy)
+        self.assertIs(selected_canonical, canonical)
+        legacy_preparer.assert_called_once()
+        canonical_preparer.assert_called_once()
+
+    def test_canonical_run_uses_distinct_version_and_bounded_input_diagnostics(self):
+        job_id = self._create_completed_job()
+        prepared = {
+            **self._prepared(),
+            "input_representation": "canonical_layout_v1",
+            "canonical_full_chars": 1200,
+            "canonical_model_chars": 1000,
+            "canonical_truncated": True,
+            "canonical_pages": 2,
+            "canonical_token_count": 90,
+            "canonical_row_count": 30,
+            "canonical_segment_count": 35,
+            "canonical_layout_ms": 12,
+            "canonical_serialize_ms": 2,
+            "canonical_full_text": "SENSITIVE_SOURCE_TEXT",
+            "canonical_model_text": "SENSITIVE_MODEL_TEXT",
+            "_canonical_document_layout": object(),
+        }
+        with patch.object(
+            ledger_app,
+            "INVOICE_V2_SHADOW_VERSION",
+            "v2-sol-canonical-text-v1",
+        ), patch.object(
+            ledger_app, "INVOICE_V2_SHADOW_ROUTE", "v2_fast_text_canonical"
+        ):
+            self._enqueue_shadow(job_id, prepared)
+
+        run = self._run(job_id)
+        diagnostics = json.loads(run["invoice_parser_diagnostics_json"])["input"]
+        self.assertEqual(run["shadow_version"], "v2-sol-canonical-text-v1")
+        self.assertEqual(run["route"], "v2_fast_text_canonical")
+        self.assertEqual(diagnostics["input_representation"], "canonical_layout_v1")
+        self.assertEqual(diagnostics["canonical_token_count"], 90)
+        self.assertTrue(diagnostics["canonical_truncated"])
+        serialized = json.dumps(diagnostics)
+        self.assertNotIn("SENSITIVE_SOURCE_TEXT", serialized)
+        self.assertNotIn("SENSITIVE_MODEL_TEXT", serialized)
+        self.assertNotIn("coordinates", serialized)
+
+    def test_canonical_worker_uses_versioned_representation_and_one_v2_analysis(self):
+        job_id = self._create_completed_job()
+        prepared = {
+            **self._prepared(),
+            "input_representation": "canonical_layout_v1",
+            "canonical_full_chars": 500,
+            "canonical_model_chars": 300,
+            "canonical_truncated": False,
+            "canonical_pages": 1,
+            "canonical_token_count": 40,
+            "canonical_row_count": 12,
+            "canonical_segment_count": 14,
+            "canonical_layout_ms": 4,
+            "canonical_serialize_ms": 1,
+        }
+        with patch.object(
+            ledger_app,
+            "INVOICE_V2_SHADOW_VERSION",
+            "v2-sol-canonical-text-v1",
+        ), patch.object(
+            ledger_app, "INVOICE_V2_SHADOW_ROUTE", "v2_fast_text_canonical"
+        ):
+            self._enqueue_shadow(job_id, prepared)
+
+        with patch.object(
+            ledger_app, "download_private_bytes", return_value=b"%PDF"
+        ), patch.object(
+            ledger_app, "_prepare_invoice_v2_shadow_input", return_value=prepared
+        ) as prepare_input, patch.object(
+            ledger_app, "get_company_names_for_analysis", return_value=[]
+        ), patch.object(
+            ledger_app, "get_company_context_for_invoice_v2", return_value={}
+        ), patch.object(
+            ledger_app,
+            "analyze_invoice_v2_fast_text",
+            return_value=(self._v2_result(), {"openai_ms": 1}),
+        ) as analyze, patch.object(ledger_app, "delete_private_object"):
+            self.assertTrue(ledger_app.run_invoice_v2_shadow_worker_once())
+
+        prepare_input.assert_called_once()
+        self.assertEqual(
+            prepare_input.call_args.kwargs["representation"],
+            "canonical_layout_v1",
+        )
+        analyze.assert_called_once()
+        run = self._run(job_id)
+        diagnostics = json.loads(run["invoice_parser_diagnostics_json"])["input"]
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(diagnostics["input_representation"], "canonical_layout_v1")
+        self.assertEqual(diagnostics["canonical_layout_ms"], 4)
 
     def test_ineligible_shadow_is_recorded_without_retaining_source(self):
         job_id = self._create_completed_job()

@@ -247,14 +247,21 @@ class TestOfflineLayoutBenchmark(unittest.TestCase):
         self.assertNotIn("eligible", result)
         self.assertNotIn("accept_v2", json.dumps(result))
 
-    def test_experiment_is_not_imported_by_production_entry_points(self):
+    def test_canonical_integration_is_limited_to_shadow_analysis_service(self):
         root = Path(__file__).resolve().parents[1]
-        for relative in ("app.py", "worker.py", "services/ai_invoice_service.py"):
+        for relative in ("app.py", "worker.py"):
             tree = ast.parse((root / relative).read_text())
             imports = [
                 node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
             ] + [alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names]
             self.assertFalse(any("document_layout" in (name or "") for name in imports))
+        service_tree = ast.parse((root / "services/ai_invoice_service.py").read_text())
+        service_imports = [
+            node.module
+            for node in ast.walk(service_tree)
+            if isinstance(node, ast.ImportFrom)
+        ]
+        self.assertIn("services.document_layout", service_imports)
 
     def test_shared_textpage_is_created_once_for_both_projections(self):
         original = fitz.Page.get_textpage

@@ -281,6 +281,19 @@ def _comparison_summary(pairs: Sequence[tuple[float, float]]) -> dict[str, float
 def build_benchmark_report(rows: Sequence[Mapping[str, Any]], scope: Mapping[str, Any]) -> dict[str, Any]:
     """Build all aggregate diagnostics from selected persisted shadow runs."""
     normalized_rows = [dict(row) for row in rows]
+    input_diagnostics = []
+    for row in normalized_rows:
+        parser_diagnostics = _safe_json_dict(
+            row.get("invoice_parser_diagnostics_json")
+        )
+        input_diagnostic = parser_diagnostics.get("input")
+        input_diagnostics.append(
+            input_diagnostic if isinstance(input_diagnostic, dict) else {}
+        )
+    input_representation_counts = Counter(
+        str(diagnostic.get("input_representation") or "unknown")
+        for diagnostic in input_diagnostics
+    )
     total = len(normalized_rows)
     completed_rows = [row for row in normalized_rows if row.get("status") == "completed"]
     validation_passed_rows = [
@@ -646,6 +659,19 @@ def build_benchmark_report(rows: Sequence[Mapping[str, Any]], scope: Mapping[str
             ),
         },
         "tokens": token_report,
+        "input_representation": {
+            "counts": dict(sorted(input_representation_counts.items())),
+            "canonical_truncated": sum(
+                diagnostic.get("canonical_truncated") is True
+                for diagnostic in input_diagnostics
+            ),
+            "canonical_layout_ms": _summary(
+                _numeric_values(input_diagnostics, "canonical_layout_ms")
+            ),
+            "canonical_serialize_ms": _summary(
+                _numeric_values(input_diagnostics, "canonical_serialize_ms")
+            ),
+        },
         "discrepancies": {
             "validation_failed": {
                 "count": len(validation_failed_rows),
@@ -726,6 +752,7 @@ def load_benchmark_rows(
             shadow_runs.c.metadata_quality_status,
             shadow_runs.c.metadata_issues_json,
             shadow_runs.c.invoice_number_evidence_status,
+            shadow_runs.c.invoice_parser_diagnostics_json,
             shadow_runs.c.comparison_json,
             shadow_runs.c.full_document_match,
             shadow_runs.c.full_document_comparison_json,
@@ -804,6 +831,7 @@ def render_benchmark_report(report: Mapping[str, Any]) -> str:
     rates = report["rates"]
     latency = report["latency"]
     fast_path = report["fast_path"]
+    input_representation = report["input_representation"]
     lines = [
         "Ledged Invoice Engine V2 - benchmark persistido",
         "=" * 54,
@@ -818,6 +846,23 @@ def render_benchmark_report(report: Mapping[str, Any]) -> str:
         f"  Strict accounting: true={volume['strict_match']} | false={volume['strict_mismatch']}",
         f"  Full document match: true={volume['full_document_match']} | false={volume['full_document_mismatch']}",
         f"  Texto truncado: {volume['document_text_truncated']}",
+        "",
+        "REPRESENTACIÓN DE ENTRADA",
+        "  Variantes: "
+        + (
+            ", ".join(
+                f"{name}={count}"
+                for name, count in input_representation["counts"].items()
+            )
+            or "sin diagnóstico"
+        ),
+        f"  Canonical truncado: {input_representation['canonical_truncated']}",
+        "  Canonical layout_ms: "
+        f"n={input_representation['canonical_layout_ms']['count']} "
+        f"media={_format_number(input_representation['canonical_layout_ms']['mean'])}",
+        "  Canonical serialize_ms: "
+        f"n={input_representation['canonical_serialize_ms']['count']} "
+        f"media={_format_number(input_representation['canonical_serialize_ms']['mean'])}",
         "",
         "ACCOUNTING SAFETY (V5+)",
         f"  Passed: {volume['accounting_safety_passed']} | Failed: {volume['accounting_safety_failed']} | Sin evaluar: {volume['accounting_safety_unassessed']}",

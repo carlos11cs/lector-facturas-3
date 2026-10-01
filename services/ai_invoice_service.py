@@ -32,6 +32,12 @@ except ModuleNotFoundError:
     openai = None
     OpenAI = None
 
+from services.document_layout import (
+    LayoutError,
+    extract_native_document,
+    serialize_document_layout,
+)
+
 logger = logging.getLogger(__name__)
 
 # Financial document extraction has its own model configured at request time.
@@ -3955,6 +3961,141 @@ def prepare_invoice_v2_fast_text(
         }
     )
     return base_result
+
+
+def _truncate_invoice_v2_model_text(text: str) -> Tuple[str, bool]:
+    """Limit only the model projection, preserving the complete source view."""
+    max_chars = _get_invoice_v2_fast_text_max_chars()
+    if len(text) <= max_chars:
+        return text, False
+    marker = "\n\n[CONTENIDO INTERMEDIO OMITIDO POR LÍMITE DE TAMAÑO]\n\n"
+    head_size = max(1, int((max_chars - len(marker)) * 0.6))
+    tail_size = max(1, max_chars - len(marker) - head_size)
+    return text[:head_size] + marker + text[-tail_size:], True
+
+
+def prepare_invoice_v2_canonical_text(
+    file_bytes: bytes,
+    *,
+    filename: Optional[str] = None,
+    mime_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Prepare canonical model text while retaining the exact V14 verifier view.
+
+    Canonical text is derived only from immutable layout tokens. The legacy
+    preparation remains the authority for eligibility and for every verifier
+    input, so this experiment cannot silently change V14 reconciliation rules.
+    No returned source text or layout is intended for persistence.
+    """
+    legacy = prepare_invoice_v2_fast_text(
+        file_bytes,
+        filename=filename,
+        mime_type=mime_type,
+    )
+    prepared = {
+        **legacy,
+        "input_representation": "canonical_layout_v1",
+        "model_input_text": "",
+        "verification_text": legacy.get("text") or "",
+        "canonical_full_text": "",
+        "canonical_model_text": "",
+        "canonical_full_chars": 0,
+        "canonical_model_chars": 0,
+        "canonical_truncated": False,
+        "canonical_pages": max(int(legacy.get("page_count") or 0), 0),
+        "canonical_token_count": 0,
+        "canonical_row_count": 0,
+        "canonical_segment_count": 0,
+        "canonical_layout_ms": None,
+        "canonical_serialize_ms": None,
+        "_canonical_document_layout": None,
+    }
+    if not legacy.get("eligible"):
+        return prepared
+
+    layout_started = time.monotonic()
+    try:
+        extraction = extract_native_document(file_bytes, include_native_text=False)
+    except LayoutError as exc:
+        prepared.update(
+            {
+                "eligible": False,
+                "reason": f"canonical_layout_{str(exc)[:96]}",
+                "document_text_complete": False,
+                "sent_text_chars": 0,
+            }
+        )
+        return prepared
+    prepared["canonical_layout_ms"] = round(
+        (time.monotonic() - layout_started) * 1000
+    )
+
+    layout = extraction.layout
+    serialize_started = time.monotonic()
+    try:
+        canonical_view = serialize_document_layout(layout)
+    except LayoutError as exc:
+        prepared.update(
+            {
+                "eligible": False,
+                "reason": f"canonical_serialize_{str(exc)[:96]}",
+                "document_text_complete": False,
+                "sent_text_chars": 0,
+            }
+        )
+        return prepared
+    prepared["canonical_serialize_ms"] = round(
+        (time.monotonic() - serialize_started) * 1000
+    )
+
+    canonical_full_text = canonical_view.text
+    token_text = " ".join(token.original_text for token in layout.tokens)
+    if not _is_text_significant(token_text, PDF_TEXT_THRESHOLD):
+        prepared.update(
+            {
+                "eligible": False,
+                "reason": "canonical_text_insufficient",
+                "document_text_complete": False,
+                "sent_text_chars": 0,
+            }
+        )
+        return prepared
+
+    canonical_model_text, canonical_truncated = _truncate_invoice_v2_model_text(
+        canonical_full_text
+    )
+    full_chars = len(canonical_full_text)
+    model_chars = len(canonical_model_text)
+    prepared.update(
+        {
+            "eligible": True,
+            "reason": "canonical_text_sufficient",
+            "text_representation_version": canonical_view.layout_version,
+            "page_count": len(layout.pages),
+            "native_text_chars": full_chars,
+            "sent_text_chars": model_chars,
+            "document_text_complete": bool(
+                legacy.get("document_text_complete") and not canonical_truncated
+            ),
+            "size_reduction_ratio": round(
+                max(0.0, 1 - (model_chars / max(full_chars, 1))), 4
+            ),
+            "model_input_text": canonical_model_text,
+            "canonical_full_text": canonical_full_text,
+            "canonical_model_text": canonical_model_text,
+            "canonical_full_chars": full_chars,
+            "canonical_model_chars": model_chars,
+            "canonical_truncated": canonical_truncated,
+            "canonical_pages": len(layout.pages),
+            "canonical_token_count": len(layout.tokens),
+            "canonical_row_count": len(layout.rows),
+            "canonical_segment_count": sum(
+                len(row.segments) for row in layout.rows
+            ),
+            "_canonical_document_layout": layout,
+        }
+    )
+    return prepared
 
 
 def _render_document_pages_for_vision(
@@ -8471,6 +8612,16 @@ def analyze_invoice_v2_fast_text(
 ) -> Union[Dict[str, Any], Tuple[Dict[str, Any], Dict[str, Any]]]:
     """Run the native-text-only V2 path. It is intended only for shadow use."""
     started = time.monotonic()
+    prepared = prepared_text or prepare_invoice_v2_fast_text(
+        file_bytes, filename=filename, mime_type=mime_type
+    )
+    input_representation = str(
+        prepared.get("input_representation") or "legacy"
+    ).strip().lower()
+    is_canonical_input = input_representation == "canonical_layout_v1"
+    analysis_route = (
+        "v2_fast_text_canonical" if is_canonical_input else "v2_fast_text_native"
+    )
     telemetry: Dict[str, Any] = {
         "preprocessing_ms": None,
         "openai_ms": 0,
@@ -8480,13 +8631,20 @@ def analyze_invoice_v2_fast_text(
         "output_tokens": None,
         "reasoning_tokens": None,
         "total_tokens": None,
-        "processing_type": "v2_fast_text_native",
-        "route": "v2_fast_text_native",
+        "processing_type": analysis_route,
+        "route": analysis_route,
     }
-    prepared = prepared_text or prepare_invoice_v2_fast_text(
-        file_bytes, filename=filename, mime_type=mime_type
-    )
     telemetry["preprocessing_ms"] = round((time.monotonic() - started) * 1000)
+    model_input_text = str(
+        prepared.get("model_input_text")
+        if prepared.get("model_input_text") is not None
+        else prepared.get("text") or ""
+    )
+    verification_text = str(
+        prepared.get("verification_text")
+        if prepared.get("verification_text") is not None
+        else prepared.get("text") or ""
+    )
     document_layout = prepared.get("_document_layout")
     layout_build_ms = prepared.get("layout_build_ms")
     if isinstance(layout_build_ms, (int, float)) and not isinstance(layout_build_ms, bool):
@@ -8525,10 +8683,10 @@ def analyze_invoice_v2_fast_text(
             prompt=prompt,
             telemetry=telemetry,
             queue_managed_rate_limits=True,
-            response_input=_response_input_for_invoice_fast_text(prompt, prepared["text"]),
+            response_input=_response_input_for_invoice_fast_text(prompt, model_input_text),
             response_schema=INVOICE_FAST_TEXT_SCHEMA,
             schema_name="invoice_fast_text_extraction",
-            route="v2_fast_text_native",
+            route=analysis_route,
         )
     except InvoiceAnalysisResponseError as exc:
         result = {
@@ -8565,7 +8723,9 @@ def analyze_invoice_v2_fast_text(
         invoice_number_evidence_status,
         invoice_parser_diagnostics,
     ) = _reconcile_fast_text_invoice_number(
-        normalized.get("invoice_number"), prepared["text"], document_layout=document_layout
+        normalized.get("invoice_number"),
+        verification_text,
+        document_layout=document_layout,
     )
     (
         normalized["invoice_date"],
@@ -8574,13 +8734,15 @@ def analyze_invoice_v2_fast_text(
         invoice_date_diagnostics,
     ) = _reconcile_fast_text_invoice_date(
         normalized.get("invoice_date"),
-        prepared["text"],
+        verification_text,
         supplier_tax_id=normalized.get("supplier_tax_id"),
         registered_company_tax_id=normalized_company_context.get("company_tax_id"),
         document_layout=document_layout,
     )
     normalized["payment_dates"], due_date_corrections = _reconcile_fast_text_payment_dates(
-        normalized.get("payment_dates") or [], normalized.get("invoice_date"), prepared["text"]
+        normalized.get("payment_dates") or [],
+        normalized.get("invoice_date"),
+        verification_text,
     )
     correction_codes.extend(invoice_number_corrections)
     correction_codes.extend(invoice_date_corrections)
@@ -8631,7 +8793,7 @@ def analyze_invoice_v2_fast_text(
     )
     document_verification = _verify_fast_text_document(
         normalized,
-        prepared["text"],
+        verification_text,
         document_text_complete=document_text_complete,
         registered_company_tax_id=normalized_company_context.get("company_tax_id"),
         invoice_number_evidence_status=invoice_number_evidence_status,
@@ -8665,13 +8827,14 @@ def analyze_invoice_v2_fast_text(
         **normalized,
     }
     logger.info(
-        "Invoice V2 fast text: status=%s validation_status=%s accounting_safety=%s metadata_quality=%s invoice_number_evidence=%s corrections=%s pages=%s native_text_chars=%s sent_text_chars=%s layout_build_ms=%s total_elapsed_ms=%s",
+        "Invoice V2 fast text: status=%s validation_status=%s accounting_safety=%s metadata_quality=%s invoice_number_evidence=%s corrections=%s input_representation=%s pages=%s native_text_chars=%s sent_text_chars=%s layout_build_ms=%s total_elapsed_ms=%s",
         result["analysis_status"],
         result["validation_status"],
         result["accounting_safety_status"],
         result["metadata_quality_status"],
         result["invoice_number_evidence_status"],
         correction_codes,
+        input_representation,
         prepared.get("page_count"),
         prepared.get("native_text_chars"),
         prepared.get("sent_text_chars"),

@@ -61,6 +61,7 @@ from services.ai_invoice_service import (
     _extract_pdf_text_ocr_from_bytes,
     _extract_image_text_ocr_from_bytes,
     extract_loan_schedule,
+    prepare_invoice_v2_canonical_text,
     prepare_invoice_v2_fast_text,
 )
 from services.storage_service import (
@@ -112,6 +113,14 @@ COMPANY_CONCURRENCY = max(1, int(os.getenv("COMPANY_CONCURRENCY", "2")))
 INVOICE_V2_SHADOW_ENABLED = os.getenv(
     "INVOICE_V2_SHADOW_ENABLED", ""
 ).strip().lower() in {"1", "true", "yes"}
+INVOICE_V2_SHADOW_INPUT_REPRESENTATION = os.getenv(
+    "INVOICE_V2_SHADOW_INPUT_REPRESENTATION", "legacy"
+).strip().lower()
+if INVOICE_V2_SHADOW_INPUT_REPRESENTATION not in {
+    "legacy",
+    "canonical_layout_v1",
+}:
+    INVOICE_V2_SHADOW_INPUT_REPRESENTATION = "legacy"
 try:
     INVOICE_V2_SHADOW_SAMPLE_RATE = min(
         1.0, max(0.0, float(os.getenv("INVOICE_V2_SHADOW_SAMPLE_RATE", "0.10")))
@@ -6284,8 +6293,39 @@ def async_invoice_analysis_is_available():
     return ASYNC_INVOICE_ANALYSIS_ENABLED and has_private_object_storage()
 
 
-INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v14"
-INVOICE_V2_SHADOW_ROUTE = "v2_fast_text_native"
+_INVOICE_V2_SHADOW_VARIANTS = {
+    "legacy": ("v2-sol-text-v14", "v2_fast_text_native"),
+    "canonical_layout_v1": (
+        "v2-sol-canonical-text-v1",
+        "v2_fast_text_canonical",
+    ),
+}
+INVOICE_V2_SHADOW_VERSION, INVOICE_V2_SHADOW_ROUTE = (
+    _INVOICE_V2_SHADOW_VARIANTS[INVOICE_V2_SHADOW_INPUT_REPRESENTATION]
+)
+
+
+def _invoice_v2_shadow_representation_for_version(shadow_version):
+    if shadow_version == "v2-sol-canonical-text-v1":
+        return "canonical_layout_v1"
+    return "legacy"
+
+
+def _prepare_invoice_v2_shadow_input(
+    file_bytes, *, filename=None, mime_type=None, representation=None
+):
+    selected = representation or INVOICE_V2_SHADOW_INPUT_REPRESENTATION
+    if selected == "canonical_layout_v1":
+        return prepare_invoice_v2_canonical_text(
+            file_bytes,
+            filename=filename,
+            mime_type=mime_type,
+        )
+    return prepare_invoice_v2_fast_text(
+        file_bytes,
+        filename=filename,
+        mime_type=mime_type,
+    )
 
 
 def _invoice_v2_shadow_is_selected(job_id):
@@ -6307,6 +6347,7 @@ def _create_invoice_v2_shadow_run(job, prepared_text):
     eligible = bool(prepared_text.get("eligible"))
     status = "queued" if eligible else "skipped"
     validation_status = "pending" if eligible else "not_applicable"
+    input_diagnostics = _safe_invoice_v2_input_diagnostics(prepared_text)
     values = {
         "job_id": job["id"],
         "user_id": job["user_id"],
@@ -6360,7 +6401,16 @@ def _create_invoice_v2_shadow_run(job, prepared_text):
         "metadata_quality_status": None,
         "metadata_issues_json": None,
         "invoice_number_evidence_status": None,
-        "invoice_parser_diagnostics_json": None,
+        "invoice_parser_diagnostics_json": (
+            json.dumps(
+                {"input": input_diagnostics},
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            if input_diagnostics is not None
+            else None
+        ),
         "document_verification_json": None,
         "fast_path_decision": "fallback_v1" if status == "skipped" else None,
         "fast_path_reasons_json": (
@@ -6412,7 +6462,7 @@ def _create_invoice_v2_shadow_run(job, prepared_text):
 def _invoice_v2_shadow_candidate(job, file_bytes):
     if not _invoice_v2_shadow_is_selected(job["id"]):
         return None
-    return prepare_invoice_v2_fast_text(
+    return _prepare_invoice_v2_shadow_input(
         file_bytes,
         filename=job.get("original_filename"),
         mime_type=job.get("mime_type"),
@@ -7352,6 +7402,42 @@ def _bounded_nonnegative_int(value, maximum):
         return 0
 
 
+def _safe_invoice_v2_input_diagnostics(prepared_text):
+    """Return bounded operational counters, never source content or geometry."""
+    if not isinstance(prepared_text, dict):
+        return None
+    representation = str(
+        prepared_text.get("input_representation") or "legacy"
+    ).strip().lower()
+    if representation not in {"legacy", "canonical_layout_v1"}:
+        representation = "legacy"
+    diagnostics = {"input_representation": representation}
+    if representation != "canonical_layout_v1":
+        return diagnostics
+    for field in (
+        "canonical_full_chars",
+        "canonical_model_chars",
+        "canonical_pages",
+        "canonical_token_count",
+        "canonical_row_count",
+        "canonical_segment_count",
+    ):
+        diagnostics[field] = _bounded_nonnegative_int(
+            prepared_text.get(field), 100000000
+        )
+    for field in ("canonical_layout_ms", "canonical_serialize_ms"):
+        value = prepared_text.get(field)
+        diagnostics[field] = (
+            _bounded_nonnegative_int(value, 86400000)
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+            else None
+        )
+    diagnostics["canonical_truncated"] = bool(
+        prepared_text.get("canonical_truncated")
+    )
+    return diagnostics
+
+
 def _safe_invoice_parser_diagnostics(value):
     """Whitelist compact parser metadata without retaining source context."""
     if not isinstance(value, dict):
@@ -7388,7 +7474,7 @@ def _safe_invoice_parser_diagnostics(value):
         if candidate_type != "invoice_number"
     }
     invoice_date = value.get("invoice_date") if isinstance(value.get("invoice_date"), dict) else {}
-    return {
+    safe = {
         "parser_revision": str(value.get("parser_revision") or "")[:24],
         "candidate_detected": bool(value.get("candidate_detected")),
         # invoice_candidates remains for older diagnostic readers. The V13
@@ -7442,6 +7528,10 @@ def _safe_invoice_parser_diagnostics(value):
             or None,
         },
     }
+    input_diagnostics = _safe_invoice_v2_input_diagnostics(value.get("input"))
+    if input_diagnostics is not None:
+        safe["input"] = input_diagnostics
+    return safe
 
 
 _INVOICE_V2_DOCUMENT_VERIFICATION_FIELDS = {
@@ -8126,9 +8216,16 @@ def _finish_invoice_v2_shadow_run(
             value = result.get(status_field)
             if value:
                 values[status_field] = str(value)[:64]
-        parser_diagnostics = _safe_invoice_parser_diagnostics(
-            result.get("invoice_parser_diagnostics")
-        )
+        raw_parser_diagnostics = result.get("invoice_parser_diagnostics")
+        if not isinstance(raw_parser_diagnostics, dict):
+            raw_parser_diagnostics = {}
+        input_diagnostics = _safe_invoice_v2_input_diagnostics(prepared_text)
+        if input_diagnostics is not None:
+            raw_parser_diagnostics = {
+                **raw_parser_diagnostics,
+                "input": input_diagnostics,
+            }
+        parser_diagnostics = _safe_invoice_parser_diagnostics(raw_parser_diagnostics)
         if parser_diagnostics is not None:
             values["invoice_parser_diagnostics_json"] = json.dumps(
                 parser_diagnostics,
@@ -8264,10 +8361,14 @@ def _run_claimed_invoice_v2_shadow_run(run):
         if not storage_key:
             raise RuntimeError("source_document_unavailable")
         file_bytes = download_private_bytes(storage_key)
-        prepared_text = prepare_invoice_v2_fast_text(
+        representation = _invoice_v2_shadow_representation_for_version(
+            run.get("shadow_version")
+        )
+        prepared_text = _prepare_invoice_v2_shadow_input(
             file_bytes,
             filename=run.get("source_filename"),
             mime_type=run.get("source_mime_type"),
+            representation=representation,
         )
         if not prepared_text.get("eligible"):
             source_released = _finish_invoice_v2_shadow_run(

@@ -52,6 +52,7 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
         metadata_quality_status=None,
         metadata_issues=None,
         invoice_number_evidence_status=None,
+        input_diagnostics=None,
         document_text_complete=None,
         document_verification=None,
         fast_path_decision=None,
@@ -200,6 +201,11 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
                     if metadata_issues is not None
                     else None,
                     invoice_number_evidence_status=invoice_number_evidence_status,
+                    invoice_parser_diagnostics_json=(
+                        json.dumps({"input": input_diagnostics})
+                        if input_diagnostics is not None
+                        else None
+                    ),
                     document_text_complete=document_text_complete,
                     document_text_chars_original=1000 if document_text_complete is not None else None,
                     document_text_chars_used=1000 if document_text_complete is not None else None,
@@ -244,6 +250,43 @@ class TestInvoiceV2Benchmark(unittest.TestCase):
         self.assertEqual([row["job_id"] for row in latest_rows], [latest])
         ranged_rows = self._rows(job_min=latest, job_max=latest)
         self.assertEqual([row["job_id"] for row in ranged_rows], [latest])
+
+    def test_canonical_input_diagnostics_are_reported_without_source_content(self):
+        self._add_run(
+            shadow_version="v2-sol-canonical-text-v1",
+            input_diagnostics={
+                "input_representation": "canonical_layout_v1",
+                "canonical_full_chars": 1200,
+                "canonical_model_chars": 1000,
+                "canonical_truncated": True,
+                "canonical_pages": 2,
+                "canonical_token_count": 90,
+                "canonical_row_count": 30,
+                "canonical_segment_count": 35,
+                "canonical_layout_ms": 12,
+                "canonical_serialize_ms": 2,
+            },
+        )
+
+        rows = benchmark.load_benchmark_rows(
+            self.engine, shadow_version="v2-sol-canonical-text-v1"
+        )
+        report = benchmark.build_benchmark_report(
+            rows, {"shadow_version": "v2-sol-canonical-text-v1"}
+        )
+        rendered = benchmark.render_benchmark_report(report)
+
+        self.assertEqual(
+            report["input_representation"]["counts"],
+            {"canonical_layout_v1": 1},
+        )
+        self.assertEqual(report["input_representation"]["canonical_truncated"], 1)
+        self.assertEqual(
+            report["input_representation"]["canonical_layout_ms"]["mean"], 12
+        )
+        self.assertIn("v2-sol-canonical-text-v1", rendered)
+        self.assertIn("canonical_layout_v1=1", rendered)
+        self.assertNotIn("never-rendered.pdf", rendered)
 
     def test_report_counts_rates_validation_and_safe_candidate_without_guessing(self):
         safe_job = self._add_run()
