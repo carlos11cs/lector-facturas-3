@@ -6284,7 +6284,7 @@ def async_invoice_analysis_is_available():
     return ASYNC_INVOICE_ANALYSIS_ENABLED and has_private_object_storage()
 
 
-INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v13"
+INVOICE_V2_SHADOW_VERSION = "v2-sol-text-v14"
 INVOICE_V2_SHADOW_ROUTE = "v2_fast_text_native"
 
 

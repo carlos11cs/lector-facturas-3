@@ -840,7 +840,7 @@ def render_benchmark_report(report: Mapping[str, Any]) -> str:
         f"  Requerirían fallback a V1 (conceptual): {_format_percent(rates['requires_v1_fallback'])}",
         f"  Fallback por accounting: {volume['fallback_accounting']} | por metadata: {volume['fallback_metadata']} | no elegibles: {volume['fallback_not_eligible']} | sin evaluar o strict mismatch: {volume['fallback_unassessed_or_mismatch']}",
         "",
-        "DECISIÓN DOCUMENTAL V11 (SOLO SHADOW)",
+        "DECISIÓN DOCUMENTAL SHADOW (SOLO SHADOW)",
         f"  ACCEPT_V2: {volume['accept_v2_shadow']} ({_format_percent(rates['accept_v2_shadow_of_eligible_completed'])} de elegibles completados)",
         f"  FALLBACK_V1: {volume['fallback_v1_shadow']}",
         f"  Full document match entre ACCEPT_V2: {_format_percent(rates['full_document_match_of_accept_v2_shadow'])}",
@@ -902,7 +902,7 @@ def render_benchmark_report(report: Mapping[str, Any]) -> str:
     else:
         lines.append("  Sin datos V11 en el alcance seleccionado.")
 
-    lines.extend(["", "VERIFICACIÓN DOCUMENTAL V11"])
+    lines.extend(["", "VERIFICACIÓN DOCUMENTAL SHADOW"])
     if fast_path["verification_failures"]:
         lines.extend(
             f"  {field}: {detail['count']} | jobs: {_format_job_ids(detail['job_ids'])}"
@@ -911,7 +911,7 @@ def render_benchmark_report(report: Mapping[str, Any]) -> str:
     else:
         lines.append("  Sin fallos de verificación documentados.")
 
-    lines.extend(["", "DISCREPANCIAS COMPLETAS V11"])
+    lines.extend(["", "DISCREPANCIAS DOCUMENTALES SHADOW"])
     if fast_path["full_document_discrepancies"]:
         lines.extend(
             f"  {field}: {detail['count']} | jobs: {_format_job_ids(detail['job_ids'])}"

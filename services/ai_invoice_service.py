@@ -3712,6 +3712,152 @@ def _compact_native_pdf_page_text(text: str) -> str:
     return "\n".join(compact_lines)
 
 
+def _fast_text_layout_token_from_word(word: Any, page_number: int) -> Optional[Dict[str, Any]]:
+    """Normalize PyMuPDF ``words`` output without retaining it beyond analysis."""
+    try:
+        if isinstance(word, dict):
+            text = str(word.get("text") or "").strip()
+            x0, y0, x1, y1 = (
+                float(word["x0"]),
+                float(word["y0"]),
+                float(word["x1"]),
+                float(word["y1"]),
+            )
+            block = int(word.get("block", 0))
+            line = int(word.get("line", 0))
+            word_index = int(word.get("word", 0))
+        else:
+            x0, y0, x1, y1, text, block, line, word_index = word[:8]
+            text = str(text or "").strip()
+            x0, y0, x1, y1 = float(x0), float(y0), float(x1), float(y1)
+            block, line, word_index = int(block), int(line), int(word_index)
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
+    if not text or x1 <= x0 or y1 <= y0:
+        return None
+    return {
+        "page": page_number,
+        "text": text,
+        "x0": x0,
+        "y0": y0,
+        "x1": x1,
+        "y1": y1,
+        "block": block,
+        "line": line,
+        "word": word_index,
+    }
+
+
+def _fast_text_layout_median(values: List[float]) -> float:
+    if not values:
+        return 1.0
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def _fast_text_layout_token_height(token: Dict[str, Any]) -> float:
+    return max(float(token["y1"]) - float(token["y0"]), 0.1)
+
+
+def _fast_text_layout_vertical_overlap(first: Dict[str, Any], second: Dict[str, Any]) -> float:
+    return max(0.0, min(first["y1"], second["y1"]) - max(first["y0"], second["y0"]))
+
+
+def _fast_text_layout_row_accepts_token(row: Dict[str, Any], token: Dict[str, Any]) -> bool:
+    """Use source line metadata first, then local token-height geometry."""
+    if (token["block"], token["line"]) in row["source_lines"]:
+        return True
+    row_height = max(float(row["y1"]) - float(row["y0"]), 0.1)
+    token_height = _fast_text_layout_token_height(token)
+    overlap = _fast_text_layout_vertical_overlap(row, token)
+    if overlap / min(row_height, token_height) >= 0.6:
+        return True
+    row_center = (float(row["y0"]) + float(row["y1"])) / 2
+    token_center = (float(token["y0"]) + float(token["y1"])) / 2
+    local_height = max(row["median_token_height"], token_height)
+    return abs(row_center - token_center) <= local_height * 0.45
+
+
+def _finalize_fast_text_layout_row(row: Dict[str, Any], index: int) -> Dict[str, Any]:
+    tokens = sorted(row["tokens"], key=lambda token: (token["x0"], token["word"]))
+    row["tokens"] = tokens
+    row["index"] = index
+    row["x0"] = min(token["x0"] for token in tokens)
+    row["y0"] = min(token["y0"] for token in tokens)
+    row["x1"] = max(token["x1"] for token in tokens)
+    row["y1"] = max(token["y1"] for token in tokens)
+    row["median_token_height"] = _fast_text_layout_median(
+        [_fast_text_layout_token_height(token) for token in tokens]
+    )
+    row["text"] = " ".join(token["text"] for token in tokens)
+    row["normalized_text"] = _normalize_fast_text_parser_line(row["text"])
+    return row
+
+
+def _build_fast_text_document_layout(raw_pages_words: List[List[Any]]) -> Dict[str, Any]:
+    """Build minimal visual rows from PyMuPDF words for the V14 verifier.
+
+    The representation is deliberately ephemeral. It preserves only the local
+    geometry required to prove a model-proposed value, not a document model or
+    reconstructed table suitable for persistence.
+    """
+    pages: List[Dict[str, Any]] = []
+    for page_number, raw_words in enumerate(raw_pages_words or [], start=1):
+        tokens = [
+            token
+            for word in raw_words or []
+            if (token := _fast_text_layout_token_from_word(word, page_number)) is not None
+        ]
+        tokens.sort(key=lambda token: (token["y0"], token["x0"], token["block"], token["line"], token["word"]))
+        rows: List[Dict[str, Any]] = []
+        for token in tokens:
+            compatible = [row for row in rows if _fast_text_layout_row_accepts_token(row, token)]
+            if compatible:
+                row = min(
+                    compatible,
+                    key=lambda candidate: abs(
+                        ((candidate["y0"] + candidate["y1"]) / 2)
+                        - ((token["y0"] + token["y1"]) / 2)
+                    ),
+                )
+                row["tokens"].append(token)
+                row["source_lines"].add((token["block"], token["line"]))
+                row["median_token_height"] = _fast_text_layout_median(
+                    [_fast_text_layout_token_height(item) for item in row["tokens"]]
+                )
+                row["x0"] = min(row["x0"], token["x0"])
+                row["y0"] = min(row["y0"], token["y0"])
+                row["x1"] = max(row["x1"], token["x1"])
+                row["y1"] = max(row["y1"], token["y1"])
+                continue
+            rows.append(
+                {
+                    "page": page_number,
+                    "tokens": [token],
+                    "source_lines": {(token["block"], token["line"])},
+                    "x0": token["x0"],
+                    "y0": token["y0"],
+                    "x1": token["x1"],
+                    "y1": token["y1"],
+                    "median_token_height": _fast_text_layout_token_height(token),
+                }
+            )
+        rows.sort(key=lambda row: (row["y0"], row["x0"]))
+        pages.append(
+            {
+                "page": page_number,
+                "rows": [
+                    _finalize_fast_text_layout_row(row, index)
+                    for index, row in enumerate(rows)
+                ],
+            }
+        )
+    return {"pages": pages}
+
+
 def prepare_invoice_v2_fast_text(
     file_bytes: bytes,
     *,
@@ -3738,6 +3884,10 @@ def prepare_invoice_v2_fast_text(
         "document_text_complete": False,
         "size_reduction_ratio": None,
         "text": "",
+        # V14 keeps its layout private to this in-memory object. Callers only
+        # persist the explicit operational fields above.
+        "_document_layout": None,
+        "layout_build_ms": None,
     }
     if not is_pdf:
         return base_result
@@ -3747,7 +3897,14 @@ def prepare_invoice_v2_fast_text(
     try:
         with fitz.open(stream=file_bytes, filetype="pdf") as document:
             page_count = len(document)
-            raw_pages = [page.get_text("text", sort=True) or "" for page in document]
+            raw_pages = []
+            raw_pages_words = []
+            layout_started = time.monotonic()
+            for page in document:
+                raw_pages.append(page.get_text("text", sort=True) or "")
+                raw_pages_words.append(page.get_text("words", sort=True) or [])
+            document_layout = _build_fast_text_document_layout(raw_pages_words)
+            layout_build_ms = round((time.monotonic() - layout_started) * 1000)
     except Exception:
         logger.info("Fast path V2 no elegible (%s): native_text_unavailable", filename)
         base_result["reason"] = "native_text_unavailable"
@@ -3793,6 +3950,8 @@ def prepare_invoice_v2_fast_text(
                 max(0.0, 1 - (sent_text_chars / max(native_text_chars, 1))), 4
             ),
             "text": compact_text,
+            "_document_layout": document_layout,
+            "layout_build_ms": layout_build_ms,
         }
     )
     return base_result
@@ -6164,7 +6323,7 @@ def _inspect_fast_text_invoice_number_evidence(text: str) -> Dict[str, Any]:
 
 
 def _reconcile_fast_text_invoice_number(
-    invoice_number: Optional[str], document_text: str
+    invoice_number: Optional[str], document_text: str, *, document_layout: Optional[Dict[str, Any]] = None
 ) -> Tuple[Optional[str], List[str], List[str], str, Dict[str, Any]]:
     """Confirm V11's full model value before using label-first evidence.
 
@@ -6342,6 +6501,31 @@ def _reconcile_fast_text_invoice_number(
             diagnostics,
         )
 
+    # V14 only supplements a missing text-order relationship. The complete
+    # model value must already have one native-text occurrence; layout merely
+    # proves that exact value belongs to a nearby strong invoice label.
+    if evidence["status"] == "missing" and context_status == "unlabeled":
+        spatial_verification = _verify_fast_text_layout_invoice_number(
+            invoice_number,
+            document_layout,
+            model_value_found_in_native_text=bool(model_evidence.get("model_value_found")),
+            model_value_match_count=int(model_evidence.get("model_value_match_count") or 0),
+        )
+        if spatial_verification.get("status") == "confirmed":
+            diagnostics = _build_fast_text_invoice_parser_diagnostics(
+                evidence,
+                selected_candidate_type="invoice_number",
+                action="confirmed_model_value_from_spatial_invoice_label",
+                ambiguity_reason=None,
+                model_normalized_value=normalized_model_number,
+                selected_candidate_normalized_value=normalized_model_number,
+                model_evidence=model_evidence,
+            )
+            diagnostics["context_label_type"] = spatial_verification.get("context_type")
+            diagnostics["model_value_context_label_type"] = spatial_verification.get("context_type")
+            diagnostics["model_value_invoice_context_status"] = "strong_spatial_invoice_label"
+            return invoice_number, [], [], "confirmed", diagnostics
+
     if evidence["status"] == "missing":
         diagnostics = _build_fast_text_invoice_parser_diagnostics(
             evidence,
@@ -6494,6 +6678,7 @@ def _reconcile_fast_text_invoice_date(
     *,
     supplier_tax_id: Optional[str] = None,
     registered_company_tax_id: Optional[str] = None,
+    document_layout: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[str], List[str], List[str], Dict[str, Any]]:
     """Use only one explicit native-text invoice date as deterministic evidence."""
     evidence = _inspect_fast_text_invoice_date_evidence(
@@ -6516,6 +6701,45 @@ def _reconcile_fast_text_invoice_date(
         diagnostics["reconciliation_action"] = "review_ambiguous_invoice_dates"
         return normalized_model_date, [], ["invoice_date_evidence_ambiguous"], diagnostics
     if evidence["status"] != "unambiguous":
+        spatial_evidence = _fast_text_layout_invoice_date_candidate(
+            document_layout,
+            spanish_fiscal_context=evidence.get("spanish_fiscal_context"),
+        )
+        if spatial_evidence["status"] == "ambiguous":
+            diagnostics.update(
+                {
+                    "status": "ambiguous",
+                    "candidate_count": spatial_evidence["candidate_count"],
+                    "match_method": spatial_evidence["match_method"],
+                    "reconciliation_action": "review_ambiguous_spatial_invoice_dates",
+                }
+            )
+            return normalized_model_date, [], ["invoice_date_evidence_ambiguous"], diagnostics
+        if spatial_evidence["status"] == "unambiguous":
+            diagnostics.update(
+                {
+                    "status": "unambiguous",
+                    "candidate_count": 1,
+                    "match_method": spatial_evidence["match_method"],
+                    "model_matches_evidence": bool(
+                        normalized_model_date
+                        and normalized_model_date == spatial_evidence["invoice_date"]
+                    ),
+                    "reconciliation_action": (
+                        "confirmed_model_date_from_spatial_invoice_label"
+                        if normalized_model_date == spatial_evidence["invoice_date"]
+                        else "spatial_invoice_date_differs_from_model"
+                    ),
+                }
+            )
+            if normalized_model_date == spatial_evidence["invoice_date"]:
+                return (
+                    normalized_model_date,
+                    ["invoice_date_confirmed_from_spatial_label"],
+                    [],
+                    diagnostics,
+                )
+            return normalized_model_date, [], [], diagnostics
         diagnostics["reconciliation_action"] = "no_native_invoice_date_evidence"
         return normalized_model_date, [], [], diagnostics
     if normalized_model_date == evidence["invoice_date"]:
@@ -6606,6 +6830,486 @@ def _fast_text_local_context(lines: List[str], line_index: int) -> str:
     start = max(0, line_index - 1)
     end = min(len(lines), line_index + 2)
     return "\n".join(lines[start:end])
+
+
+_FAST_TEXT_LAYOUT_STRONG_TOTAL_PATTERN = re.compile(
+    r"\b(?:TOTAL\s+(?:FACTURA|A\s+PAGAR|GENERAL)|IMPORTE\s+TOTAL|GRAND\s+TOTAL|AMOUNT\s+DUE)\b"
+)
+_FAST_TEXT_LAYOUT_RATE_HEADER_PATTERN = re.compile(
+    r"\b(?:TIPO|TASA|RATE|PORCENTAJE|%)\b"
+)
+
+
+def _fast_text_layout_rows(layout: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not isinstance(layout, dict):
+        return []
+    rows: List[Dict[str, Any]] = []
+    for page in layout.get("pages") or []:
+        if isinstance(page, dict):
+            rows.extend(row for row in page.get("rows") or [] if isinstance(row, dict))
+    return rows
+
+
+def _fast_text_layout_page_rows(layout: Optional[Dict[str, Any]], page_number: int) -> List[Dict[str, Any]]:
+    if not isinstance(layout, dict):
+        return []
+    for page in layout.get("pages") or []:
+        if isinstance(page, dict) and page.get("page") == page_number:
+            return [row for row in page.get("rows") or [] if isinstance(row, dict)]
+    return []
+
+
+def _fast_text_layout_rows_are_related(first: Dict[str, Any], second: Dict[str, Any]) -> bool:
+    """Allow only immediately adjacent visual rows with local geometric affinity."""
+    if first.get("page") != second.get("page") or abs(first.get("index", 0) - second.get("index", 0)) != 1:
+        return False
+    vertical_gap = max(0.0, max(first["y0"], second["y0"]) - min(first["y1"], second["y1"]))
+    local_height = max(float(first["median_token_height"]), float(second["median_token_height"]), 0.1)
+    if vertical_gap > local_height * 3:
+        return False
+    first_width = max(float(first["x1"]) - float(first["x0"]), 0.1)
+    second_width = max(float(second["x1"]) - float(second["x0"]), 0.1)
+    overlap = max(0.0, min(first["x1"], second["x1"]) - max(first["x0"], second["x0"]))
+    if overlap / min(first_width, second_width) >= 0.25:
+        return True
+    first_center = (first["x0"] + first["x1"]) / 2
+    second_center = (second["x0"] + second["x1"]) / 2
+    return abs(first_center - second_center) <= max(first_width, second_width) * 0.8
+
+
+def _fast_text_layout_local_rows(layout: Optional[Dict[str, Any]], row: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows = _fast_text_layout_page_rows(layout, row.get("page"))
+    local_rows = [row]
+    for candidate_index in (row.get("index", 0) - 1, row.get("index", 0) + 1):
+        if not 0 <= candidate_index < len(rows):
+            continue
+        candidate = rows[candidate_index]
+        if _fast_text_layout_rows_are_related(row, candidate):
+            local_rows.append(candidate)
+    return local_rows
+
+
+def _fast_text_layout_row_fragments(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+    fragments: List[Dict[str, Any]] = []
+    offset = 0
+    for token in row.get("tokens") or []:
+        normalized = _normalize_fast_text_parser_line(token.get("text"))
+        if not normalized:
+            continue
+        if fragments:
+            offset += 1
+        fragments.append(
+            {
+                "start": offset,
+                "end": offset + len(normalized),
+                "text": normalized,
+                "token": token,
+            }
+        )
+        offset += len(normalized)
+    return fragments
+
+
+def _fast_text_layout_row_normalized_text(row: Dict[str, Any]) -> str:
+    return " ".join(fragment["text"] for fragment in _fast_text_layout_row_fragments(row))
+
+
+def _fast_text_layout_union_bbox(tokens: List[Dict[str, Any]]) -> Optional[Tuple[float, float, float, float]]:
+    if not tokens:
+        return None
+    return (
+        min(token["x0"] for token in tokens),
+        min(token["y0"] for token in tokens),
+        max(token["x1"] for token in tokens),
+        max(token["y1"] for token in tokens),
+    )
+
+
+def _fast_text_layout_label_boxes(row: Dict[str, Any], pattern: re.Pattern) -> List[Tuple[float, float, float, float]]:
+    fragments = _fast_text_layout_row_fragments(row)
+    text = " ".join(fragment["text"] for fragment in fragments)
+    boxes = []
+    for match in pattern.finditer(text):
+        matched_tokens = [
+            fragment["token"]
+            for fragment in fragments
+            if fragment["start"] < match.end() and fragment["end"] > match.start()
+        ]
+        bbox = _fast_text_layout_union_bbox(matched_tokens)
+        if bbox is not None:
+            boxes.append(bbox)
+    return boxes
+
+
+def _fast_text_layout_money_matches(row: Dict[str, Any], proposed: Decimal) -> List[Dict[str, Any]]:
+    matches = []
+    for token in row.get("tokens") or []:
+        value = _parse_fast_text_money(token.get("text"))
+        if value is not None and abs(value - proposed) <= Decimal("0.01"):
+            matches.append(token)
+    return matches
+
+
+def _fast_text_layout_money_values(row: Dict[str, Any]) -> List[Tuple[Dict[str, Any], Decimal]]:
+    values = []
+    for token in row.get("tokens") or []:
+        value = _parse_fast_text_money(token.get("text"))
+        if value is not None:
+            values.append((token, value))
+    return values
+
+
+def _fast_text_layout_box_centers_align(
+    label_box: Tuple[float, float, float, float], value_box: Tuple[float, float, float, float]
+) -> bool:
+    label_width = max(label_box[2] - label_box[0], 0.1)
+    value_width = max(value_box[2] - value_box[0], 0.1)
+    overlap = max(0.0, min(label_box[2], value_box[2]) - max(label_box[0], value_box[0]))
+    if overlap > 0:
+        return True
+    label_center = (label_box[0] + label_box[2]) / 2
+    value_center = (value_box[0] + value_box[2]) / 2
+    return abs(label_center - value_center) <= max(label_width, value_width) * 0.75
+
+
+def _fast_text_layout_column_label_boxes(field: str, row: Dict[str, Any]) -> List[Tuple[float, float, float, float]]:
+    if field == "total_amount":
+        return _fast_text_layout_label_boxes(row, re.compile(r"\bTOTAL\b"))
+    return _fast_text_layout_label_boxes(row, _FAST_TEXT_MONEY_CONTEXT_PATTERNS[field])
+
+
+def _fast_text_layout_accounting_header_fields(row: Dict[str, Any]) -> set[str]:
+    fields = set()
+    for field in ("base_amount", "vat_amount", "total_amount"):
+        if _fast_text_layout_column_label_boxes(field, row):
+            fields.add(field)
+    return fields
+
+
+def _fast_text_layout_monetary_associations(
+    field: str, proposed: Decimal, layout: Optional[Dict[str, Any]]
+) -> int:
+    """Count unambiguous local label/value or header/column proof paths."""
+    associations = set()
+    pattern = _FAST_TEXT_MONEY_CONTEXT_PATTERNS[field]
+    for row in _fast_text_layout_rows(layout):
+        label_boxes = _fast_text_layout_label_boxes(row, pattern)
+        if field == "total_amount" and label_boxes and not _FAST_TEXT_LAYOUT_STRONG_TOTAL_PATTERN.search(
+            _fast_text_layout_row_normalized_text(row)
+        ):
+            label_boxes = []
+        same_row_matches = _fast_text_layout_money_matches(row, proposed)
+        if label_boxes and len(same_row_matches) == 1:
+            associations.add((row["page"], row["index"], row["index"], same_row_matches[0]["x0"]))
+        for related in _fast_text_layout_local_rows(layout, row):
+            if related is row or not label_boxes:
+                continue
+            related_values = _fast_text_layout_money_values(related)
+            if len(related_values) == 1 and abs(related_values[0][1] - proposed) <= Decimal("0.01"):
+                associations.add((row["page"], row["index"], related["index"], related_values[0][0]["x0"]))
+
+        header_fields = _fast_text_layout_accounting_header_fields(row)
+        if len(header_fields) < 2 or field not in header_fields:
+            continue
+        for related in _fast_text_layout_local_rows(layout, row):
+            if related is row:
+                continue
+            matching_values = _fast_text_layout_money_matches(related, proposed)
+            for label_box in _fast_text_layout_column_label_boxes(field, row):
+                aligned = [
+                    token
+                    for token in matching_values
+                    if _fast_text_layout_box_centers_align(
+                        label_box, (token["x0"], token["y0"], token["x1"], token["y1"])
+                    )
+                ]
+                if len(aligned) == 1:
+                    associations.add((row["page"], row["index"], related["index"], aligned[0]["x0"]))
+    return len(associations)
+
+
+def _verify_fast_text_layout_monetary_field(
+    field: str, proposed_value: Any, layout: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    proposed = _money_decimal(proposed_value)
+    if proposed is None:
+        return _fast_text_verification("review", match_method="spatial_monetary", reason=f"{field}_missing")
+    associations = _fast_text_layout_monetary_associations(field, proposed, layout)
+    if associations == 1:
+        return _fast_text_verification(
+            "confirmed",
+            match_method="spatial_label_value",
+            match_count=1,
+            context_type=field,
+        )
+    return _fast_text_verification(
+        "review",
+        match_method="spatial_label_value",
+        match_count=associations,
+        context_type=field,
+        reason=(f"{field}_spatial_association_ambiguous" if associations else f"{field}_spatial_context_missing"),
+    )
+
+
+def _fast_text_layout_merge_verification(
+    linear: Dict[str, Any], spatial: Optional[Dict[str, Any]], *, allow_not_applicable_refutation: bool = False
+) -> Dict[str, Any]:
+    """Let layout prove a review, never erase a deterministic contradiction."""
+    if not isinstance(spatial, dict) or linear.get("status") == "contradiction":
+        return linear
+    if linear.get("status") == "review" and spatial.get("status") in {"confirmed", "contradiction"}:
+        return spatial
+    if (
+        allow_not_applicable_refutation
+        and linear.get("status") == "not_applicable"
+        and spatial.get("status") == "contradiction"
+    ):
+        return spatial
+    return linear
+
+
+def _fast_text_layout_identifier_matches(
+    layout: Optional[Dict[str, Any]], normalized_value: Optional[str]
+) -> List[Dict[str, Any]]:
+    """Find a complete canonical identifier within one visual row only."""
+    if not normalized_value:
+        return []
+    matches = []
+    for row in _fast_text_layout_rows(layout):
+        tokens = row.get("tokens") or []
+        normalized_tokens = [
+            _normalize_fast_text_identifier(token.get("text")) or "" for token in tokens
+        ]
+        for start_index, first in enumerate(normalized_tokens):
+            sequence = ""
+            for end_index in range(start_index, min(len(normalized_tokens), start_index + 16)):
+                current = normalized_tokens[end_index]
+                if not current:
+                    break
+                sequence += current
+                if not normalized_value.startswith(sequence):
+                    break
+                if sequence != normalized_value:
+                    continue
+                if start_index and any(character.isdigit() for character in normalized_tokens[start_index - 1]):
+                    break
+                if end_index + 1 < len(normalized_tokens) and any(
+                    character.isdigit() for character in normalized_tokens[end_index + 1]
+                ):
+                    break
+                matches.append(
+                    {
+                        "row": row,
+                        "start_index": start_index,
+                        "end_index": end_index,
+                        "bbox": _fast_text_layout_union_bbox(tokens[start_index : end_index + 1]),
+                    }
+                )
+                break
+    return matches
+
+
+def _fast_text_layout_strong_invoice_label_rows(
+    layout: Optional[Dict[str, Any]], match: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    rows = []
+    for row in _fast_text_layout_local_rows(layout, match["row"]):
+        row_text = _fast_text_layout_row_normalized_text(row)
+        if _FAST_TEXT_DOCUMENT_NON_INVOICE_PATTERN.search(row_text):
+            continue
+        for candidate_type, label_type, strength, expression in _FAST_TEXT_IDENTIFIER_LABEL_GRAMMAR:
+            if candidate_type != "invoice_number" or strength != "strong":
+                continue
+            if re.search(r"(?<![A-Z0-9])(?:" + expression + r")(?![A-Z0-9])", row_text):
+                rows.append(
+                    {"row": row, "label_type": label_type}
+                )
+                break
+    return rows
+
+
+def _verify_fast_text_layout_invoice_number(
+    invoice_number: Optional[str],
+    layout: Optional[Dict[str, Any]],
+    *,
+    model_value_found_in_native_text: bool,
+    model_value_match_count: int,
+) -> Dict[str, Any]:
+    """Prove an already-found complete model ID against a nearby invoice label."""
+    normalized = _normalize_fast_text_identifier(invoice_number)
+    if not normalized or not model_value_found_in_native_text or model_value_match_count != 1:
+        return _fast_text_verification(
+            "review", match_method="spatial_invoice_identifier", reason="invoice_number_not_spatially_eligible"
+        )
+    matches = _fast_text_layout_identifier_matches(layout, normalized)
+    if len(matches) != 1:
+        return _fast_text_verification(
+            "review",
+            match_method="spatial_invoice_identifier",
+            match_count=len(matches),
+            reason=("invoice_number_spatial_association_ambiguous" if matches else "invoice_number_spatial_context_missing"),
+        )
+    labels = _fast_text_layout_strong_invoice_label_rows(layout, matches[0])
+    if len(labels) == 1:
+        return _fast_text_verification(
+            "confirmed",
+            match_method="spatial_strong_invoice_label",
+            match_count=1,
+            context_type=labels[0]["label_type"],
+        )
+    return _fast_text_verification(
+        "review",
+        match_method="spatial_invoice_identifier",
+        match_count=len(labels),
+        reason=("invoice_number_spatial_association_ambiguous" if labels else "invoice_number_spatial_context_missing"),
+    )
+
+
+def _fast_text_layout_invoice_date_candidate(
+    layout: Optional[Dict[str, Any]], *, spanish_fiscal_context: Optional[str]
+) -> Dict[str, Any]:
+    """Find one date under a strong invoice-date label in a local visual row."""
+    candidates: Dict[str, bool] = {}
+    for row in _fast_text_layout_rows(layout):
+        row_text = _fast_text_layout_row_normalized_text(row)
+        if not _FAST_TEXT_INVOICE_DATE_STRONG_PATTERN.search(row_text):
+            continue
+        for candidate_row in _fast_text_layout_local_rows(layout, row):
+            candidate_text = _fast_text_layout_row_normalized_text(candidate_row)
+            if _FAST_TEXT_DATE_EXCLUSION_PATTERN.search(candidate_text):
+                continue
+            for match in _FAST_TEXT_INVOICE_DATE_PATTERN.finditer(candidate_text):
+                raw_date = match.group(0)
+                ambiguous_numeric = (
+                    len(match.group(3)) == 2
+                    and int(match.group(1)) <= 12
+                    and not spanish_fiscal_context
+                )
+                normalized = _normalize_fast_text_date(raw_date)
+                if not normalized:
+                    continue
+                candidates[normalized] = candidates.get(normalized, False) or ambiguous_numeric
+    if len(candidates) != 1:
+        return {
+            "status": "ambiguous" if candidates else "missing",
+            "invoice_date": None,
+            "candidate_count": len(candidates),
+            "match_method": "spatial_invoice_date_label",
+        }
+    invoice_date, ambiguous_numeric = next(iter(candidates.items()))
+    if ambiguous_numeric:
+        return {
+            "status": "ambiguous",
+            "invoice_date": None,
+            "candidate_count": 1,
+            "match_method": "spatial_ambiguous_two_digit_invoice_date",
+        }
+    return {
+        "status": "unambiguous",
+        "invoice_date": invoice_date,
+        "candidate_count": 1,
+        "match_method": "spatial_strong_invoice_date_label",
+    }
+
+
+def _verify_fast_text_layout_invoice_date(
+    invoice_date: Optional[str],
+    date_diagnostics: Dict[str, Any],
+    layout: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    evidence = _fast_text_layout_invoice_date_candidate(
+        layout,
+        spanish_fiscal_context=date_diagnostics.get("spanish_fiscal_context"),
+    )
+    if evidence["status"] == "unambiguous" and invoice_date == evidence["invoice_date"]:
+        return _fast_text_verification(
+            "confirmed",
+            match_method=evidence["match_method"],
+            match_count=1,
+            context_type="invoice_date",
+        )
+    if evidence["status"] == "unambiguous" and invoice_date:
+        return _fast_text_verification(
+            "contradiction",
+            match_method=evidence["match_method"],
+            match_count=1,
+            context_type="invoice_date",
+            reason="invoice_date_differs_from_spatial_label",
+        )
+    return _fast_text_verification(
+        "review",
+        match_method=evidence["match_method"],
+        match_count=evidence["candidate_count"],
+        reason=("invoice_date_evidence_ambiguous" if evidence["status"] == "ambiguous" else "invoice_date_spatial_context_missing"),
+    )
+
+
+def _verify_fast_text_layout_supplier_tax_id(
+    supplier_tax_id: Optional[str],
+    layout: Optional[Dict[str, Any]],
+    *,
+    registered_company_tax_id: Optional[str],
+) -> Dict[str, Any]:
+    normalized = _normalize_fast_text_tax_id(supplier_tax_id)
+    registered = _normalize_fast_text_tax_id(registered_company_tax_id)
+    if not normalized:
+        return _fast_text_verification("review", match_method="spatial_supplier_tax_id", reason="supplier_tax_id_missing")
+    if registered and normalized == registered:
+        return _fast_text_verification(
+            "contradiction",
+            match_method="registered_company_tax_id",
+            context_type="recipient",
+            reason="supplier_tax_id_matches_registered_company",
+        )
+    matches = _fast_text_layout_identifier_matches(layout, normalized)
+    if len(matches) != 1:
+        return _fast_text_verification(
+            "review",
+            match_method="spatial_supplier_tax_id",
+            match_count=len(matches),
+            reason=("supplier_tax_id_spatial_association_ambiguous" if matches else "supplier_tax_id_spatial_context_missing"),
+        )
+    local_rows = _fast_text_layout_local_rows(layout, matches[0]["row"])
+    provider_rows = [
+        row for row in local_rows if _FAST_TEXT_PROVIDER_CONTEXT_PATTERN.search(_fast_text_layout_row_normalized_text(row))
+    ]
+    recipient_rows = [
+        row for row in local_rows if _FAST_TEXT_RECIPIENT_CONTEXT_PATTERN.search(_fast_text_layout_row_normalized_text(row))
+    ]
+    if recipient_rows and not provider_rows:
+        return _fast_text_verification(
+            "contradiction",
+            match_method="spatial_party_region",
+            match_count=1,
+            context_type="recipient",
+            reason="supplier_tax_id_in_recipient_context",
+        )
+    if len(provider_rows) == 1 and not recipient_rows:
+        return _fast_text_verification(
+            "confirmed",
+            match_method="spatial_party_region",
+            match_count=1,
+            context_type="provider",
+        )
+    return _fast_text_verification(
+        "review",
+        match_method="spatial_party_region",
+        match_count=len(provider_rows) + len(recipient_rows),
+        reason="supplier_tax_id_spatial_region_unattributed",
+    )
+
+
+def _verify_fast_text_layout_document_type(layout: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    rows = _fast_text_layout_rows(layout)
+    for row in rows[:20]:
+        text = _fast_text_layout_row_normalized_text(row)
+        if _FAST_TEXT_DOCUMENT_INVOICE_PATTERN.search(text) and not _FAST_TEXT_DOCUMENT_NON_INVOICE_PATTERN.search(text):
+            return _fast_text_verification(
+                "confirmed", match_method="spatial_invoice_header", match_count=1, context_type="invoice"
+            )
+    return _fast_text_verification(
+        "review", match_method="spatial_invoice_header", reason="invoice_document_type_not_spatially_confirmed"
+    )
 
 
 def _verify_fast_text_document_type(
@@ -7152,6 +7856,161 @@ def _verify_fast_text_vat_breakdown(
     )
 
 
+def _fast_text_layout_rate_matches(row: Dict[str, Any], rate: Any) -> List[Dict[str, Any]]:
+    try:
+        normalized_rate = format(float(rate), "g")
+    except (TypeError, ValueError):
+        return []
+    pattern = re.compile(rf"(?<![0-9]){re.escape(normalized_rate)}(?:[.,]0+)?\s*%(?![0-9])")
+    return [
+        token
+        for token in row.get("tokens") or []
+        if pattern.search(_normalize_fast_text_parser_line(token.get("text")))
+    ]
+
+
+def _fast_text_layout_table_rows_after(
+    layout: Optional[Dict[str, Any]], header: Dict[str, Any], count: int
+) -> List[Dict[str, Any]]:
+    rows = _fast_text_layout_page_rows(layout, header.get("page"))
+    result = []
+    previous = header
+    for candidate in rows[header.get("index", 0) + 1 :]:
+        if not _fast_text_layout_rows_are_related(previous, candidate):
+            break
+        result.append(candidate)
+        previous = candidate
+        if len(result) >= max(1, count):
+            break
+    return result
+
+
+def _fast_text_layout_vat_row_matches(
+    layout: Optional[Dict[str, Any]], rate: Any, base: Decimal, vat: Decimal, tax_line_count: int
+) -> List[Tuple[int, int]]:
+    matches = []
+    for header in _fast_text_layout_rows(layout):
+        base_boxes = _fast_text_layout_label_boxes(header, _FAST_TEXT_VAT_TABLE_BASE_PATTERN)
+        vat_boxes = _fast_text_layout_label_boxes(header, _FAST_TEXT_VAT_TABLE_AMOUNT_PATTERN)
+        rate_boxes = _fast_text_layout_label_boxes(header, _FAST_TEXT_LAYOUT_RATE_HEADER_PATTERN)
+        if len(base_boxes) != 1 or len(vat_boxes) != 1 or len(rate_boxes) != 1:
+            continue
+        for row in _fast_text_layout_table_rows_after(layout, header, tax_line_count):
+            rate_matches = _fast_text_layout_rate_matches(row, rate)
+            base_matches = _fast_text_layout_money_matches(row, base)
+            vat_matches = _fast_text_layout_money_matches(row, vat)
+            aligned_base = [
+                token
+                for token in base_matches
+                if _fast_text_layout_box_centers_align(
+                    base_boxes[0], (token["x0"], token["y0"], token["x1"], token["y1"])
+                )
+            ]
+            aligned_vat = [
+                token
+                for token in vat_matches
+                if _fast_text_layout_box_centers_align(
+                    vat_boxes[0], (token["x0"], token["y0"], token["x1"], token["y1"])
+                )
+            ]
+            aligned_rate = [
+                token
+                for token in rate_matches
+                if _fast_text_layout_box_centers_align(
+                    rate_boxes[0], (token["x0"], token["y0"], token["x1"], token["y1"])
+                )
+            ]
+            if len(aligned_rate) == len(aligned_base) == len(aligned_vat) == 1:
+                matches.append((header["page"], row["index"]))
+    return matches
+
+
+def _verify_fast_text_layout_vat_breakdown(
+    taxes: List[Dict[str, Any]], layout: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    material_lines = [
+        line
+        for line in taxes or []
+        if abs(_money_decimal(line.get("base")) or Decimal("0")) > Decimal("0.01")
+        or abs(_money_decimal(line.get("vat_amount")) or Decimal("0")) > Decimal("0.01")
+    ]
+    if not material_lines:
+        return _fast_text_verification("not_applicable", match_method="zero_tax_lines")
+    confirmed_rows = set()
+    for tax_line in material_lines:
+        rate = tax_line.get("rate")
+        base = _money_decimal(tax_line.get("base"))
+        vat = _money_decimal(tax_line.get("vat_amount"))
+        if rate is None or base is None or vat is None:
+            return _fast_text_verification(
+                "review", match_method="spatial_tax_row", reason="vat_breakdown_incomplete"
+            )
+        expected_vat = (base * Decimal(str(rate)) / Decimal("100")).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        if abs(expected_vat - vat) > Decimal("0.01"):
+            return _fast_text_verification(
+                "contradiction", match_method="spatial_tax_row", reason="vat_breakdown_math_mismatch"
+            )
+        matches = _fast_text_layout_vat_row_matches(
+            layout, rate, base, vat, len(material_lines)
+        )
+        if len(matches) != 1:
+            return _fast_text_verification(
+                "review",
+                match_method="spatial_tax_row",
+                match_count=len(confirmed_rows),
+                context_type="vat_breakdown",
+                reason=("vat_breakdown_spatial_association_ambiguous" if matches else "vat_breakdown_spatial_context_missing"),
+            )
+        confirmed_rows.add(matches[0])
+    if len(confirmed_rows) != len(material_lines):
+        return _fast_text_verification(
+            "review", match_method="spatial_tax_row", reason="vat_breakdown_spatial_rows_not_unique"
+        )
+    return _fast_text_verification(
+        "confirmed",
+        match_method="spatial_tax_row",
+        match_count=len(confirmed_rows),
+        context_type="vat_breakdown",
+    )
+
+
+def _verify_fast_text_layout_optional_adjustment_field(
+    field: str, proposed_value: Any, layout: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    proposed = _money_decimal(proposed_value)
+    if proposed is not None and abs(proposed) > Decimal("0.01"):
+        return _verify_fast_text_layout_monetary_field(field, proposed_value, layout)
+    material_associations = 0
+    pattern = _FAST_TEXT_MONEY_CONTEXT_PATTERNS[field]
+    for row in _fast_text_layout_rows(layout):
+        if not _fast_text_layout_label_boxes(row, pattern):
+            continue
+        candidates = _fast_text_layout_money_values(row)
+        for related in _fast_text_layout_local_rows(layout, row):
+            if related is not row:
+                candidates.extend(_fast_text_layout_money_values(related))
+        material_values = [value for _token, value in candidates if abs(value) > Decimal("0.01")]
+        if len(material_values) == 1:
+            material_associations += 1
+    if material_associations == 1:
+        return _fast_text_verification(
+            "contradiction",
+            match_method="spatial_labelled_adjustment",
+            match_count=1,
+            context_type=field,
+            reason=f"{field}_zero_differs_from_spatial_context",
+        )
+    return _fast_text_verification(
+        "review",
+        match_method="spatial_labelled_adjustment",
+        match_count=material_associations,
+        context_type=field,
+        reason=(f"{field}_spatial_association_ambiguous" if material_associations > 1 else f"{field}_spatial_context_missing"),
+    )
+
+
 def _verify_fast_text_currency(currency: Optional[str], document_text: str) -> Dict[str, Any]:
     normalized = str(currency or "").upper().strip()
     if normalized not in _FAST_TEXT_CURRENCY_MARKERS:
@@ -7196,6 +8055,14 @@ def _verify_fast_text_invoice_date(
             match_method=str(date_diagnostics.get("match_method") or "invoice_date_label"),
             match_count=1,
             context_type="invoice_date",
+        )
+    if status == "unambiguous" and invoice_date:
+        return _fast_text_verification(
+            "contradiction",
+            match_method=str(date_diagnostics.get("match_method") or "invoice_date_label"),
+            match_count=1,
+            context_type="invoice_date",
+            reason="invoice_date_differs_from_document_context",
         )
     if status == "ambiguous":
         return _fast_text_verification(
@@ -7292,52 +8159,96 @@ def _verify_fast_text_document(
     invoice_parser_diagnostics: Dict[str, Any],
     invoice_date_diagnostics: Dict[str, Any],
     deterministic_corrections: List[str],
+    document_layout: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Verify V2 proposals against compact native text without extracting anew."""
-    supplier_tax_id = _verify_fast_text_supplier_tax_id(
-        normalized.get("supplier_tax_id"),
-        document_text,
-        registered_company_tax_id=registered_company_tax_id,
+    supplier_tax_id = _fast_text_layout_merge_verification(
+        _verify_fast_text_supplier_tax_id(
+            normalized.get("supplier_tax_id"),
+            document_text,
+            registered_company_tax_id=registered_company_tax_id,
+        ),
+        _verify_fast_text_layout_supplier_tax_id(
+            normalized.get("supplier_tax_id"),
+            document_layout,
+            registered_company_tax_id=registered_company_tax_id,
+        ),
     )
     invoice_number = _verify_fast_text_invoice_number(
         invoice_number_evidence_status, invoice_parser_diagnostics
     )
     accounting_equation = _verify_fast_text_accounting_equation(normalized)
     verification = {
-        "document_type": _verify_fast_text_document_type(
-            document_text, invoice_number
+        "document_type": _fast_text_layout_merge_verification(
+            _verify_fast_text_document_type(document_text, invoice_number),
+            _verify_fast_text_layout_document_type(document_layout),
         ),
         "supplier_tax_id": supplier_tax_id,
         "provider_name": _verify_fast_text_provider_name(
             normalized.get("provider_name"), document_text, supplier_tax_id
         ),
         "invoice_number": invoice_number,
-        "invoice_date": _verify_fast_text_invoice_date(
-            normalized.get("invoice_date"), invoice_date_diagnostics
+        "invoice_date": _fast_text_layout_merge_verification(
+            _verify_fast_text_invoice_date(
+                normalized.get("invoice_date"), invoice_date_diagnostics
+            ),
+            _verify_fast_text_layout_invoice_date(
+                normalized.get("invoice_date"), invoice_date_diagnostics, document_layout
+            ),
         ),
-        "base_amount": _verify_fast_text_monetary_field(
-            "base_amount", normalized.get("base_amount"), document_text
+        "base_amount": _fast_text_layout_merge_verification(
+            _verify_fast_text_monetary_field(
+                "base_amount", normalized.get("base_amount"), document_text
+            ),
+            _verify_fast_text_layout_monetary_field(
+                "base_amount", normalized.get("base_amount"), document_layout
+            ),
         ),
-        "vat_amount": _verify_fast_text_monetary_field(
-            "vat_amount", normalized.get("vat_amount"), document_text
+        "vat_amount": _fast_text_layout_merge_verification(
+            _verify_fast_text_monetary_field(
+                "vat_amount", normalized.get("vat_amount"), document_text
+            ),
+            _verify_fast_text_layout_monetary_field(
+                "vat_amount", normalized.get("vat_amount"), document_layout
+            ),
         ),
-        "vat_breakdown": _verify_fast_text_vat_breakdown(
-            normalized.get("vat_breakdown") or [], document_text
+        "vat_breakdown": _fast_text_layout_merge_verification(
+            _verify_fast_text_vat_breakdown(normalized.get("vat_breakdown") or [], document_text),
+            _verify_fast_text_layout_vat_breakdown(
+                normalized.get("vat_breakdown") or [], document_layout
+            ),
         ),
-        "withholding_amount": _verify_fast_text_optional_adjustment_field(
-            "withholding_amount",
-            normalized.get("withholding_amount"),
-            document_text,
-            accounting_equation_confirmed=accounting_equation["status"] == "confirmed",
+        "withholding_amount": _fast_text_layout_merge_verification(
+            _verify_fast_text_optional_adjustment_field(
+                "withholding_amount",
+                normalized.get("withholding_amount"),
+                document_text,
+                accounting_equation_confirmed=accounting_equation["status"] == "confirmed",
+            ),
+            _verify_fast_text_layout_optional_adjustment_field(
+                "withholding_amount", normalized.get("withholding_amount"), document_layout
+            ),
+            allow_not_applicable_refutation=True,
         ),
-        "other_taxes_amount": _verify_fast_text_optional_adjustment_field(
-            "other_taxes_amount",
-            normalized.get("other_taxes"),
-            document_text,
-            accounting_equation_confirmed=accounting_equation["status"] == "confirmed",
+        "other_taxes_amount": _fast_text_layout_merge_verification(
+            _verify_fast_text_optional_adjustment_field(
+                "other_taxes_amount",
+                normalized.get("other_taxes"),
+                document_text,
+                accounting_equation_confirmed=accounting_equation["status"] == "confirmed",
+            ),
+            _verify_fast_text_layout_optional_adjustment_field(
+                "other_taxes_amount", normalized.get("other_taxes"), document_layout
+            ),
+            allow_not_applicable_refutation=True,
         ),
-        "total_amount": _verify_fast_text_monetary_field(
-            "total_amount", normalized.get("total_amount"), document_text
+        "total_amount": _fast_text_layout_merge_verification(
+            _verify_fast_text_monetary_field(
+                "total_amount", normalized.get("total_amount"), document_text
+            ),
+            _verify_fast_text_layout_monetary_field(
+                "total_amount", normalized.get("total_amount"), document_layout
+            ),
         ),
         "currency": _verify_fast_text_currency(normalized.get("currency"), document_text),
         "payment_dates": _verify_fast_text_payment_dates(
@@ -7576,6 +8487,12 @@ def analyze_invoice_v2_fast_text(
         file_bytes, filename=filename, mime_type=mime_type
     )
     telemetry["preprocessing_ms"] = round((time.monotonic() - started) * 1000)
+    document_layout = prepared.get("_document_layout")
+    layout_build_ms = prepared.get("layout_build_ms")
+    if isinstance(layout_build_ms, (int, float)) and not isinstance(layout_build_ms, bool):
+        # Internal timing only. The shadow persistence layer has no layout
+        # column and never receives rows, tokens or bounding boxes.
+        telemetry["layout_build_ms"] = max(0, round(layout_build_ms))
     if not prepared.get("eligible"):
         result = {
             "analysis_status": "skipped",
@@ -7648,7 +8565,7 @@ def analyze_invoice_v2_fast_text(
         invoice_number_evidence_status,
         invoice_parser_diagnostics,
     ) = _reconcile_fast_text_invoice_number(
-        normalized.get("invoice_number"), prepared["text"]
+        normalized.get("invoice_number"), prepared["text"], document_layout=document_layout
     )
     (
         normalized["invoice_date"],
@@ -7660,6 +8577,7 @@ def analyze_invoice_v2_fast_text(
         prepared["text"],
         supplier_tax_id=normalized.get("supplier_tax_id"),
         registered_company_tax_id=normalized_company_context.get("company_tax_id"),
+        document_layout=document_layout,
     )
     normalized["payment_dates"], due_date_corrections = _reconcile_fast_text_payment_dates(
         normalized.get("payment_dates") or [], normalized.get("invoice_date"), prepared["text"]
@@ -7673,9 +8591,12 @@ def analyze_invoice_v2_fast_text(
         validation_company_names,
         registered_company_tax_id=normalized_company_context.get("company_tax_id"),
     )
-    if "invoice_date_corrected_from_explicit_label" in correction_codes:
-        # A unique native-text date under a strict invoice label is independent
-        # evidence, even when the model omitted field_evidence.issue_date.
+    if {
+        "invoice_date_corrected_from_explicit_label",
+        "invoice_date_confirmed_from_spatial_label",
+    }.intersection(correction_codes):
+        # A unique date under a strict native or visual invoice label is
+        # independent evidence even when the model omitted field_evidence.
         validation_issues = [
             issue for issue in validation_issues if issue != "missing_evidence_issue_date"
         ]
@@ -7717,6 +8638,7 @@ def analyze_invoice_v2_fast_text(
         invoice_parser_diagnostics=invoice_parser_diagnostics,
         invoice_date_diagnostics=invoice_date_diagnostics,
         deterministic_corrections=correction_codes,
+        document_layout=document_layout,
     )
     fast_path_decision, fast_path_reasons = _decide_fast_text_fast_path(
         document_verification
@@ -7743,7 +8665,7 @@ def analyze_invoice_v2_fast_text(
         **normalized,
     }
     logger.info(
-        "Invoice V2 fast text: status=%s validation_status=%s accounting_safety=%s metadata_quality=%s invoice_number_evidence=%s corrections=%s pages=%s native_text_chars=%s sent_text_chars=%s total_elapsed_ms=%s",
+        "Invoice V2 fast text: status=%s validation_status=%s accounting_safety=%s metadata_quality=%s invoice_number_evidence=%s corrections=%s pages=%s native_text_chars=%s sent_text_chars=%s layout_build_ms=%s total_elapsed_ms=%s",
         result["analysis_status"],
         result["validation_status"],
         result["accounting_safety_status"],
@@ -7753,6 +8675,7 @@ def analyze_invoice_v2_fast_text(
         prepared.get("page_count"),
         prepared.get("native_text_chars"),
         prepared.get("sent_text_chars"),
+        telemetry.get("layout_build_ms"),
         round((time.monotonic() - started) * 1000),
     )
     return _invoice_analysis_telemetry_result(result, telemetry, return_telemetry)

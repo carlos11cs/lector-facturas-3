@@ -127,9 +127,9 @@ prioridad. V2 solo se inicia cuando no hay trabajo V1 activo; no usa OCR ni env�
 el PDF, imágenes o texto completo a telemetría. Los resultados comparativos se
 guardan en `invoice_analysis_shadow_runs` y el PDF privado se borra tras V2 o al
 alcanzar el TTL ya existente.
-La variante actual queda identificada como `v2-sol-text-v13`; las ejecuciones
+La variante actual queda identificada como `v2-sol-text-v14`; las ejecuciones
 históricas conservan su versión original y la tabla permite comparar varias
-variantes del mismo trabajo mediante `job_id + shadow_version`. V13 mantiene
+variantes del mismo trabajo mediante `job_id + shadow_version`. V14 mantiene
 separados la extracción V2, la verificación documental determinista y la
 comparación V1/V2 de benchmark. La decisión diagnóstica `accept_v2` o
 `fallback_v1` nunca consulta V1: exige PDF digital completo y sin truncar,
@@ -146,21 +146,23 @@ no puede coincidir con la empresa receptora registrada. Los importes requieren
 una coincidencia monetaria completa en contexto semántico, no solo una ecuación
 que cuadre. Los diagnósticos persistidos son acotados (`status`, método, recuento,
 contexto y motivo): nunca guardan texto nativo, fragmentos, prompts, imágenes o
-PDFs. V13 sigue siendo exclusivamente shadow: V1 es siempre el único resultado
+PDFs. V14 sigue siendo exclusivamente shadow: V1 es siempre el único resultado
 visible y contable.
 
-V13 unifica la reconciliación y la prueba documental de fechas, admite una fecha
-de factura inequívoca etiquetada en la línea siguiente y usa la política de fechas
-ya existente en Ledged. Retención y otros impuestos sólo son `not_applicable` cuando
-su ausencia está respaldada por la ecuación contable y no hay un importe etiquetado
-en el documento. Para importes y una única línea de IVA admite bloques de tabla
-acotados; tablas multirrégimen ambiguas, NIF no atribuibles, números de factura
-conflictivos y contradicciones monetarias siguen forzando `fallback_v1`.
-Para fechas de dos dígitos con día y mes ambos menores de 13, V13 conserva el
-fallback salvo que el propio documento confirme al proveedor/emisor como español
-mediante NIF/CIF/NIE o VAT `ES`. La identidad o dirección española del receptor
-no cambia el formato de fecha. En ese caso aplica de forma determinista `DD/MM/YY`;
-una fecha de vencimiento, pedido o entrega nunca se reutiliza como fecha de factura.
+V14 conserva las salvaguardas V13 y añade una comprobación espacial efímera basada
+en `PyMuPDF.get_text("words")`: agrupa palabras en filas visuales y prueba
+relaciones locales etiqueta-valor, columnas de BASE/IVA/TOTAL y filas de IVA. La
+geometría sólo puede confirmar una propuesta V2 ya presente en el texto nativo; no
+crea campos, no sobrescribe contradicciones, no relaja números de factura y nunca
+se persiste. Retención y otros impuestos sólo son `not_applicable` cuando su
+ausencia está respaldada por la ecuación contable y no hay un importe etiquetado en
+el documento. Tablas ambiguas, NIF no atribuibles, números de factura conflictivos
+y contradicciones monetarias siguen forzando `fallback_v1`. Para fechas de dos
+dígitos con día y mes ambos menores de 13, conserva el fallback salvo que el propio
+documento confirme al proveedor/emisor como español mediante NIF/CIF/NIE o VAT
+`ES`. La identidad o dirección española del receptor no cambia el formato de fecha.
+En ese caso aplica de forma determinista `DD/MM/YY`; una fecha de vencimiento,
+pedido o entrega nunca se reutiliza como fecha de factura.
 
 #### Informe de benchmark persistido
 
@@ -172,21 +174,21 @@ a S3 y no modifica trabajos, métricas ni resultados.
 ```bash
 # Un lote concreto
 python scripts/invoice_v2_benchmark.py \
-  --version v2-sol-text-v13 \
+  --version v2-sol-text-v14 \
   --batch-id TU_BATCH_ID
 
 # Las últimas 50 ejecuciones de la variante
-python scripts/invoice_v2_benchmark.py --version v2-sol-text-v13 --latest 50
+python scripts/invoice_v2_benchmark.py --version v2-sol-text-v14 --latest 50
 
 # Un rango de trabajos
 python scripts/invoice_v2_benchmark.py \
-  --version v2-sol-text-v13 \
+  --version v2-sol-text-v14 \
   --job-min 40 --job-max 120
 ```
 
 El informe muestra elegibilidad, validación, `strict_accounting_match`,
 `full_document_match`, seguridad contable y calidad de metadata por separado;
-además de las decisiones V13, truncamientos, motivos de fallback y campos que
+además de las decisiones V14, truncamientos, motivos de fallback y campos que
 no pudieron verificarse. No imprime PDFs, nombres de archivo, texto extraído,
 prompts ni payloads de resultados. `safe_fast_path_candidate`,
 `fully_confirmed_fast_path_candidate` y `accept_v2` son métricas de benchmark:

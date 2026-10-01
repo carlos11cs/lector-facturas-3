@@ -70,7 +70,7 @@ def _fast_text_invoice_payload(
 
 @unittest.skipIf(fitz is None, "PyMuPDF no disponible")
 class TestInvoiceV2FastText(unittest.TestCase):
-    def _analyze_fast_text(self, structured, text):
+    def _analyze_fast_text(self, structured, text, *, document_layout=None):
         prepared = {
             "eligible": True,
             "reason": "native_text_sufficient",
@@ -79,6 +79,8 @@ class TestInvoiceV2FastText(unittest.TestCase):
             "sent_text_chars": len(text),
             "text": "[PÁGINA 1]\n" + text,
         }
+        if document_layout is not None:
+            prepared["_document_layout"] = document_layout
         with patch.object(invoice_service, "_get_client", return_value=object()), patch.object(
             invoice_service, "_get_invoice_model", return_value="gpt-5.6-sol"
         ), patch.object(invoice_service, "_call_invoice_responses", return_value=structured):
@@ -88,6 +90,27 @@ class TestInvoiceV2FastText(unittest.TestCase):
                 mime_type="application/pdf",
                 prepared_text=prepared,
             )
+
+    def _document_layout(self, rows):
+        """Build one synthetic page of positioned PyMuPDF-like words."""
+        words = []
+        for line_index, row in enumerate(rows):
+            y0 = 72 + (line_index * 18)
+            for word_index, item in enumerate(row):
+                text, x0 = item if isinstance(item, tuple) else (item, 72 + (word_index * 72))
+                words.append(
+                    {
+                        "text": text,
+                        "x0": x0,
+                        "y0": y0,
+                        "x1": x0 + max(12, len(text) * 6),
+                        "y1": y0 + 10,
+                        "block": 0,
+                        "line": line_index,
+                        "word": word_index,
+                    }
+                )
+        return invoice_service._build_fast_text_document_layout([words])
 
     def _complete_invoice_text(self, *, currency="EUR", base="100,00", vat="21,00", total="121,00"):
         marker = {"EUR": "EUR", "USD": "USD", "GBP": "GBP"}[currency]
@@ -1683,6 +1706,275 @@ class TestInvoiceV2FastText(unittest.TestCase):
         )
         self.assertEqual(verification["status"], "confirmed")
 
+    def test_v14_builds_ephemeral_visual_rows_without_changing_compact_text(self):
+        payload = _digital_pdf_bytes(
+            [
+                "FECHA FACTURA 01/09/2026\n"
+                "PROVEEDOR DEMO SL\n"
+                "DIRECCION FISCAL CALLE DEMOSTRACION 123 VALENCIA ESPAÑA\n"
+                "NIF B12345678\n"
+                "BASE IMPONIBLE 100,00 EUR\n"
+                "IVA 21,00 EUR\n"
+                "TOTAL FACTURA 121,00 EUR"
+            ]
+        )
+
+        prepared = invoice_service.prepare_invoice_v2_fast_text(
+            payload, filename="factura.pdf", mime_type="application/pdf"
+        )
+
+        self.assertTrue(prepared["eligible"])
+        self.assertIn("[PÁGINA 1]", prepared["text"])
+        self.assertIsInstance(prepared["_document_layout"], dict)
+        self.assertGreaterEqual(len(prepared["_document_layout"]["pages"][0]["rows"]), 2)
+        self.assertIsInstance(prepared["layout_build_ms"], int)
+
+    def test_v14_confirms_invoice_dates_from_same_or_related_visual_rows(self):
+        same_row = self._document_layout([["FECHA", "FACTURA", "16/09/26"]])
+        next_row = self._document_layout([["FECHA", "FACTURA"], ["16/09/26"]])
+        spanish = self._document_layout([["FECHA", "FACTURA"], ["07/08/26"]])
+
+        for layout, proposed, context in (
+            (same_row, "2026-09-16", None),
+            (next_row, "2026-09-16", None),
+            (spanish, "2026-08-07", "confirmed_spanish_supplier_tax_id"),
+        ):
+            with self.subTest(proposed=proposed):
+                verification = invoice_service._verify_fast_text_layout_invoice_date(
+                    proposed,
+                    {"spanish_fiscal_context": context},
+                    layout,
+                )
+                self.assertEqual(verification["status"], "confirmed")
+                self.assertEqual(verification["match_method"], "spatial_strong_invoice_date_label")
+
+    def test_v14_does_not_turn_due_date_into_invoice_date(self):
+        layout = self._document_layout([["FECHA", "VENCIMIENTO"], ["07/08/26"]])
+
+        evidence = invoice_service._fast_text_layout_invoice_date_candidate(
+            layout, spanish_fiscal_context="confirmed_spanish_supplier_tax_id"
+        )
+
+        self.assertEqual(evidence["status"], "missing")
+
+    def test_v14_spatial_date_keeps_v13_spanish_supplier_policy(self):
+        layout = self._document_layout([["FECHA", "FACTURA"], ["07/08/26"]])
+
+        without_supplier_proof = invoice_service._fast_text_layout_invoice_date_candidate(
+            layout, spanish_fiscal_context=None
+        )
+        with_supplier_proof = invoice_service._fast_text_layout_invoice_date_candidate(
+            layout, spanish_fiscal_context="confirmed_spanish_supplier_tax_id"
+        )
+
+        self.assertEqual(without_supplier_proof["status"], "ambiguous")
+        self.assertEqual(with_supplier_proof["invoice_date"], "2026-08-07")
+
+    def test_v14_uses_visual_columns_for_base_vat_and_total(self):
+        layout = self._document_layout(
+            [
+                [("BASE", 72), ("IVA", 190), ("TOTAL", 308)],
+                [("100,00", 72), ("21,00", 190), ("121,00", 308)],
+            ]
+        )
+
+        for field, amount in (("base_amount", 100), ("vat_amount", 21), ("total_amount", 121)):
+            with self.subTest(field=field):
+                verification = invoice_service._verify_fast_text_layout_monetary_field(
+                    field, amount, layout
+                )
+                self.assertEqual(verification["status"], "confirmed")
+                self.assertEqual(verification["match_method"], "spatial_label_value")
+
+    def test_v14_spatial_columns_rescue_only_a_linear_missing_context(self):
+        layout = self._document_layout(
+            [
+                [("BASE", 72), ("IVA", 190), ("TOTAL", 308)],
+                [("100,00", 72), ("21,00", 190), ("121,00", 308)],
+            ]
+        )
+        linear = invoice_service._verify_fast_text_monetary_field(
+            "base_amount", 100, "100,00\nBASE"
+        )
+        spatial = invoice_service._verify_fast_text_layout_monetary_field(
+            "base_amount", 100, layout
+        )
+
+        self.assertEqual(linear["status"], "review")
+        self.assertEqual(
+            invoice_service._fast_text_layout_merge_verification(linear, spatial)["status"],
+            "confirmed",
+        )
+
+    def test_v14_does_not_confirm_a_product_amount_as_invoice_total(self):
+        layout = self._document_layout(
+            [[("ARTICULO", 72), ("TOTAL", 220)], [("121,00", 220)]]
+        )
+
+        verification = invoice_service._verify_fast_text_layout_monetary_field(
+            "total_amount", 121, layout
+        )
+
+        self.assertEqual(verification["status"], "review")
+
+    def test_v14_keeps_ambiguous_spatial_monetary_associations_in_review(self):
+        layout = self._document_layout(
+            [
+                [("TOTAL", 72), ("FACTURA", 120), ("121,00", 250)],
+                [("TOTAL", 72), ("FACTURA", 120), ("121,00", 250)],
+            ]
+        )
+
+        verification = invoice_service._verify_fast_text_layout_monetary_field(
+            "total_amount", 121, layout
+        )
+
+        self.assertEqual(verification["status"], "review")
+        self.assertEqual(verification["reason"], "total_amount_spatial_association_ambiguous")
+
+    def test_v14_confirms_one_and_multiple_spatial_vat_rows(self):
+        one_rate = self._document_layout(
+            [
+                [("TIPO", 72), ("BASE", 180), ("CUOTA", 300)],
+                [("21%", 72), ("100,00", 180), ("21,00", 300)],
+            ]
+        )
+        two_rates = self._document_layout(
+            [
+                [("TIPO", 72), ("BASE", 180), ("CUOTA", 300)],
+                [("10%", 72), ("100,00", 180), ("10,00", 300)],
+                [("21%", 72), ("100,00", 180), ("21,00", 300)],
+            ]
+        )
+
+        self.assertEqual(
+            invoice_service._verify_fast_text_layout_vat_breakdown(
+                [{"rate": 21, "base": 100, "vat_amount": 21}], one_rate
+            )["status"],
+            "confirmed",
+        )
+        self.assertEqual(
+            invoice_service._verify_fast_text_layout_vat_breakdown(
+                [
+                    {"rate": 10, "base": 100, "vat_amount": 10},
+                    {"rate": 21, "base": 100, "vat_amount": 21},
+                ],
+                two_rates,
+            )["status"],
+            "confirmed",
+        )
+
+    def test_v14_keeps_ambiguous_spatial_vat_columns_in_review(self):
+        layout = self._document_layout(
+            [
+                [("TIPO", 72), ("BASE", 180), ("CUOTA", 300)],
+                [("21%", 72), ("100,00", 180), ("100,00", 185), ("21,00", 300)],
+            ]
+        )
+
+        verification = invoice_service._verify_fast_text_layout_vat_breakdown(
+            [{"rate": 21, "base": 100, "vat_amount": 21}], layout
+        )
+
+        self.assertEqual(verification["status"], "review")
+
+    def test_v14_confirms_only_complete_invoice_ids_under_strong_visual_labels(self):
+        layout = self._document_layout([["FACTURA", "Nº"], ["A141949"]])
+        confirmation = invoice_service._verify_fast_text_layout_invoice_number(
+            "A141949",
+            layout,
+            model_value_found_in_native_text=True,
+            model_value_match_count=1,
+        )
+        order_only = self._document_layout([["PEDIDO"], ["A141949"]])
+        rejection = invoice_service._verify_fast_text_layout_invoice_number(
+            "A141949",
+            order_only,
+            model_value_found_in_native_text=True,
+            model_value_match_count=1,
+        )
+
+        self.assertEqual(confirmation["status"], "confirmed")
+        self.assertEqual(rejection["status"], "review")
+
+    def test_v14_reconciles_only_a_unique_native_invoice_id_from_visual_context(self):
+        layout = self._document_layout([["FACTURA", "Nº"], ["A141949"]])
+        invoice_number, _corrections, _issues, status, diagnostics = (
+            invoice_service._reconcile_fast_text_invoice_number(
+                "A141949", "A141949\nFACTURA", document_layout=layout
+            )
+        )
+
+        self.assertEqual(invoice_number, "A141949")
+        self.assertEqual(status, "confirmed")
+        self.assertEqual(
+            diagnostics["reconciliation_action"],
+            "confirmed_model_value_from_spatial_invoice_label",
+        )
+
+    def test_v14_does_not_confirm_an_invoice_id_absent_from_native_text(self):
+        layout = self._document_layout([["FACTURA", "Nº"], ["A141949"]])
+        _invoice_number, _corrections, _issues, status, diagnostics = (
+            invoice_service._reconcile_fast_text_invoice_number(
+                "A141949", "FACTURA", document_layout=layout
+            )
+        )
+
+        self.assertEqual(status, "missing")
+        self.assertFalse(diagnostics["model_value_found"])
+        self.assertEqual(diagnostics["reconciliation_action"], "review_missing_invoice_evidence")
+
+    def test_v14_supplier_and_recipient_regions_are_conservative(self):
+        supplier_layout = self._document_layout([["PROVEEDOR"], ["NIF", "B12345678"]])
+        recipient_layout = self._document_layout([["CLIENTE"], ["NIF", "B12345678"]])
+        ambiguous_layout = self._document_layout([["PROVEEDOR", "CLIENTE"], ["NIF", "B12345678"]])
+
+        supplier = invoice_service._verify_fast_text_layout_supplier_tax_id(
+            "B12345678", supplier_layout, registered_company_tax_id="B87654321"
+        )
+        recipient = invoice_service._verify_fast_text_layout_supplier_tax_id(
+            "B12345678", recipient_layout, registered_company_tax_id="B87654321"
+        )
+        ambiguous = invoice_service._verify_fast_text_layout_supplier_tax_id(
+            "B12345678", ambiguous_layout, registered_company_tax_id="B87654321"
+        )
+
+        self.assertEqual(supplier["status"], "confirmed")
+        self.assertEqual(recipient["status"], "contradiction")
+        self.assertEqual(ambiguous["status"], "review")
+
+    def test_v14_layout_can_refute_zero_adjustments_but_never_overwrite_contradictions(self):
+        layout = self._document_layout([["RETENCION"], ["15,00"]])
+        spatial = invoice_service._verify_fast_text_layout_optional_adjustment_field(
+            "withholding_amount", 0, layout
+        )
+        linear_contradiction = invoice_service._fast_text_verification(
+            "contradiction", match_method="document", reason="existing_contradiction"
+        )
+
+        self.assertEqual(spatial["status"], "contradiction")
+        self.assertEqual(
+            invoice_service._fast_text_layout_merge_verification(
+                linear_contradiction, spatial, allow_not_applicable_refutation=True
+            )["reason"],
+            "existing_contradiction",
+        )
+
+    def test_v14_never_promotes_a_linear_contradiction_to_confirmed(self):
+        linear_contradiction = invoice_service._fast_text_verification(
+            "contradiction", match_method="document", reason="existing_contradiction"
+        )
+        unique_spatial_proof = invoice_service._fast_text_verification(
+            "confirmed", match_method="spatial_label_value", match_count=1
+        )
+
+        merged = invoice_service._fast_text_layout_merge_verification(
+            linear_contradiction, unique_spatial_proof
+        )
+
+        self.assertEqual(merged["status"], "contradiction")
+        self.assertEqual(merged["reason"], "existing_contradiction")
+
     def test_v12_uses_confirmed_invoice_identifier_as_document_type_proof(self):
         invoice_number = invoice_service._fast_text_verification(
             "confirmed",
@@ -1992,7 +2284,7 @@ class TestInvoiceV2ShadowQueue(unittest.TestCase):
                 .order_by(ledger_app.invoice_analysis_shadow_runs_table.c.shadow_version)
             ).scalars().all()
 
-        self.assertEqual(runs, ["v2-next-text-v1", "v2-sol-text-v13"])
+        self.assertEqual(runs, ["v2-next-text-v1", "v2-sol-text-v14"])
 
     def test_ineligible_shadow_is_recorded_without_retaining_source(self):
         job_id = self._create_completed_job()
