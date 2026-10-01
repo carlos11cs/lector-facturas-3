@@ -7443,6 +7443,30 @@ def _safe_invoice_parser_diagnostics(value):
     if not isinstance(value, dict):
         return None
 
+    def safe_canonical_field(item):
+        if not isinstance(item, dict):
+            return None
+        status = str(item.get("status") or "")
+        if status not in {"confirmed", "review", "contradiction"}:
+            return None
+        return {
+            "status": status,
+            "reason": str(item.get("reason") or "")[:128] or None,
+            "match_count": _bounded_nonnegative_int(item.get("match_count"), 999),
+            "relation_type": str(item.get("relation_type") or "")[:64] or None,
+        }
+
+    def safe_canonical_comparison(item):
+        if not isinstance(item, dict):
+            return None
+        return {
+            "legacy_status": str(item.get("legacy_status") or "")[:32] or None,
+            "legacy_reason": str(item.get("legacy_reason") or "")[:128] or None,
+            "canonical_status": str(item.get("canonical_status") or "")[:32] or None,
+            "canonical_reason": str(item.get("canonical_reason") or "")[:128] or None,
+            "transition": str(item.get("transition") or "")[:96] or None,
+        }
+
     def safe_candidate(candidate):
         if not isinstance(candidate, dict):
             return None
@@ -7531,6 +7555,28 @@ def _safe_invoice_parser_diagnostics(value):
     input_diagnostics = _safe_invoice_v2_input_diagnostics(value.get("input"))
     if input_diagnostics is not None:
         safe["input"] = input_diagnostics
+    canonical = value.get("canonical_verification")
+    if isinstance(canonical, dict):
+        safe_canonical = {
+            field: sanitized
+            for field in ("invoice_number", "invoice_date")
+            if (
+                sanitized := safe_canonical_field(canonical.get(field))
+            ) is not None
+        }
+        if safe_canonical:
+            safe["canonical_verification"] = safe_canonical
+    comparison = value.get("canonical_verification_comparison")
+    if isinstance(comparison, dict):
+        safe_comparison = {
+            field: sanitized
+            for field in ("invoice_number", "invoice_date")
+            if (
+                sanitized := safe_canonical_comparison(comparison.get(field))
+            ) is not None
+        }
+        if safe_comparison:
+            safe["canonical_verification_comparison"] = safe_comparison
     return safe
 
 

@@ -37,6 +37,10 @@ from services.document_layout import (
     extract_native_document,
     serialize_document_layout,
 )
+from services.canonical_invoice_verifier import (
+    compare_with_legacy_verification,
+    verify_canonical_invoice_fields,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -8805,6 +8809,40 @@ def analyze_invoice_v2_fast_text(
     fast_path_decision, fast_path_reasons = _decide_fast_text_fast_path(
         document_verification
     )
+    parser_diagnostics_result = {
+        **invoice_parser_diagnostics,
+        "invoice_date": invoice_date_diagnostics,
+    }
+    canonical_layout = prepared.get("_canonical_document_layout")
+    if is_canonical_input and canonical_layout is not None:
+        try:
+            canonical_verification = verify_canonical_invoice_fields(
+                canonical_layout,
+                invoice_number=normalized.get("invoice_number"),
+                invoice_date=normalized.get("invoice_date"),
+                supplier_tax_id=normalized.get("supplier_tax_id"),
+                registered_company_tax_id=normalized_company_context.get(
+                    "company_tax_id"
+                ),
+            )
+        except Exception:
+            logger.exception("Canonical invoice diagnostic verification failed")
+            canonical_verification = {
+                field: {
+                    "status": "review",
+                    "reason": "canonical_verifier_error",
+                    "match_count": 0,
+                    "relation_type": "none",
+                }
+                for field in ("invoice_number", "invoice_date")
+            }
+        parser_diagnostics_result["canonical_verification"] = canonical_verification
+        parser_diagnostics_result["canonical_verification_comparison"] = (
+            compare_with_legacy_verification(
+                canonical_verification,
+                document_verification,
+            )
+        )
     telemetry["validation_ms"] = round((time.monotonic() - validation_started) * 1000)
     result = {
         "analysis_status": "ok" if validation_status == "passed" else "failed",
@@ -8813,10 +8851,7 @@ def analyze_invoice_v2_fast_text(
         "validation_issues": validation_issues,
         "deterministic_corrections": correction_codes,
         "invoice_number_evidence_status": invoice_number_evidence_status,
-        "invoice_parser_diagnostics": {
-            **invoice_parser_diagnostics,
-            "invoice_date": invoice_date_diagnostics,
-        },
+        "invoice_parser_diagnostics": parser_diagnostics_result,
         "document_text_complete": document_text_complete,
         "document_text_chars_original": max(int(prepared.get("native_text_chars") or 0), 0),
         "document_text_chars_used": max(int(prepared.get("sent_text_chars") or 0), 0),
