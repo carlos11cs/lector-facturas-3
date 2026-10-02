@@ -23,6 +23,14 @@ from services.canonical_document_structure import (
     normalize_identifier,
     normalize_tax_id,
 )
+from services.canonical_document_semantics import (
+    FiscalStructure,
+    PartyCluster,
+    build_fiscal_structure,
+    build_party_clusters,
+    party_cluster_matches_name,
+    party_cluster_tax_values,
+)
 from services.document_layout import DocumentLayout
 
 
@@ -41,15 +49,6 @@ _INVOICE_DATE_NEGATIVE = {
     "delivery_date",
     "service_date",
 }
-_MONEY_FIELD_ANCHORS = {
-    "base_amount": {"base_amount"},
-    "vat_amount": {"vat_amount"},
-    "withholding_amount": {"withholding_amount"},
-    "other_taxes": {"other_taxes"},
-    "total_amount": {"total_amount"},
-}
-
-
 def _diagnostic(
     status: str,
     reason_code: str,
@@ -488,185 +487,194 @@ def _resolve_document_type(structure: StructuralDocument) -> dict[str, Any]:
     )
 
 
-def _role_relations(
-    structure: StructuralDocument,
-    candidates: list[FieldCandidate],
-    role: str,
-) -> list[EvidenceRelation]:
-    return _relations(structure, candidates, {role})
-
-
-def _resolve_tax_identity(
-    structure: StructuralDocument,
-    proposed_supplier_tax_id: Any,
-    proposed_recipient_tax_id: Any,
-    registered_company_tax_id: Any,
-) -> tuple[dict[str, Any], dict[str, Any], str | None]:
-    tax_candidates = list(structure.candidates_by_type.get("tax_id", ()))
-    supplier_target = normalize_tax_id(proposed_supplier_tax_id)
-    registered_target = normalize_tax_id(registered_company_tax_id)
-    recipient_target = registered_target or normalize_tax_id(proposed_recipient_tax_id)
-    supplier_matches = [
-        candidate for candidate in tax_candidates
-        if candidate.normalized_value == supplier_target
-    ] if supplier_target else []
-    recipient_matches = [
-        candidate for candidate in tax_candidates
-        if candidate.normalized_value == recipient_target
-    ] if recipient_target else []
-    supplier_role = _role_relations(structure, supplier_matches, "supplier")
-    supplier_as_recipient = _role_relations(structure, supplier_matches, "recipient")
-    recipient_role = _role_relations(structure, recipient_matches, "recipient")
-    distinct_values = {candidate.normalized_value for candidate in tax_candidates}
-
-    if supplier_target and recipient_target and supplier_target == recipient_target:
-        supplier_result = _diagnostic(
-            "contradiction",
-            "supplier_tax_id_matches_registered_recipient",
-            value_occurrences=len(supplier_matches),
-            anchor_clusters=len(structure.anchors_by_type.get("supplier", ())),
-            competing_associations=len(supplier_as_recipient),
-            relation_type="recipient_identity",
-            evidence_class="known_recipient",
-        )
-    elif supplier_role:
-        best = max(supplier_role, key=lambda item: item.score)
-        relation_type, evidence_class = _relation_summary(best)
-        supplier_result = _diagnostic(
-            "confirmed",
-            "supplier_tax_id_in_supplier_region",
-            value_occurrences=len(supplier_matches),
-            anchor_clusters=len(structure.anchors_by_type.get("supplier", ())),
-            valid_associations=len(supplier_role),
-            competing_associations=len(supplier_as_recipient),
-            relation_type=relation_type,
-            evidence_class=evidence_class,
-        )
-    elif (
-        supplier_matches
-        and recipient_matches
-        and supplier_target != recipient_target
-        and distinct_values.issubset({supplier_target, recipient_target})
-    ):
-        supplier_result = _diagnostic(
-            "confirmed",
-            "supplier_tax_id_resolved_against_known_recipient",
-            value_occurrences=len(supplier_matches),
-            valid_associations=1,
-            relation_type="identity_exclusion",
-            evidence_class="known_recipient",
-        )
-    elif supplier_as_recipient:
-        supplier_result = _diagnostic(
-            "contradiction",
-            "supplier_tax_id_in_recipient_region",
-            value_occurrences=len(supplier_matches),
-            competing_associations=len(supplier_as_recipient),
-            relation_type="recipient_identity",
-            evidence_class=max(supplier_as_recipient, key=lambda item: item.score).evidence_class,
-        )
-    else:
-        supplier_result = _diagnostic(
-            "review",
-            "supplier_tax_id_unattributed" if supplier_matches else "supplier_tax_id_not_found",
-            value_occurrences=len(supplier_matches),
-            anchor_clusters=len(structure.anchors_by_type.get("supplier", ())),
-        )
-
-    if recipient_matches and (recipient_role or recipient_target == registered_target):
-        recipient_result = _diagnostic(
-            "confirmed",
-            "recipient_tax_id_confirmed",
-            value_occurrences=len(recipient_matches),
-            anchor_clusters=len(structure.anchors_by_type.get("recipient", ())),
-            valid_associations=max(len(recipient_role), 1),
-            relation_type="recipient_identity",
-            evidence_class="known_recipient" if recipient_target == registered_target else "strong_label",
-        )
-    else:
-        recipient_result = _diagnostic(
-            "review",
-            "recipient_tax_id_not_found" if not recipient_matches else "recipient_tax_id_unattributed",
-            value_occurrences=len(recipient_matches),
-            anchor_clusters=len(structure.anchors_by_type.get("recipient", ())),
-        )
-
-    supplier_jurisdiction = (
-        "ES"
-        if supplier_result["status"] == "confirmed" and is_spanish_tax_id(supplier_target)
-        else None
-    )
-    return supplier_result, recipient_result, supplier_jurisdiction
-
-
-def _resolve_provider_name(
-    structure: StructuralDocument,
-    provider_name: Any,
-    supplier_tax_result: dict[str, Any],
-) -> dict[str, Any]:
-    target = normalize_entity(provider_name)
-    candidates = [
-        candidate
-        for candidate in structure.candidates_by_type.get("entity", ())
-        if candidate.normalized_value == target
-    ] if target else []
-    supplier_relations = _role_relations(structure, candidates, "supplier")
-    recipient_relations = _role_relations(structure, candidates, "recipient")
-    if supplier_relations and not recipient_relations:
-        best = max(supplier_relations, key=lambda item: item.score)
-        relation_type, evidence_class = _relation_summary(best)
-        return _diagnostic(
-            "confirmed",
-            "provider_name_in_supplier_region",
-            value_occurrences=len(candidates),
-            anchor_clusters=len(structure.anchors_by_type.get("supplier", ())),
-            valid_associations=len(supplier_relations),
-            relation_type=relation_type,
-            evidence_class=evidence_class,
-        )
-    if recipient_relations and not supplier_relations:
-        return _diagnostic(
-            "contradiction",
-            "provider_name_in_recipient_region",
-            value_occurrences=len(candidates),
-            competing_associations=len(recipient_relations),
-            relation_type="recipient_identity",
-            evidence_class=max(recipient_relations, key=lambda item: item.score).evidence_class,
-        )
-    if candidates and supplier_tax_result.get("status") == "confirmed":
-        return _diagnostic(
-            "review",
-            "provider_name_present_but_role_unproven",
-            value_occurrences=len(candidates),
-            anchor_clusters=len(structure.anchors_by_type.get("supplier", ())),
-        )
-    return _diagnostic(
-        "review",
-        "provider_name_not_found" if not candidates else "provider_name_role_ambiguous",
-        value_occurrences=len(candidates),
-        competing_associations=len(recipient_relations),
-    )
-
-
 def resolve_identity(
     structure: StructuralDocument,
     normalized: dict[str, Any],
     *,
     registered_company_tax_id: Any,
-) -> tuple[dict[str, dict[str, Any]], str | None]:
-    supplier_tax, recipient_tax, jurisdiction = _resolve_tax_identity(
+    registered_company_name: Any = None,
+    party_clusters: tuple[PartyCluster, ...] | None = None,
+) -> tuple[dict[str, dict[str, Any]], str | None, dict[str, Any]]:
+    clusters = party_clusters or build_party_clusters(
         structure,
-        normalized.get("supplier_tax_id"),
-        normalized.get("customer_tax_id"),
-        registered_company_tax_id,
+        registered_company_tax_id=registered_company_tax_id,
+        registered_company_name=registered_company_name,
+    )
+    supplier_target = normalize_tax_id(normalized.get("supplier_tax_id"))
+    recipient_target = normalize_tax_id(
+        registered_company_tax_id or normalized.get("customer_tax_id")
+    )
+
+    known_recipients = [cluster for cluster in clusters if cluster.known_recipient_match]
+    labelled_recipients = [cluster for cluster in clusters if cluster.role == "recipient"]
+    recipient_cluster = (
+        known_recipients[0]
+        if len(known_recipients) == 1
+        else labelled_recipients[0]
+        if not known_recipients and len(labelled_recipients) == 1
+        else None
+    )
+
+    def matches_supplier_proposal(cluster: PartyCluster) -> bool:
+        return bool(
+            supplier_target
+            and supplier_target in party_cluster_tax_values(structure, cluster)
+        ) or party_cluster_matches_name(
+            structure, cluster, normalized.get("provider_name")
+        )
+
+    supplier_pool = [
+        cluster
+        for cluster in clusters
+        if cluster is not recipient_cluster and cluster.role == "supplier"
+    ]
+    if len(supplier_pool) > 1:
+        matching = [cluster for cluster in supplier_pool if matches_supplier_proposal(cluster)]
+        supplier_pool = matching if len(matching) == 1 else supplier_pool
+    if len(supplier_pool) == 1:
+        supplier_cluster = supplier_pool[0]
+        supplier_resolution_reason = "explicit_supplier_cluster"
+    else:
+        exclusion_matches = [
+            cluster
+            for cluster in clusters
+            if cluster is not recipient_cluster and matches_supplier_proposal(cluster)
+        ]
+        if recipient_cluster is not None and len(exclusion_matches) == 1:
+            supplier_cluster = exclusion_matches[0]
+            supplier_resolution_reason = "supplier_resolved_against_known_recipient"
+        else:
+            supplier_cluster = None
+            supplier_resolution_reason = "supplier_cluster_ambiguous"
+
+    supplier_values = (
+        party_cluster_tax_values(structure, supplier_cluster)
+        if supplier_cluster is not None
+        else ()
+    )
+    recipient_values = (
+        party_cluster_tax_values(structure, recipient_cluster)
+        if recipient_cluster is not None
+        else ()
+    )
+    all_tax_candidates = list(structure.candidates_by_type.get("tax_id", ()))
+    supplier_occurrences = sum(
+        candidate.normalized_value == supplier_target for candidate in all_tax_candidates
+    ) if supplier_target else 0
+    recipient_occurrences = sum(
+        candidate.normalized_value == recipient_target for candidate in all_tax_candidates
+    ) if recipient_target else 0
+
+    if supplier_target and recipient_target and supplier_target == recipient_target:
+        supplier_tax = _diagnostic(
+            "contradiction",
+            "supplier_tax_id_matches_registered_recipient",
+            value_occurrences=supplier_occurrences,
+            relation_type="party_cluster",
+            evidence_class="known_recipient",
+        )
+    elif supplier_target and supplier_target in supplier_values:
+        supplier_tax = _diagnostic(
+            "confirmed",
+            "supplier_tax_id_in_resolved_supplier_cluster",
+            value_occurrences=supplier_occurrences,
+            valid_associations=1,
+            relation_type="party_cluster",
+            evidence_class=supplier_resolution_reason,
+        )
+    elif supplier_target and supplier_target in recipient_values:
+        supplier_tax = _diagnostic(
+            "contradiction",
+            "supplier_tax_id_in_recipient_cluster",
+            value_occurrences=supplier_occurrences,
+            competing_associations=1,
+            relation_type="party_cluster",
+            evidence_class="known_recipient",
+        )
+    elif supplier_cluster is not None and supplier_values and supplier_target:
+        supplier_tax = _diagnostic(
+            "contradiction" if len(set(supplier_values)) == 1 else "review",
+            "resolved_supplier_tax_id_differs" if len(set(supplier_values)) == 1 else "supplier_cluster_has_multiple_tax_ids",
+            value_occurrences=supplier_occurrences,
+            competing_associations=len(set(supplier_values)),
+            relation_type="party_cluster",
+            evidence_class=supplier_resolution_reason,
+        )
+    else:
+        supplier_tax = _diagnostic(
+            "review",
+            "supplier_cluster_unresolved" if supplier_cluster is None else "supplier_tax_id_not_in_cluster",
+            value_occurrences=supplier_occurrences,
+            competing_associations=max(len(supplier_pool), 0),
+            relation_type="party_cluster" if supplier_cluster else "none",
+        )
+
+    if recipient_target and recipient_target in recipient_values:
+        recipient_tax = _diagnostic(
+            "confirmed",
+            "recipient_tax_id_in_resolved_recipient_cluster",
+            value_occurrences=recipient_occurrences,
+            valid_associations=1,
+            relation_type="party_cluster",
+            evidence_class="known_recipient" if recipient_cluster and recipient_cluster.known_recipient_match else "strong_label",
+        )
+    elif recipient_cluster is not None and recipient_values and recipient_target:
+        recipient_tax = _diagnostic(
+            "contradiction" if len(set(recipient_values)) == 1 else "review",
+            "resolved_recipient_tax_id_differs" if len(set(recipient_values)) == 1 else "recipient_cluster_has_multiple_tax_ids",
+            value_occurrences=recipient_occurrences,
+            competing_associations=len(set(recipient_values)),
+            relation_type="party_cluster",
+        )
+    else:
+        recipient_tax = _diagnostic(
+            "review",
+            "recipient_cluster_unresolved" if recipient_cluster is None else "recipient_tax_id_not_in_cluster",
+            value_occurrences=recipient_occurrences,
+            competing_associations=max(len(known_recipients) - 1, 0),
+        )
+
+    if supplier_cluster is not None and party_cluster_matches_name(
+        structure, supplier_cluster, normalized.get("provider_name")
+    ):
+        provider_name = _diagnostic(
+            "confirmed",
+            "provider_name_in_resolved_supplier_cluster",
+            value_occurrences=1,
+            valid_associations=1,
+            relation_type="party_cluster",
+            evidence_class=supplier_resolution_reason,
+        )
+    elif recipient_cluster is not None and party_cluster_matches_name(
+        structure, recipient_cluster, normalized.get("provider_name")
+    ):
+        provider_name = _diagnostic(
+            "contradiction",
+            "provider_name_in_recipient_cluster",
+            value_occurrences=1,
+            competing_associations=1,
+            relation_type="party_cluster",
+            evidence_class="known_recipient",
+        )
+    else:
+        provider_name = _diagnostic(
+            "review",
+            "provider_name_not_in_resolved_supplier_cluster" if supplier_cluster else "supplier_cluster_unresolved",
+            value_occurrences=0,
+            competing_associations=max(len(supplier_pool) - 1, 0),
+            relation_type="party_cluster" if supplier_cluster else "none",
+        )
+
+    jurisdiction = (
+        "ES"
+        if supplier_tax["status"] == "confirmed" and is_spanish_tax_id(supplier_target)
+        else None
     )
     fields = {
         "document_type": _resolve_document_type(structure),
         "supplier_tax_id": supplier_tax,
         "recipient_tax_id": recipient_tax,
-        "provider_name": _resolve_provider_name(
-            structure, normalized.get("provider_name"), supplier_tax
-        ),
+        "provider_name": provider_name,
     }
     fields["invoice_number"] = resolve_invoice_number(
         structure, normalized.get("invoice_number")
@@ -676,7 +684,15 @@ def resolve_identity(
         normalized.get("invoice_date"),
         spanish_supplier=jurisdiction == "ES",
     )
-    return fields, jurisdiction
+    aggregate = {
+        "supplier_status": "confirmed" if supplier_cluster is not None else "review",
+        "recipient_status": "confirmed" if recipient_cluster is not None else "review",
+        "supplier_tax_id_status": supplier_tax["status"],
+        "jurisdiction_status": "confirmed" if jurisdiction else "review",
+        "party_cluster_count": len(clusters),
+        "ambiguous_party_clusters": sum(cluster.role == "ambiguous" for cluster in clusters),
+    }
+    return fields, jurisdiction, aggregate
 
 
 def _decimal_string(value: Any) -> str | None:
@@ -687,72 +703,6 @@ def _decimal_string(value: Any) -> str | None:
         )
     except (InvalidOperation, TypeError, ValueError):
         return None
-
-
-def _resolve_money_field(
-    structure: StructuralDocument, field: str, proposed_value: Any
-) -> dict[str, Any]:
-    target = _decimal_string(proposed_value)
-    anchors = set(_MONEY_FIELD_ANCHORS[field])
-    anchor_count = sum(len(structure.anchors_by_type.get(item, ())) for item in anchors)
-    matches = [
-        candidate
-        for candidate in structure.candidates_by_type.get("money", ())
-        if candidate.normalized_value == target
-    ] if target is not None else []
-    positive = _relations(structure, matches, anchors)
-    best, dominant = _dominant_relation(positive)
-    candidate_map = _candidate_map(structure)
-    alternatives = []
-    for anchor_type in anchors:
-        for anchor in structure.anchors_by_type.get(anchor_type, ()):
-            for relation in structure.relations_by_anchor.get(anchor.anchor_id, ()):
-                candidate = candidate_map.get(relation.candidate_id)
-                if (
-                    relation.evidence_class in _STRONG_EVIDENCE
-                    and candidate is not None
-                    and candidate.candidate_type == "money"
-                    and candidate.normalized_value != target
-                ):
-                    alternatives.append(relation)
-    relation_type, evidence_class = _relation_summary(best)
-    if best is not None and dominant and not alternatives:
-        return _diagnostic(
-            "confirmed",
-            f"{field}_documented",
-            value_occurrences=len(matches),
-            anchor_clusters=anchor_count,
-            valid_associations=len(positive),
-            relation_type=relation_type,
-            evidence_class=evidence_class,
-        )
-    if positive:
-        return _diagnostic(
-            "review",
-            f"{field}_associations_compete",
-            value_occurrences=len(matches),
-            anchor_clusters=anchor_count,
-            valid_associations=len(positive),
-            competing_associations=len(alternatives) + max(0, len(positive) - 1),
-            relation_type=relation_type,
-            evidence_class=evidence_class,
-        )
-    if alternatives:
-        return _diagnostic(
-            "contradiction",
-            f"explicit_{field}_differs",
-            value_occurrences=len(matches),
-            anchor_clusters=anchor_count,
-            competing_associations=len(alternatives),
-            relation_type="incompatible_anchor_value",
-            evidence_class=max(alternatives, key=lambda item: item.score).evidence_class,
-        )
-    return _diagnostic(
-        "review",
-        f"{field}_evidence_missing",
-        value_occurrences=len(matches),
-        anchor_clusters=anchor_count,
-    )
 
 
 def _resolve_currency(
@@ -796,121 +746,321 @@ def _normalized_rate(value: Any) -> str | None:
         return None
 
 
-def _resolve_vat_breakdown(
-    structure: StructuralDocument, proposed_lines: Any
-) -> dict[str, Any]:
-    lines = [line for line in proposed_lines or [] if isinstance(line, dict)]
-    anchor_count = len(structure.anchors_by_type.get("vat_breakdown", ())) + len(
-        structure.anchors_by_type.get("vat_amount", ())
-    )
-    used_candidates = set()
-    valid_rows = 0
-    ambiguous_rows = 0
-    for line in lines:
-        rate = _normalized_rate(line.get("rate"))
-        base = _decimal_string(line.get("base"))
-        vat = _decimal_string(line.get("vat_amount"))
-        if rate is None or base is None or vat is None:
-            ambiguous_rows += 1
+def _fiscal_candidate_value(
+    structure: StructuralDocument, candidate_id: str
+) -> str | None:
+    candidate = _candidate_map(structure).get(candidate_id)
+    return candidate.normalized_value if candidate is not None else None
+
+
+def _totals_field_values(
+    structure: StructuralDocument,
+    fiscal_structure: FiscalStructure,
+    field: str,
+) -> list[str]:
+    values = []
+    for block in fiscal_structure.totals_blocks:
+        if field in block.ambiguous_fields:
             continue
-        rate_candidates = [
-            candidate
-            for candidate in structure.candidates_by_type.get("percentage", ())
-            if candidate.normalized_value == rate
-        ]
-        matched = False
-        for rate_candidate in rate_candidates:
-            base_candidates = [
-                candidate
-                for candidate in structure.candidates_by_type.get("money", ())
-                if candidate.segment_id == rate_candidate.segment_id
-                and candidate.normalized_value == base
-                and candidate.candidate_id not in used_candidates
-            ]
-            vat_candidates = [
-                candidate
-                for candidate in structure.candidates_by_type.get("money", ())
-                if candidate.segment_id == rate_candidate.segment_id
-                and candidate.normalized_value == vat
-                and candidate.candidate_id not in used_candidates
-            ]
-            pair = next(
-                (
-                    (base_candidate, vat_candidate)
-                    for base_candidate in base_candidates
-                    for vat_candidate in vat_candidates
-                    if base_candidate.candidate_id != vat_candidate.candidate_id
-                ),
-                None,
-            )
-            if pair is None:
+        for candidate_field, candidate_id in block.field_candidates:
+            if candidate_field != field:
                 continue
-            used_candidates.update(
-                {
-                    rate_candidate.candidate_id,
-                    pair[0].candidate_id,
-                    pair[1].candidate_id,
-                }
-            )
-            valid_rows += 1
-            matched = True
-            break
-        if not matched:
-            ambiguous_rows += 1
-    if lines and valid_rows == len(lines):
+            value = _fiscal_candidate_value(structure, candidate_id)
+            if value is not None:
+                values.append(value)
+    return values
+
+
+def _fiscal_table_rows(
+    structure: StructuralDocument, fiscal_structure: FiscalStructure
+) -> list[tuple[str, str, str]]:
+    rows = []
+    for row in fiscal_structure.table.rows:
+        rate = _fiscal_candidate_value(structure, row.rate_candidate_id)
+        base = _fiscal_candidate_value(structure, row.base_candidate_id)
+        tax = _fiscal_candidate_value(structure, row.tax_candidate_id)
+        if rate is not None and base is not None and tax is not None:
+            rows.append((rate, base, tax))
+    return rows
+
+
+def _sum_decimal_strings(values: Iterable[str]) -> str | None:
+    try:
+        return format(sum((Decimal(value) for value in values), Decimal("0.00")), ".2f")
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _structured_money_values(
+    structure: StructuralDocument,
+    fiscal_structure: FiscalStructure,
+    field: str,
+) -> list[str]:
+    values = _totals_field_values(structure, fiscal_structure, field)
+    if fiscal_structure.table.status == "confirmed" and field in {"base_amount", "vat_amount"}:
+        table_rows = _fiscal_table_rows(structure, fiscal_structure)
+        position = 1 if field == "base_amount" else 2
+        total = _sum_decimal_strings(row[position] for row in table_rows)
+        if total is not None:
+            values.append(total)
+    return values
+
+
+def _resolve_structured_money_field(
+    structure: StructuralDocument,
+    fiscal_structure: FiscalStructure,
+    field: str,
+    proposed_value: Any,
+) -> dict[str, Any]:
+    target = _decimal_string(proposed_value)
+    values = _structured_money_values(structure, fiscal_structure, field)
+    distinct = set(values)
+    anchor_count = len(structure.anchors_by_type.get(field, ()))
+    if target is not None and distinct == {target}:
         return _diagnostic(
             "confirmed",
-            "vat_breakdown_rows_documented",
-            value_occurrences=valid_rows,
+            f"{field}_in_reconstructed_fiscal_structure",
+            value_occurrences=len(values),
             anchor_clusters=anchor_count,
-            valid_associations=valid_rows,
-            relation_type="tax_rows",
-            evidence_class="distinct_row_candidates",
+            valid_associations=len(values),
+            relation_type="fiscal_structure",
+            evidence_class="unique_structural_value",
         )
-    if valid_rows:
+    if target is not None and len(distinct) == 1:
+        return _diagnostic(
+            "contradiction",
+            f"reconstructed_{field}_differs",
+            value_occurrences=0,
+            anchor_clusters=anchor_count,
+            competing_associations=1,
+            relation_type="fiscal_structure",
+            evidence_class="unique_structural_value",
+        )
+    if len(distinct) > 1:
         return _diagnostic(
             "review",
-            "vat_breakdown_partially_documented",
-            value_occurrences=valid_rows,
+            f"reconstructed_{field}_values_compete",
+            value_occurrences=sum(value == target for value in values),
             anchor_clusters=anchor_count,
-            valid_associations=valid_rows,
-            competing_associations=ambiguous_rows,
-            relation_type="tax_rows",
-            evidence_class="partial_rows",
+            valid_associations=sum(value == target for value in values),
+            competing_associations=len(distinct),
+            relation_type="fiscal_structure",
+            evidence_class="competing_structural_values",
         )
     return _diagnostic(
         "review",
-        "vat_breakdown_evidence_missing",
+        f"{field}_structure_missing",
         anchor_clusters=anchor_count,
-        competing_associations=ambiguous_rows,
+        relation_type="fiscal_structure",
+    )
+
+
+def _resolve_structured_vat_breakdown(
+    structure: StructuralDocument,
+    fiscal_structure: FiscalStructure,
+    proposed_lines: Any,
+) -> dict[str, Any]:
+    proposed = []
+    invalid = 0
+    for line in proposed_lines or ():
+        if not isinstance(line, dict):
+            invalid += 1
+            continue
+        rate = _normalized_rate(line.get("rate"))
+        base = _decimal_string(line.get("base"))
+        tax = _decimal_string(line.get("vat_amount"))
+        if rate is None or base is None or tax is None:
+            invalid += 1
+            continue
+        proposed.append((rate, base, tax))
+    documented = _fiscal_table_rows(structure, fiscal_structure)
+    anchor_count = fiscal_structure.table.header_count
+    if (
+        fiscal_structure.table.status == "confirmed"
+        and invalid == 0
+        and proposed
+        and sorted(proposed) == sorted(documented)
+    ):
+        return _diagnostic(
+            "confirmed",
+            "vat_breakdown_matches_reconstructed_table",
+            value_occurrences=len(documented),
+            anchor_clusters=anchor_count,
+            valid_associations=len(documented),
+            relation_type="fiscal_table_rows",
+            evidence_class="exclusive_row_assignment",
+        )
+    if fiscal_structure.table.status == "confirmed" and documented and proposed:
+        return _diagnostic(
+            "contradiction",
+            "reconstructed_vat_breakdown_differs",
+            value_occurrences=0,
+            anchor_clusters=anchor_count,
+            competing_associations=max(len(documented), len(proposed)),
+            relation_type="fiscal_table_rows",
+            evidence_class="exclusive_row_assignment",
+        )
+    return _diagnostic(
+        "review",
+        "vat_breakdown_structure_ambiguous" if documented else "vat_breakdown_structure_missing",
+        value_occurrences=len(documented),
+        anchor_clusters=anchor_count,
+        valid_associations=len(documented),
+        competing_associations=fiscal_structure.table.ambiguous_rows + invalid,
+        relation_type="fiscal_table_rows" if documented else "none",
+        evidence_class="partial_row_assignment" if documented else "none",
+    )
+
+
+def _has_sufficient_optional_tax_coverage(
+    structure: StructuralDocument, fiscal_structure: FiscalStructure
+) -> bool:
+    confirmed_blocks = [
+        block for block in fiscal_structure.totals_blocks if block.status == "confirmed"
+    ]
+    if len(confirmed_blocks) == 1:
+        return True
+    return bool(
+        fiscal_structure.table.status == "confirmed"
+        and len(set(_totals_field_values(structure, fiscal_structure, "total_amount"))) == 1
+    )
+
+
+def _zero_optional_tax_is_consistent(
+    normalized: dict[str, Any], field: str
+) -> bool:
+    base = _to_decimal(normalized.get("base_amount"))
+    vat = _to_decimal(normalized.get("vat_amount"))
+    total = _to_decimal(normalized.get("total_amount"))
+    if base is None or vat is None or total is None:
+        return False
+    withholding = (
+        Decimal("0.00")
+        if field == "withholding_amount"
+        else abs(_to_decimal(normalized.get("withholding_amount")) or Decimal("0.00"))
+    )
+    other = (
+        Decimal("0.00")
+        if field == "other_taxes"
+        else _to_decimal(normalized.get("other_taxes")) or Decimal("0.00")
+    )
+    expected = (base + vat + other - withholding).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+    return abs(expected - total) <= Decimal("0.01")
+
+
+def _resolve_optional_tax(
+    structure: StructuralDocument,
+    fiscal_structure: FiscalStructure,
+    normalized: dict[str, Any],
+    field: str,
+) -> dict[str, Any]:
+    proposed = _to_decimal(normalized.get(field)) or Decimal("0.00")
+    raw_values = _totals_field_values(structure, fiscal_structure, field)
+    if field == "withholding_amount":
+        explicit = {
+            format(abs(Decimal(value)), ".2f") for value in raw_values
+        }
+        target = format(abs(proposed), ".2f")
+    else:
+        explicit = set(raw_values)
+        target = format(proposed, ".2f")
+    anchor_count = len(structure.anchors_by_type.get(field, ()))
+    if explicit == {target}:
+        return _diagnostic(
+            "confirmed",
+            f"{field}_explicitly_documented",
+            value_occurrences=len(raw_values),
+            anchor_clusters=anchor_count,
+            valid_associations=len(raw_values),
+            relation_type="totals_block",
+            evidence_class="explicit_optional_tax",
+        )
+    if len(explicit) == 1:
+        return _diagnostic(
+            "contradiction",
+            f"explicit_{field}_differs",
+            anchor_clusters=anchor_count,
+            competing_associations=1,
+            relation_type="totals_block",
+            evidence_class="explicit_optional_tax",
+        )
+    if len(explicit) > 1:
+        return _diagnostic(
+            "review",
+            f"explicit_{field}_values_compete",
+            anchor_clusters=anchor_count,
+            competing_associations=len(explicit),
+            relation_type="totals_block",
+            evidence_class="competing_structural_values",
+        )
+    if (
+        proposed == Decimal("0.00")
+        and _has_sufficient_optional_tax_coverage(structure, fiscal_structure)
+        and _zero_optional_tax_is_consistent(normalized, field)
+    ):
+        return _diagnostic(
+            "not_applicable",
+            f"{field}_absent_with_sufficient_fiscal_coverage",
+            anchor_clusters=anchor_count,
+            valid_associations=1,
+            relation_type="fiscal_structure_absence",
+            evidence_class="coverage_and_consistency",
+        )
+    return _diagnostic(
+        "review",
+        f"{field}_absence_not_proven" if proposed == Decimal("0.00") else f"{field}_structure_missing",
+        anchor_clusters=anchor_count,
+        relation_type="fiscal_structure",
     )
 
 
 def resolve_fiscal(
-    structure: StructuralDocument, normalized: dict[str, Any]
-) -> dict[str, dict[str, Any]]:
+    structure: StructuralDocument,
+    normalized: dict[str, Any],
+    *,
+    fiscal_structure: FiscalStructure | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    reconstructed = fiscal_structure or build_fiscal_structure(structure)
     fields = {
         "currency": _resolve_currency(structure, normalized.get("currency")),
-        "base_amount": _resolve_money_field(
-            structure, "base_amount", normalized.get("base_amount")
+        "base_amount": _resolve_structured_money_field(
+            structure, reconstructed, "base_amount", normalized.get("base_amount")
         ),
-        "vat_amount": _resolve_money_field(
-            structure, "vat_amount", normalized.get("vat_amount")
+        "vat_amount": _resolve_structured_money_field(
+            structure, reconstructed, "vat_amount", normalized.get("vat_amount")
         ),
-        "withholding_amount": _resolve_money_field(
-            structure, "withholding_amount", normalized.get("withholding_amount")
+        "withholding_amount": _resolve_optional_tax(
+            structure, reconstructed, normalized, "withholding_amount"
         ),
-        "other_taxes": _resolve_money_field(
-            structure, "other_taxes", normalized.get("other_taxes")
+        "other_taxes": _resolve_optional_tax(
+            structure, reconstructed, normalized, "other_taxes"
         ),
-        "total_amount": _resolve_money_field(
-            structure, "total_amount", normalized.get("total_amount")
+        "total_amount": _resolve_structured_money_field(
+            structure, reconstructed, "total_amount", normalized.get("total_amount")
         ),
-        "vat_breakdown": _resolve_vat_breakdown(
-            structure, normalized.get("vat_breakdown")
+        "vat_breakdown": _resolve_structured_vat_breakdown(
+            structure, reconstructed, normalized.get("vat_breakdown")
         ),
     }
-    return fields
+    confirmed_blocks = sum(
+        block.status == "confirmed" for block in reconstructed.totals_blocks
+    )
+    totals_ambiguities = sum(
+        len(block.ambiguous_fields) for block in reconstructed.totals_blocks
+    )
+    totals_field_count = sum(
+        len(block.field_candidates) for block in reconstructed.totals_blocks
+    )
+    aggregate = {
+        "fiscal_table_status": reconstructed.table.status,
+        "fiscal_row_count": len(reconstructed.table.rows),
+        "totals_block_status": "confirmed" if confirmed_blocks == 1 and totals_ambiguities == 0 else "review",
+        "totals_field_count": totals_field_count,
+        "ambiguous_fiscal_rows": reconstructed.table.ambiguous_rows + totals_ambiguities,
+    }
+    return fields, aggregate
 
 
 def _to_decimal(value: Any) -> Decimal | None:
@@ -1059,12 +1209,24 @@ def verify_canonical_document_v2(
     evidence_graph_ms = round((time.monotonic() - graph_started) * 1000, 3)
 
     verification_started = time.monotonic()
-    identity, supplier_jurisdiction = resolve_identity(
+    party_clusters = build_party_clusters(
+        structure,
+        registered_company_tax_id=registered_company_tax_id,
+        registered_company_name=registered_company_name,
+    )
+    reconstructed_fiscal = build_fiscal_structure(structure)
+    identity, supplier_jurisdiction, party_resolution = resolve_identity(
         structure,
         normalized,
         registered_company_tax_id=registered_company_tax_id,
+        registered_company_name=registered_company_name,
+        party_clusters=party_clusters,
     )
-    fiscal = resolve_fiscal(structure, normalized)
+    fiscal, fiscal_structure = resolve_fiscal(
+        structure,
+        normalized,
+        fiscal_structure=reconstructed_fiscal,
+    )
     consistency = resolve_consistency(structure, normalized)
     verification_ms = round((time.monotonic() - verification_started) * 1000, 3)
 
@@ -1080,6 +1242,8 @@ def verify_canonical_document_v2(
         "fields": {**identity, **fiscal},
         "consistency": consistency,
         "supplier_jurisdiction": supplier_jurisdiction,
+        "party_resolution": party_resolution,
+        "fiscal_structure": fiscal_structure,
         "structure": {
             "segments": len(structure.segments),
             "anchor_clusters": len(structure.anchors),

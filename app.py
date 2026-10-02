@@ -7580,6 +7580,22 @@ def _safe_invoice_parser_diagnostics(value):
             if isinstance(value.get("comparison_to_legacy"), dict)
             else {}
         )
+        raw_party_resolution = (
+            value.get("party_resolution")
+            if isinstance(value.get("party_resolution"), dict)
+            else {}
+        )
+        raw_fiscal_structure = (
+            value.get("fiscal_structure")
+            if isinstance(value.get("fiscal_structure"), dict)
+            else {}
+        )
+        allowed_resolution_statuses = {
+            "confirmed",
+            "review",
+            "contradiction",
+            "not_applicable",
+        }
         safe = {
             "version": str(value.get("version") or "")[:64],
             "status": str(value.get("status") or "ok")[:32],
@@ -7615,7 +7631,40 @@ def _safe_invoice_parser_diagnostics(value):
                     sanitized := safe_canonical_comparison(comparison.get(field))
                 ) is not None
             },
+            "party_resolution": {
+                key: status
+                for key in (
+                    "supplier_status",
+                    "recipient_status",
+                    "supplier_tax_id_status",
+                    "jurisdiction_status",
+                )
+                if (status := str(raw_party_resolution.get(key) or ""))
+                in allowed_resolution_statuses
+            },
+            "fiscal_structure": {
+                key: status
+                for key in ("fiscal_table_status", "totals_block_status")
+                if (status := str(raw_fiscal_structure.get(key) or ""))
+                in allowed_resolution_statuses
+            },
         }
+        safe["party_resolution"].update(
+            {
+                key: _bounded_nonnegative_int(raw_party_resolution.get(key), 1000000)
+                for key in ("party_cluster_count", "ambiguous_party_clusters")
+            }
+        )
+        safe["fiscal_structure"].update(
+            {
+                key: _bounded_nonnegative_int(raw_fiscal_structure.get(key), 1000000)
+                for key in (
+                    "fiscal_row_count",
+                    "totals_field_count",
+                    "ambiguous_fiscal_rows",
+                )
+            }
+        )
         safe["structure"]["candidate_counts"] = {
             str(key)[:32]: _bounded_nonnegative_int(count, 1000000)
             for key, count in candidate_counts.items()

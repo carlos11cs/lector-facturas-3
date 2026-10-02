@@ -280,11 +280,16 @@ _ANCHOR_SPECS = (
     _AnchorSpec("tax_id", ("TAX", "ID"), "contextual", "unknown"),
     _AnchorSpec("base_amount", ("BASE", "IMPONIBLE"), "strong", "fiscal"),
     _AnchorSpec("base_amount", ("TAXABLE", "BASE"), "strong", "fiscal"),
+    _AnchorSpec("base_amount", ("BASE",), "contextual", "fiscal"),
     _AnchorSpec("vat_amount", ("TOTAL", "IVA"), "strong", "fiscal"),
+    _AnchorSpec("vat_amount", ("CUOTA", "IVA"), "strong", "fiscal"),
+    _AnchorSpec("vat_amount", ("IMPORTE", "IVA"), "strong", "fiscal"),
     _AnchorSpec("vat_amount", ("IVA",), "contextual", "fiscal"),
     _AnchorSpec("vat_amount", ("VAT",), "contextual", "fiscal"),
+    _AnchorSpec("vat_breakdown", ("TIPO", "IVA", "BASE", "IMPONIBLE", "CUOTA"), "strong", "fiscal"),
     _AnchorSpec("vat_breakdown", ("TIPO", "BASE", "CUOTA"), "strong", "fiscal"),
     _AnchorSpec("vat_breakdown", ("RATE", "BASE", "TAX"), "strong", "fiscal"),
+    _AnchorSpec("withholding_amount", ("RETENCION", "IRPF"), "strong", "fiscal"),
     _AnchorSpec("withholding_amount", ("RETENCION",), "strong", "fiscal"),
     _AnchorSpec("withholding_amount", ("IRPF",), "strong", "fiscal"),
     _AnchorSpec("withholding_amount", ("WITHHOLDING",), "strong", "fiscal"),
@@ -293,10 +298,12 @@ _ANCHOR_SPECS = (
     _AnchorSpec("other_taxes", ("RECARGO",), "contextual", "fiscal"),
     _AnchorSpec("subtotal", ("SUBTOTAL",), "strong", "totals"),
     _AnchorSpec("total_amount", ("TOTAL", "FACTURA"), "strong", "totals"),
-    _AnchorSpec("total_amount", ("TOTAL", "A", "PAGAR"), "strong", "totals"),
     _AnchorSpec("total_amount", ("IMPORTE", "TOTAL"), "strong", "totals"),
     _AnchorSpec("total_amount", ("GRAND", "TOTAL"), "strong", "totals"),
     _AnchorSpec("total_amount", ("TOTAL",), "contextual", "totals"),
+    _AnchorSpec("amount_due", ("TOTAL", "A", "PAGAR"), "strong", "totals"),
+    _AnchorSpec("amount_due", ("NETO", "A", "PAGAR"), "strong", "totals"),
+    _AnchorSpec("amount_due", ("AMOUNT", "DUE"), "strong", "totals"),
     _AnchorSpec("footer_marker", ("REGISTRO", "MERCANTIL"), "contextual", "footer"),
     _AnchorSpec("footer_marker", ("GENERADO", "POR", "ORDENADOR"), "contextual", "footer"),
 )
@@ -446,6 +453,25 @@ def build_anchor_clusters(
         ):
             continue
         retained.append((spec, matched_segments, token_set))
+
+    # A bare "TOTAL" inside a stronger fiscal label such as "TOTAL IVA" is
+    # not an independent invoice-total anchor. Keeping both would make the
+    # same amount compete for two incompatible fields in the totals block.
+    retained = [
+        item
+        for item in retained
+        if not (
+            item[0].anchor_type == "total_amount"
+            and item[0].strength == "contextual"
+            and any(
+                other[0].strength == "strong"
+                and other[0].anchor_type
+                in {"vat_amount", "withholding_amount", "other_taxes", "amount_due"}
+                and item[2].intersection(other[2])
+                for other in retained
+            )
+        )
+    ]
 
     anchors = []
     for index, (spec, matched_segments, token_set) in enumerate(retained, 1):
