@@ -1,6 +1,14 @@
 import unittest
 
 import app as ledger_app
+from services.canonical_document_structure import (
+    assemble_structural_document,
+    build_anchor_clusters,
+    build_evidence_relations,
+    build_regions,
+    build_semantic_segments,
+    extract_field_candidates,
+)
 from services.canonical_document_verifier_v2 import verify_canonical_document_v2
 from services.document_layout import DocumentLayout, build_layout_page
 
@@ -64,6 +72,35 @@ def _verify(layout, proposal=None, **kwargs):
         proposal or _proposal(),
         registered_company_tax_id=kwargs.get("registered_company_tax_id", "B87654321"),
         registered_company_name=kwargs.get("registered_company_name", "Comprador Demo SL"),
+    )
+
+
+def _structure(layout, **kwargs):
+    segments, token_by_id = build_semantic_segments(layout)
+    anchors = build_anchor_clusters(segments, token_by_id)
+    candidates = extract_field_candidates(segments, anchors, token_by_id)
+    regions, segment_region = build_regions(
+        segments,
+        anchors,
+        candidates,
+        registered_company_tax_id=kwargs.get(
+            "registered_company_tax_id", "B87654321"
+        ),
+        registered_company_name=kwargs.get(
+            "registered_company_name", "Comprador Demo SL"
+        ),
+    )
+    relations = build_evidence_relations(
+        segments, anchors, candidates, segment_region
+    )
+    return assemble_structural_document(
+        segments,
+        anchors,
+        regions,
+        candidates,
+        relations,
+        token_by_id,
+        segment_region,
     )
 
 
@@ -187,6 +224,49 @@ class TestPartyIdentityResolver(unittest.TestCase):
         )
 
         self.assertEqual(result["party_resolution"]["supplier_status"], "review")
+        self.assertEqual(result["fields"]["supplier_tax_id"]["status"], "review")
+
+    def test_product_codes_without_tax_label_are_not_tax_ids(self):
+        structure = _structure(
+            _layout(
+                ("PROVEEDOR", "Vendedor", "Demo", "SL"),
+                ("NIF", "B12345678"),
+                ("CLIENTE", "Comprador", "Demo", "SL"),
+                ("NIF", "B87654321"),
+                ("ARTICULO", "OR00038450", "1V401405", "ES8P20093"),
+            )
+        )
+
+        tax_ids = {
+            candidate.normalized_value
+            for candidate in structure.candidates_by_type.get("tax_id", ())
+        }
+        self.assertEqual(tax_ids, {"B12345678", "B87654321"})
+
+    def test_foreign_tax_id_requires_and_accepts_tax_label_context(self):
+        structure = _structure(
+            _layout(
+                ("SUPPLIER", "Foreign", "Vendor", "LLC"),
+                ("TAX", "ID", "US123456789"),
+                ("REFERENCE", "US987654321"),
+            )
+        )
+
+        tax_ids = {
+            candidate.normalized_value
+            for candidate in structure.candidates_by_type.get("tax_id", ())
+        }
+        self.assertIn("US123456789", tax_ids)
+        self.assertNotIn("US987654321", tax_ids)
+
+    def test_mixed_recipient_cluster_is_review_not_false_contradiction(self):
+        result = _verify(
+            _layout(
+                ("CLIENTE", "Comprador", "Demo", "SL"),
+                ("NIF", "B87654321", "B12345678"),
+            )
+        )
+
         self.assertEqual(result["fields"]["supplier_tax_id"]["status"], "review")
 
 
@@ -339,6 +419,71 @@ class TestFiscalStructureResolver(unittest.TestCase):
 
         self.assertEqual(result["fiscal_structure"]["fiscal_table_status"], "review")
         self.assertEqual(result["fields"]["vat_breakdown"]["status"], "review")
+
+    def test_numeric_rate_under_percent_vat_header_is_reconstructed(self):
+        result = _verify(
+            _layout(
+                (("%", 30), ("IVA", 50), ("BASE", 180), ("IMPONIBLE", 220), ("CUOTA", 350), ("IVA", 395)),
+                (("21,00", 30), ("100,00", 180), ("21,00", 350)),
+            )
+        )
+
+        self.assertEqual(result["fiscal_structure"]["fiscal_table_status"], "confirmed")
+        self.assertEqual(result["fields"]["vat_breakdown"]["status"], "confirmed")
+
+    def test_split_fiscal_header_is_reconstructed(self):
+        result = _verify(
+            _layout(
+                (("TIPO", 30), ("BASE", 180)),
+                (("IVA", 30), ("IMPONIBLE", 180), ("CUOTA", 350)),
+                (("21,00", 30), ("100,00", 180), ("21,00", 350)),
+            )
+        )
+
+        self.assertEqual(result["fiscal_structure"]["fiscal_table_status"], "confirmed")
+        self.assertEqual(result["fields"]["vat_breakdown"]["status"], "confirmed")
+
+    def test_percentage_split_across_two_tokens_is_not_reused_as_money(self):
+        result = _verify(
+            _layout(
+                (("TIPO", 30), ("BASE", 180), ("CUOTA", 350)),
+                (("21,00", 30), ("%", 68), ("100,00", 180), ("21,00", 350)),
+            )
+        )
+
+        self.assertEqual(result["fiscal_structure"]["fiscal_table_status"], "confirmed")
+        self.assertEqual(result["fiscal_structure"]["fiscal_row_count"], 1)
+
+    def test_adjacent_complete_amounts_do_not_form_composite_money_candidate(self):
+        structure = _structure(_layout(("100,00", "21,00")))
+
+        values = {
+            candidate.normalized_value
+            for candidate in structure.candidates_by_type.get("money", ())
+        }
+        self.assertEqual(values, {"100.00", "21.00"})
+
+    def test_provisional_total_mismatch_stays_review(self):
+        result = _verify(_layout(("TOTAL", "FACTURA", "999,00")))
+
+        self.assertEqual(result["fields"]["total_amount"]["status"], "review")
+        self.assertEqual(
+            result["fields"]["total_amount"]["reason_code"],
+            "provisional_total_amount_differs",
+        )
+
+    def test_confirmed_totals_mismatch_remains_contradiction(self):
+        result = _verify(
+            _layout(
+                ("BASE", "IMPONIBLE", "100,00"),
+                ("TOTAL", "IVA", "21,00"),
+                ("TOTAL", "FACTURA", "999,00"),
+            )
+        )
+
+        self.assertEqual(
+            result["fields"]["total_amount"]["status"], "contradiction"
+        )
 
     def test_safe_diagnostics_exclude_party_and_fiscal_values(self):
         safe = ledger_app._safe_invoice_parser_diagnostics(

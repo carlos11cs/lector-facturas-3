@@ -502,6 +502,51 @@ def _token_windows(tokens: list[LayoutToken], maximum: int = 5):
             yield tokens[start:end]
 
 
+def _tax_id_has_anchor_context(
+    tokens: list[LayoutToken],
+    segment: SemanticSegment,
+    anchors: tuple[AnchorCluster, ...],
+) -> bool:
+    candidate_box = _bbox_for_tokens(tokens)
+    candidate_height = max(candidate_box[3] - candidate_box[1], 1.0)
+    for anchor in anchors:
+        if anchor.anchor_type != "tax_id" or anchor.page != segment.page:
+            continue
+        anchor_height = max(anchor.bbox[3] - anchor.bbox[1], 1.0)
+        scale = max(candidate_height, anchor_height)
+        same_row = not (
+            candidate_box[3] < anchor.bbox[1] or candidate_box[1] > anchor.bbox[3]
+        )
+        if (
+            same_row
+            and candidate_box[0] >= anchor.bbox[2] - 1
+            and candidate_box[0] - anchor.bbox[2] <= scale * 10
+        ):
+            return True
+        vertical_gap = candidate_box[1] - anchor.bbox[3]
+        if (
+            0 <= vertical_gap <= scale * 3
+            and _column_aligned(anchor.bbox, candidate_box)
+        ):
+            return True
+    return False
+
+
+def _is_tax_id_token_window(tokens: list[LayoutToken]) -> bool:
+    if len(tokens) == 1:
+        return True
+    if len(tokens) != 2:
+        return False
+    prefix = normalize_tax_id(tokens[0].original_text)
+    value = normalize_tax_id(tokens[1].original_text)
+    return bool(
+        1 <= len(prefix) <= 2
+        and prefix.isalpha()
+        and len(value) >= 7
+        and any(character.isdigit() for character in value)
+    )
+
+
 def extract_field_candidates(
     segments: tuple[SemanticSegment, ...],
     anchors: tuple[AnchorCluster, ...],
@@ -557,13 +602,30 @@ def extract_field_candidates(
                 and _GENERIC_TAX_ID_PATTERN.fullmatch(tax_value)
                 and any(character.isalpha() for character in tax_value)
                 and any(character.isdigit() for character in tax_value)
+                and _is_tax_id_token_window(window)
+                and (
+                    is_spanish_tax_id(tax_value)
+                    or _tax_id_has_anchor_context(window, segment, anchors)
+                )
             ):
                 add("tax_id", window, segment, tax_value)
-            if len(window) <= 2 and not date_values and "%" not in compact:
+            separate_decimal_amounts = bool(
+                len(window) == 2
+                and all(
+                    re.search(r"[.,]\d{2}(?:\D{0,3})$", token.original_text.strip())
+                    for token in window
+                )
+            )
+            if (
+                len(window) <= 2
+                and not date_values
+                and "%" not in compact
+                and not separate_decimal_amounts
+            ):
                 money = parse_money(compact)
                 if money is not None:
                     add("money", window, segment, format(money, ".2f"))
-            if len(window) == 1 and _PERCENTAGE_PATTERN.fullmatch(compact.strip()):
+            if len(window) <= 2 and _PERCENTAGE_PATTERN.fullmatch(compact.strip()):
                 percentage = compact.strip().rstrip("%").replace(",", ".")
                 try:
                     normalized_percentage = format(Decimal(percentage).normalize(), "f")

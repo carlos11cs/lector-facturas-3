@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from itertools import permutations
 from typing import Any, Iterable
 
@@ -157,6 +158,8 @@ def _cluster_name_matches(
     values = [candidate.normalized_value for candidate in entities]
     if target in values:
         return True
+    if len(target) >= 6 and any(target in value for value in values):
+        return True
     role_prefixes = {
         "PROVEEDOR",
         "EMISOR",
@@ -175,6 +178,12 @@ def _cluster_name_matches(
             if combined == target:
                 return True
             if target.endswith(combined) and target[: -len(combined)] in role_prefixes:
+                return True
+            if (
+                len(combined) >= 6
+                and combined in target
+                and len(combined) / len(target) >= 0.6
+            ):
                 return True
             if len(combined) > len(target):
                 break
@@ -264,8 +273,13 @@ def build_party_clusters(
         ):
             known_recipient = True
         if known_recipient:
-            resolved_role = "recipient"
             known_recipient_ids.add(candidate.candidate_id)
+            # A known recipient value without a role relation is attached in
+            # the geometry phases below. Creating a separate bucket here
+            # would split the recipient name from its tax identifier.
+            if resolved_role is None:
+                continue
+            resolved_role = "recipient"
         if resolved_role is None:
             continue
         top_score = best_by_role.get(resolved_role, (None, None))[0]
@@ -287,26 +301,83 @@ def build_party_clusters(
         candidate.candidate_id for values in buckets.values() for candidate in values
     }
     unassigned = [candidate for candidate in candidates if candidate.candidate_id not in assigned]
-    changed = True
-    while changed:
-        changed = False
-        for candidate in list(unassigned):
-            scored = [
-                (score, key)
-                for key, members in buckets.items()
-                if (score := _candidate_near_cluster(candidate, members)) is not None
-            ]
+
+    def attach_unique(
+        pending: list[FieldCandidate],
+        *,
+        candidate_type: str,
+        require_entity_seed: bool,
+    ) -> list[FieldCandidate]:
+        # Each phase scores against a fixed snapshot. This permits a wrapped
+        # party name followed by its tax ID without allowing arbitrary
+        # transitive growth through the rest of the page.
+        seeds = {key: tuple(members) for key, members in buckets.items()}
+        attachments: dict[str, list[FieldCandidate]] = {}
+        for candidate in pending:
+            if candidate.candidate_type != candidate_type:
+                continue
+            scored = []
+            for key, members in seeds.items():
+                role = next(iter(bucket_roles.get(key, ())), None)
+                if candidate.candidate_id in known_recipient_ids and role != "recipient":
+                    continue
+                entity_members = [
+                    member for member in members if member.candidate_type == "entity"
+                ]
+                if require_entity_seed and not entity_members:
+                    continue
+                score = _candidate_near_cluster(candidate, list(members))
+                if score is None:
+                    continue
+                if candidate_type == "entity" and not any(
+                    member.row_id == candidate.row_id
+                    or (
+                        member.page == candidate.page
+                        and _vertical_gap(member.bbox, candidate.bbox)
+                        <= max(_height(member.bbox), _height(candidate.bbox)) * 2
+                        and _column_related(member.bbox, candidate.bbox)
+                    )
+                    for member in entity_members
+                ):
+                    continue
+                scored.append((score, key))
             scored.sort(reverse=True)
             if scored and (len(scored) == 1 or scored[0][0] >= scored[1][0] + 15):
-                buckets[scored[0][1]].append(candidate)
-                unassigned.remove(candidate)
-                changed = True
+                attachments.setdefault(scored[0][1], []).append(candidate)
+        attached_ids = {
+            candidate.candidate_id
+            for values in attachments.values()
+            for candidate in values
+        }
+        for key, values in attachments.items():
+            buckets[key].extend(values)
+        return [
+            candidate
+            for candidate in pending
+            if candidate.candidate_id not in attached_ids
+        ]
+
+    unassigned = attach_unique(
+        unassigned,
+        candidate_type="entity",
+        require_entity_seed=True,
+    )
+    unassigned = attach_unique(
+        unassigned,
+        candidate_type="tax_id",
+        require_entity_seed=True,
+    )
 
     for candidate in sorted(unassigned, key=lambda item: (item.page, item.bbox[1], item.bbox[0])):
         compatible = [
             (score, key)
             for key, members in buckets.items()
             if key.startswith("unassigned:")
+            and any(
+                member.candidate_type != candidate.candidate_type
+                or member.row_id == candidate.row_id
+                for member in members
+            )
             and (score := _candidate_near_cluster(candidate, members)) is not None
         ]
         compatible.sort(reverse=True)
@@ -339,7 +410,6 @@ def build_party_clusters(
             role = "recipient"
         else:
             role = "ambiguous"
-        member_ids = {member.candidate_id for member in members}
         related_anchor_ids = {
             relation.anchor_id
             for member in members
@@ -380,36 +450,93 @@ def _header_columns(structure: StructuralDocument):
             for token_id in segment.token_ids
             if token_id in structure.token_by_id
         )
-    headers = []
+    row_records = []
     for row_id, tokens in rows.items():
         ordered = sorted(tokens, key=lambda token: token.bbox[0])
-        terms = [normalize_word(token.original_text) for token in ordered]
-        base_indexes = [index for index, term in enumerate(terms) if term in {"BASE", "TAXABLE"}]
-        rate_indexes = [index for index, term in enumerate(terms) if term in {"TIPO", "RATE", "PORCENTAJE"}]
-        tax_indexes = [index for index, term in enumerate(terms) if term in {"CUOTA", "TAX"}]
-        if not tax_indexes:
-            tax_indexes = [
-                index
-                for index, term in enumerate(terms)
-                if term in {"IVA", "VAT"}
-                and (not base_indexes or index > base_indexes[-1])
-            ]
-        if not (base_indexes and rate_indexes and tax_indexes):
+        if not ordered:
             continue
-        selected = (
-            ordered[rate_indexes[0]],
-            ordered[base_indexes[0]],
-            ordered[tax_indexes[-1]],
-        )
-        headers.append(
+        row_records.append(
             {
                 "row_id": row_id,
-                "page": selected[0].page,
-                "y": min(token.bbox[1] for token in selected),
-                "height": max(_height(token.bbox) for token in selected),
-                "columns": tuple(_center_x(token.bbox) for token in selected),
+                "page": ordered[0].page,
+                "y": min(token.bbox[1] for token in ordered),
+                "bottom": max(token.bbox[3] for token in ordered),
+                "height": max(_height(token.bbox) for token in ordered),
+                "tokens": ordered,
             }
         )
+    row_records.sort(key=lambda row: (row["page"], row["y"]))
+
+    def cues(tokens):
+        terms = [normalize_word(token.original_text) for token in tokens]
+        base = [
+            _center_x(token.bbox)
+            for token, term in zip(tokens, terms)
+            if term in {"BASE", "TAXABLE"}
+        ]
+        rate = [
+            _center_x(token.bbox)
+            for token, term in zip(tokens, terms)
+            if term in {"TIPO", "RATE", "PORCENTAJE", "PERCENTAGE"}
+            or token.original_text.strip().upper() in {"%", "%IVA", "IVA%", "%VAT", "VAT%"}
+        ]
+        tax = [
+            _center_x(token.bbox)
+            for token, term in zip(tokens, terms)
+            if term in {"CUOTA", "TAX"}
+        ]
+        if not tax and any(term in {"IVA", "VAT"} for term in terms):
+            tax = [
+                _center_x(token.bbox)
+                for token, term in zip(tokens, terms)
+                if term in {"IMPORTE", "AMOUNT"}
+            ]
+        return base, rate, tax
+
+    headers = []
+    seen = set()
+    for index, first in enumerate(row_records):
+        band = [first]
+        for following in row_records[index + 1 : index + 3]:
+            if following["page"] != first["page"]:
+                break
+            if following["y"] - band[-1]["bottom"] > max(
+                following["height"], band[-1]["height"]
+            ) * 2.5:
+                break
+            band.append(following)
+        for width in range(1, len(band) + 1):
+            selected_rows = band[:width]
+            base = []
+            rate = []
+            tax = []
+            for row in selected_rows:
+                row_base, row_rate, row_tax = cues(row["tokens"])
+                base.extend(row_base)
+                rate.extend(row_rate)
+                tax.extend(row_tax)
+            if not (base and rate and tax):
+                continue
+            columns = (rate[0], base[0], tax[-1])
+            key = (
+                first["page"],
+                round(min(row["y"] for row in selected_rows), 1),
+                tuple(round(value, 1) for value in columns),
+            )
+            if key in seen:
+                break
+            seen.add(key)
+            headers.append(
+                {
+                    "row_ids": tuple(row["row_id"] for row in selected_rows),
+                    "page": first["page"],
+                    "y": min(row["y"] for row in selected_rows),
+                    "bottom": max(row["bottom"] for row in selected_rows),
+                    "height": max(row["height"] for row in selected_rows),
+                    "columns": columns,
+                }
+            )
+            break
     return headers
 
 
@@ -431,8 +558,9 @@ def build_fiscal_table(structure: StructuralDocument) -> FiscalTable:
                 candidate.row_id
                 for candidate in structure.candidates
                 if candidate.page == header["page"]
-                and candidate.bbox[1] > header["y"]
-                and candidate.bbox[1] - header["y"] <= header["height"] * 20
+                and candidate.row_id not in header["row_ids"]
+                and candidate.bbox[1] >= header["bottom"] - 1
+                and candidate.bbox[1] - header["bottom"] <= header["height"] * 20
             },
             key=lambda row_id: min(
                 segment.bbox[1]
@@ -451,13 +579,45 @@ def build_fiscal_table(structure: StructuralDocument) -> FiscalTable:
                 for candidate in money_by_row.get(row_id, ())
                 if candidate.candidate_id not in used_candidates
             ]
+            rate_token_ids = {
+                token_id for candidate in rates for token_id in candidate.token_ids
+            }
+            money = [
+                candidate
+                for candidate in money
+                if rate_token_ids.isdisjoint(candidate.token_ids)
+            ]
             if not rates and not money:
                 continue
+            rate_x, base_x, tax_x = header["columns"]
+            if not rates and len(money) >= 3:
+                inferred_rates = []
+                for candidate in money:
+                    try:
+                        numeric = Decimal(candidate.normalized_value)
+                    except (InvalidOperation, ValueError):
+                        continue
+                    if Decimal("0") <= numeric <= Decimal("100"):
+                        inferred_rates.append(candidate)
+                inferred_rates.sort(
+                    key=lambda candidate: abs(_center_x(candidate.bbox) - rate_x)
+                )
+                if inferred_rates:
+                    if (
+                        len(inferred_rates) == 1
+                        or abs(_center_x(inferred_rates[0].bbox) - rate_x) + 5
+                        < abs(_center_x(inferred_rates[1].bbox) - rate_x)
+                    ):
+                        rates = [inferred_rates[0]]
+                        money = [
+                            candidate
+                            for candidate in money
+                            if candidate.candidate_id != inferred_rates[0].candidate_id
+                        ]
             if len(rates) != 1 or len(money) < 2:
                 if rates:
                     ambiguous += 1
                 continue
-            _, base_x, tax_x = header["columns"]
             ranked = sorted(
                 [
                     (

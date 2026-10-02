@@ -504,6 +504,8 @@ def resolve_identity(
     recipient_target = normalize_tax_id(
         registered_company_tax_id or normalized.get("customer_tax_id")
     )
+    registered_name_target = normalize_entity(registered_company_name)
+    provider_name_target = normalize_entity(normalized.get("provider_name"))
 
     known_recipients = [cluster for cluster in clusters if cluster.known_recipient_match]
     labelled_recipients = [cluster for cluster in clusters if cluster.role == "recipient"]
@@ -584,12 +586,12 @@ def resolve_identity(
         )
     elif supplier_target and supplier_target in recipient_values:
         supplier_tax = _diagnostic(
-            "contradiction",
-            "supplier_tax_id_in_recipient_cluster",
+            "review",
+            "supplier_tax_id_in_mixed_recipient_cluster",
             value_occurrences=supplier_occurrences,
             competing_associations=1,
             relation_type="party_cluster",
-            evidence_class="known_recipient",
+            evidence_class="cluster_contamination",
         )
     elif supplier_cluster is not None and supplier_values and supplier_target:
         supplier_tax = _diagnostic(
@@ -649,12 +651,22 @@ def resolve_identity(
         structure, recipient_cluster, normalized.get("provider_name")
     ):
         provider_name = _diagnostic(
-            "contradiction",
-            "provider_name_in_recipient_cluster",
+            "contradiction"
+            if provider_name_target
+            and registered_name_target
+            and provider_name_target == registered_name_target
+            else "review",
+            "provider_name_matches_registered_recipient"
+            if provider_name_target
+            and registered_name_target
+            and provider_name_target == registered_name_target
+            else "provider_name_in_mixed_recipient_cluster",
             value_occurrences=1,
             competing_associations=1,
             relation_type="party_cluster",
-            evidence_class="known_recipient",
+            evidence_class="known_recipient"
+            if provider_name_target == registered_name_target
+            else "cluster_contamination",
         )
     else:
         provider_name = _diagnostic(
@@ -779,8 +791,9 @@ def _fiscal_table_rows(
         rate = _fiscal_candidate_value(structure, row.rate_candidate_id)
         base = _fiscal_candidate_value(structure, row.base_candidate_id)
         tax = _fiscal_candidate_value(structure, row.tax_candidate_id)
-        if rate is not None and base is not None and tax is not None:
-            rows.append((rate, base, tax))
+        normalized_rate = _normalized_rate(rate)
+        if normalized_rate is not None and base is not None and tax is not None:
+            rows.append((normalized_rate, base, tax))
     return rows
 
 
@@ -806,6 +819,33 @@ def _structured_money_values(
     return values
 
 
+def _definitive_structured_money_values(
+    structure: StructuralDocument,
+    fiscal_structure: FiscalStructure,
+    field: str,
+) -> list[str]:
+    values = []
+    for block in fiscal_structure.totals_blocks:
+        if block.status != "confirmed" or field in block.ambiguous_fields:
+            continue
+        for candidate_field, candidate_id in block.field_candidates:
+            if candidate_field == field:
+                value = _fiscal_candidate_value(structure, candidate_id)
+                if value is not None:
+                    values.append(value)
+    if fiscal_structure.table.status == "confirmed" and field in {
+        "base_amount",
+        "vat_amount",
+    }:
+        position = 1 if field == "base_amount" else 2
+        total = _sum_decimal_strings(
+            row[position] for row in _fiscal_table_rows(structure, fiscal_structure)
+        )
+        if total is not None:
+            values.append(total)
+    return values
+
+
 def _resolve_structured_money_field(
     structure: StructuralDocument,
     fiscal_structure: FiscalStructure,
@@ -815,6 +855,9 @@ def _resolve_structured_money_field(
     target = _decimal_string(proposed_value)
     values = _structured_money_values(structure, fiscal_structure, field)
     distinct = set(values)
+    definitive = set(
+        _definitive_structured_money_values(structure, fiscal_structure, field)
+    )
     anchor_count = len(structure.anchors_by_type.get(field, ()))
     if target is not None and distinct == {target}:
         return _diagnostic(
@@ -826,7 +869,7 @@ def _resolve_structured_money_field(
             relation_type="fiscal_structure",
             evidence_class="unique_structural_value",
         )
-    if target is not None and len(distinct) == 1:
+    if target is not None and len(distinct) == 1 and distinct == definitive:
         return _diagnostic(
             "contradiction",
             f"reconstructed_{field}_differs",
@@ -835,6 +878,16 @@ def _resolve_structured_money_field(
             competing_associations=1,
             relation_type="fiscal_structure",
             evidence_class="unique_structural_value",
+        )
+    if target is not None and len(distinct) == 1:
+        return _diagnostic(
+            "review",
+            f"provisional_{field}_differs",
+            value_occurrences=0,
+            anchor_clusters=anchor_count,
+            competing_associations=1,
+            relation_type="fiscal_structure",
+            evidence_class="provisional_structural_value",
         )
     if len(distinct) > 1:
         return _diagnostic(
