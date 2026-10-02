@@ -1,4 +1,5 @@
 import base64
+from copy import deepcopy
 import gc
 import json
 import logging
@@ -40,6 +41,10 @@ from services.document_layout import (
 from services.canonical_invoice_verifier import (
     compare_with_legacy_verification,
     verify_canonical_invoice_fields,
+)
+from services.canonical_document_verifier_v2 import (
+    compare_v2_with_legacy,
+    verify_canonical_document_v2,
 )
 
 logger = logging.getLogger(__name__)
@@ -8719,6 +8724,7 @@ def analyze_invoice_v2_fast_text(
 
     validation_started = time.monotonic()
     normalized = _normalize_fast_text_invoice(response_data)
+    canonical_model_proposal = deepcopy(normalized)
     correction_codes: List[str] = []
     (
         normalized["invoice_number"],
@@ -8842,6 +8848,37 @@ def analyze_invoice_v2_fast_text(
                 canonical_verification,
                 document_verification,
             )
+        )
+        try:
+            canonical_document_verifier_v2 = verify_canonical_document_v2(
+                canonical_layout,
+                canonical_model_proposal,
+                registered_company_tax_id=normalized_company_context.get(
+                    "company_tax_id"
+                ),
+                registered_company_name=normalized_company_context.get(
+                    "company_name"
+                ),
+            )
+            canonical_document_verifier_v2["comparison_to_legacy"] = (
+                compare_v2_with_legacy(
+                    canonical_document_verifier_v2,
+                    document_verification,
+                )
+            )
+        except Exception:
+            logger.exception("Canonical document verifier v2 failed")
+            canonical_document_verifier_v2 = {
+                "version": "canonical_document_verifier_v2",
+                "status": "diagnostic_error",
+                "fields": {},
+                "consistency": {},
+                "structure": {},
+                "timings_ms": {},
+                "comparison_to_legacy": {},
+            }
+        parser_diagnostics_result["canonical_document_verifier_v2"] = (
+            canonical_document_verifier_v2
         )
     telemetry["validation_ms"] = round((time.monotonic() - validation_started) * 1000)
     result = {

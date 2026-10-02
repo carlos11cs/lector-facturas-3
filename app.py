@@ -7467,6 +7467,167 @@ def _safe_invoice_parser_diagnostics(value):
             "transition": str(item.get("transition") or "")[:96] or None,
         }
 
+    def safe_canonical_v2_field(item):
+        if not isinstance(item, dict):
+            return None
+        status = str(item.get("status") or "")
+        if status not in {"confirmed", "review", "contradiction", "not_applicable"}:
+            return None
+        return {
+            "status": status,
+            "reason_code": str(item.get("reason_code") or "")[:128] or None,
+            "value_occurrences": _bounded_nonnegative_int(
+                item.get("value_occurrences"), 9999
+            ),
+            "anchor_clusters": _bounded_nonnegative_int(
+                item.get("anchor_clusters"), 9999
+            ),
+            "valid_associations": _bounded_nonnegative_int(
+                item.get("valid_associations"), 9999
+            ),
+            "competing_associations": _bounded_nonnegative_int(
+                item.get("competing_associations"), 9999
+            ),
+            "relation_type": str(item.get("relation_type") or "")[:64] or None,
+            "evidence_class": str(item.get("evidence_class") or "")[:64] or None,
+        }
+
+    def safe_canonical_v2(value):
+        if not isinstance(value, dict):
+            return None
+        allowed_fields = {
+            "document_type",
+            "provider_name",
+            "supplier_tax_id",
+            "recipient_tax_id",
+            "invoice_number",
+            "invoice_date",
+            "currency",
+            "base_amount",
+            "vat_amount",
+            "vat_breakdown",
+            "withholding_amount",
+            "other_taxes",
+            "total_amount",
+        }
+        allowed_consistency = {
+            "accounting_equation",
+            "vat_breakdown_total",
+            "currency_consistency",
+        }
+        allowed_candidate_types = {
+            "identifier",
+            "date",
+            "tax_id",
+            "money",
+            "percentage",
+            "currency",
+            "entity",
+        }
+        allowed_region_types = {
+            "document_header",
+            "supplier_identity",
+            "recipient_identity",
+            "invoice_metadata",
+            "fiscal",
+            "totals",
+            "payment",
+            "footer",
+            "unknown",
+        }
+        raw_fields = (
+            value.get("fields") if isinstance(value.get("fields"), dict) else {}
+        )
+        raw_consistency = (
+            value.get("consistency")
+            if isinstance(value.get("consistency"), dict)
+            else {}
+        )
+        fields = {
+            field: sanitized
+            for field in sorted(allowed_fields)
+            if (sanitized := safe_canonical_v2_field(raw_fields.get(field)))
+            is not None
+        }
+        consistency = {
+            field: sanitized
+            for field in sorted(allowed_consistency)
+            if (sanitized := safe_canonical_v2_field(raw_consistency.get(field)))
+            is not None
+        }
+        raw_structure = (
+            value.get("structure")
+            if isinstance(value.get("structure"), dict)
+            else {}
+        )
+        candidate_counts = (
+            raw_structure.get("candidate_counts")
+            if isinstance(raw_structure.get("candidate_counts"), dict)
+            else {}
+        )
+        region_counts = (
+            raw_structure.get("region_counts")
+            if isinstance(raw_structure.get("region_counts"), dict)
+            else {}
+        )
+        raw_timings = (
+            value.get("timings_ms")
+            if isinstance(value.get("timings_ms"), dict)
+            else {}
+        )
+        comparison = (
+            value.get("comparison_to_legacy")
+            if isinstance(value.get("comparison_to_legacy"), dict)
+            else {}
+        )
+        safe = {
+            "version": str(value.get("version") or "")[:64],
+            "status": str(value.get("status") or "ok")[:32],
+            "fields": fields,
+            "consistency": consistency,
+            "supplier_jurisdiction": (
+                str(value.get("supplier_jurisdiction"))[:8]
+                if value.get("supplier_jurisdiction")
+                else None
+            ),
+            "structure": {
+                key: _bounded_nonnegative_int(raw_structure.get(key), 1000000)
+                for key in ("segments", "anchor_clusters", "regions", "candidates", "relations")
+            },
+            "timings_ms": {
+                key: (
+                    max(0.0, min(float(raw_timings.get(key)), 86400000.0))
+                    if isinstance(raw_timings.get(key), (int, float))
+                    and not isinstance(raw_timings.get(key), bool)
+                    else None
+                )
+                for key in (
+                    "structure_ms",
+                    "candidate_extraction_ms",
+                    "evidence_graph_ms",
+                    "verification_ms",
+                )
+            },
+            "comparison_to_legacy": {
+                field: sanitized
+                for field in ("invoice_number", "invoice_date")
+                if (
+                    sanitized := safe_canonical_comparison(comparison.get(field))
+                ) is not None
+            },
+        }
+        safe["structure"]["candidate_counts"] = {
+            str(key)[:32]: _bounded_nonnegative_int(count, 1000000)
+            for key, count in candidate_counts.items()
+            if str(key) in allowed_candidate_types
+        }
+        safe["structure"]["region_counts"] = {
+            str(key)[:32]: _bounded_nonnegative_int(count, 1000000)
+            for key, count in region_counts.items()
+            if str(key) in allowed_region_types
+        }
+        return safe
+
     def safe_candidate(candidate):
         if not isinstance(candidate, dict):
             return None
@@ -7577,6 +7738,9 @@ def _safe_invoice_parser_diagnostics(value):
         }
         if safe_comparison:
             safe["canonical_verification_comparison"] = safe_comparison
+    canonical_v2 = safe_canonical_v2(value.get("canonical_document_verifier_v2"))
+    if canonical_v2 is not None:
+        safe["canonical_document_verifier_v2"] = canonical_v2
     return safe
 
 
