@@ -38,6 +38,49 @@ _DATE_PATTERN = re.compile(
     r"^(?:(\d{4})[./-](\d{1,2})[./-](\d{1,2})|"
     r"(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4}))$"
 )
+_MONTH_ALIASES = {
+    "ENE": 1,
+    "ENERO": 1,
+    "JAN": 1,
+    "JANUARY": 1,
+    "FEB": 2,
+    "FEBRERO": 2,
+    "FEBRUARY": 2,
+    "MAR": 3,
+    "MARZO": 3,
+    "MARCH": 3,
+    "ABR": 4,
+    "ABRIL": 4,
+    "APR": 4,
+    "APRIL": 4,
+    "MAY": 5,
+    "MAYO": 5,
+    "JUN": 6,
+    "JUNIO": 6,
+    "JUNE": 6,
+    "JUL": 7,
+    "JULIO": 7,
+    "JULY": 7,
+    "AGO": 8,
+    "AGOSTO": 8,
+    "AUG": 8,
+    "AUGUST": 8,
+    "SEP": 9,
+    "SEPT": 9,
+    "SEPTIEMBRE": 9,
+    "SETIEMBRE": 9,
+    "SEPTEMBER": 9,
+    "OCT": 10,
+    "OCTUBRE": 10,
+    "OCTOBER": 10,
+    "NOV": 11,
+    "NOVIEMBRE": 11,
+    "NOVEMBER": 11,
+    "DIC": 12,
+    "DICIEMBRE": 12,
+    "DEC": 12,
+    "DECEMBER": 12,
+}
 _PERCENTAGE_PATTERN = re.compile(r"^[-+]?\d{1,2}(?:[.,]\d+)?%$")
 _IDENTIFIER_COMPONENT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/\-]*$")
 
@@ -110,7 +153,40 @@ def date_interpretations(value: Any) -> tuple[str, ...]:
     compact = re.sub(r"\s+", "", str(value or ""))
     match = _DATE_PATTERN.fullmatch(compact)
     if not match:
-        return ()
+        if len(re.findall(r"\d+", compact)) < 2:
+            return ()
+        normalized = unicodedata.normalize("NFKD", compact)
+        normalized = "".join(
+            character
+            for character in normalized
+            if not unicodedata.combining(character)
+        )
+        normalized = re.sub(r"[^A-Za-z0-9]", "", normalized).upper()
+        day_first = re.fullmatch(
+            r"(\d{1,2})(?:DE)?([A-Z]+?)(?:DE)?(\d{2}|\d{4})", normalized
+        )
+        month_first = re.fullmatch(
+            r"([A-Z]+)(\d{1,2})(\d{2}|\d{4})", normalized
+        )
+        if day_first:
+            raw_day, raw_month, raw_year = day_first.groups()
+        elif month_first:
+            raw_month, raw_day, raw_year = month_first.groups()
+        else:
+            return ()
+        month = _MONTH_ALIASES.get(raw_month)
+        if month is None:
+            return ()
+        year = int(raw_year) + (2000 if len(raw_year) == 2 else 0)
+        try:
+            parsed = date(year, month, int(raw_day))
+        except ValueError:
+            return ()
+        return (
+            (parsed.isoformat(),)
+            if 2000 <= parsed.year <= date.today().year + 2
+            else ()
+        )
     year_first, month_first, day_first, first, second, raw_year = match.groups()
     if year_first is not None:
         possibilities = ((int(year_first), int(month_first), int(day_first)),)
@@ -231,23 +307,38 @@ class _AnchorSpec:
 
 
 _ANCHOR_SPECS = (
+    _AnchorSpec("invoice_number", ("ID", "DE", "FACTURA"), "strong", "invoice_metadata"),
+    _AnchorSpec("invoice_number", ("ID", "FACTURA"), "strong", "invoice_metadata"),
     _AnchorSpec("invoice_number", ("NUMBER", "FACTURA"), "strong", "invoice_metadata"),
     _AnchorSpec("invoice_number", ("NUMBER", "DE", "FACTURA"), "strong", "invoice_metadata"),
+    _AnchorSpec("invoice_number", ("NUMBER", "FACT"), "strong", "invoice_metadata"),
     _AnchorSpec("invoice_number", ("FACTURA", "NUMBER"), "strong", "invoice_metadata"),
+    _AnchorSpec("invoice_number", ("FACT", "NUMBER"), "strong", "invoice_metadata"),
     _AnchorSpec("invoice_number", ("INVOICE", "NUMBER"), "strong", "invoice_metadata"),
     _AnchorSpec("invoice_number", ("INVOICE", "NO"), "strong", "invoice_metadata"),
+    _AnchorSpec("invoice_number", ("FACTURA",), "contextual", "invoice_metadata"),
     _AnchorSpec("invoice_date", ("FECHA", "FACTURA"), "strong", "invoice_metadata"),
     _AnchorSpec("invoice_date", ("FECHA", "DE", "FACTURA"), "strong", "invoice_metadata"),
+    _AnchorSpec("invoice_date", ("FECHA", "DE", "LA", "FACTURA"), "strong", "invoice_metadata"),
     _AnchorSpec("invoice_date", ("FACTURA", "FECHA"), "strong", "invoice_metadata"),
     _AnchorSpec("invoice_date", ("INVOICE", "DATE"), "strong", "invoice_metadata"),
+    _AnchorSpec("invoice_date", ("DATE", "OF", "INVOICE"), "strong", "invoice_metadata"),
     _AnchorSpec("invoice_date", ("DOCUMENT", "DATE"), "strong", "invoice_metadata"),
+    _AnchorSpec("invoice_date", ("FECHA",), "contextual", "invoice_metadata"),
+    _AnchorSpec("invoice_date", ("DATE",), "contextual", "invoice_metadata"),
     _AnchorSpec("due_date", ("FECHA", "VENCIMIENTO"), "strong", "payment"),
     _AnchorSpec("due_date", ("VENCIMIENTO",), "strong", "payment"),
     _AnchorSpec("due_date", ("DUE", "DATE"), "strong", "payment"),
     _AnchorSpec("payment_date", ("PAYMENT", "DATE"), "strong", "payment"),
     _AnchorSpec("order_date", ("ORDER", "DATE"), "strong", "invoice_metadata"),
+    _AnchorSpec("order_date", ("FECHA", "PEDIDO"), "strong", "invoice_metadata"),
+    _AnchorSpec("order_date", ("FECHA", "DE", "PEDIDO"), "strong", "invoice_metadata"),
     _AnchorSpec("delivery_date", ("DELIVERY", "DATE"), "strong", "invoice_metadata"),
+    _AnchorSpec("delivery_date", ("FECHA", "ENTREGA"), "strong", "invoice_metadata"),
+    _AnchorSpec("delivery_date", ("FECHA", "DE", "ENTREGA"), "strong", "invoice_metadata"),
     _AnchorSpec("service_date", ("SERVICE", "DATE"), "strong", "invoice_metadata"),
+    _AnchorSpec("service_date", ("FECHA", "SERVICIO"), "strong", "invoice_metadata"),
+    _AnchorSpec("service_date", ("FECHA", "DE", "SERVICIO"), "strong", "invoice_metadata"),
     _AnchorSpec("order_reference", ("NUMBER", "PEDIDO"), "strong", "invoice_metadata"),
     _AnchorSpec("order_reference", ("PEDIDO", "NUMBER"), "strong", "invoice_metadata"),
     _AnchorSpec("order_reference", ("ORDER", "NUMBER"), "strong", "invoice_metadata"),
@@ -282,6 +373,7 @@ _ANCHOR_SPECS = (
     _AnchorSpec("base_amount", ("TAXABLE", "BASE"), "strong", "fiscal"),
     _AnchorSpec("base_amount", ("BASE",), "contextual", "fiscal"),
     _AnchorSpec("vat_amount", ("TOTAL", "IVA"), "strong", "fiscal"),
+    _AnchorSpec("vat_amount", ("TOTAL", "CUOTAS"), "strong", "fiscal"),
     _AnchorSpec("vat_amount", ("CUOTA", "IVA"), "strong", "fiscal"),
     _AnchorSpec("vat_amount", ("IMPORTE", "IVA"), "strong", "fiscal"),
     _AnchorSpec("vat_amount", ("IVA",), "contextual", "fiscal"),
@@ -467,6 +559,20 @@ def build_anchor_clusters(
                 other[0].strength == "strong"
                 and other[0].anchor_type
                 in {"vat_amount", "withholding_amount", "other_taxes", "amount_due"}
+                and item[2].intersection(other[2])
+                for other in retained
+            )
+        )
+    ]
+    retained = [
+        item
+        for item in retained
+        if not (
+            item[0].anchor_type == "invoice_number"
+            and item[0].strength == "contextual"
+            and any(
+                other[0].anchor_type == "invoice_date"
+                and other[0].strength == "strong"
                 and item[2].intersection(other[2])
                 for other in retained
             )
@@ -695,9 +801,39 @@ def extract_field_candidates(
         ):
             continue
         retained.append(candidate)
+
+    # Labels such as "VAT Reg No." must not become part of the identifier.
+    # Prefer the contained fiscal value when an overlapping wider candidate
+    # differs only by a common number/tax marker prefix.
+    tax_prefixes = {
+        "N",
+        "NO",
+        "NUM",
+        "NUMERO",
+        "NUMBER",
+        "NIF",
+        "CIF",
+        "VAT",
+        "VATID",
+        "REGNO",
+        "VATREGNO",
+    }
+    filtered = []
+    for candidate in retained:
+        if candidate.candidate_type == "tax_id" and any(
+            other is not candidate
+            and other.candidate_type == "tax_id"
+            and set(other.token_ids) < set(candidate.token_ids)
+            and candidate.normalized_value.endswith(other.normalized_value)
+            and candidate.normalized_value[: -len(other.normalized_value)]
+            in tax_prefixes
+            for other in retained
+        ):
+            continue
+        filtered.append(candidate)
     return tuple(
         replace(candidate, candidate_id=f"c{index}")
-        for index, candidate in enumerate(retained, 1)
+        for index, candidate in enumerate(filtered, 1)
     )
 
 
@@ -845,7 +981,11 @@ def build_evidence_relations(
             candidate_height = max(candidate.bbox[3] - candidate.bbox[1], 1.0)
             scale = max(anchor_height, candidate_height)
             same_segment = candidate.segment_id in anchor_segment_ids
-            same_row = candidate.row_id in anchor_rows
+            vertical_overlap = _overlap_ratio(anchor.bbox, candidate.bbox)
+            same_row = (
+                candidate.row_id in anchor_rows
+                or vertical_overlap >= 0.6
+            )
             region_id = segment_region.get(candidate.segment_id)
             same_region = bool(region_id and region_id in anchor_region_ids)
             right_of = candidate.bbox[0] >= anchor.bbox[2] - 1
@@ -893,7 +1033,7 @@ def build_evidence_relations(
                     below=below,
                     horizontal_distance=round(horizontal_distance, 3),
                     vertical_distance=round(vertical_distance, 3),
-                    vertical_overlap=round(_overlap_ratio(anchor.bbox, candidate.bbox), 4),
+                    vertical_overlap=round(vertical_overlap, 4),
                     column_alignment=aligned,
                     intervening_token_count=intervening,
                     negative_context=anchor.anchor_type in _NEGATIVE_ANCHORS,

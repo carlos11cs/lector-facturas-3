@@ -170,6 +170,77 @@ def _relation_summary(
     return relation_type, relation.evidence_class
 
 
+def _anchor_row_ids(
+    structure: StructuralDocument, anchor: AnchorCluster
+) -> set[str]:
+    segments = {segment.segment_id: segment for segment in structure.segments}
+    return {
+        segments[segment_id].row_id
+        for segment_id in anchor.segment_ids
+        if segment_id in segments
+    }
+
+
+def _contextual_invoice_number_relation_allowed(
+    structure: StructuralDocument, relation: EvidenceRelation
+) -> bool:
+    anchor = _anchor_map(structure).get(relation.anchor_id)
+    return bool(
+        anchor is not None
+        and (
+            anchor.strength != "contextual"
+            or (relation.same_segment and relation.right_of)
+        )
+    )
+
+
+def _contextual_invoice_date_relation_allowed(
+    structure: StructuralDocument, relation: EvidenceRelation
+) -> bool:
+    anchors = _anchor_map(structure)
+    candidates = _candidate_map(structure)
+    anchor = anchors.get(relation.anchor_id)
+    candidate = candidates.get(relation.candidate_id)
+    if anchor is None or candidate is None:
+        return False
+    if anchor.strength != "contextual":
+        return True
+    if any(
+        other.anchor_id != relation.anchor_id
+        and other.evidence_class in _STRONG_EVIDENCE
+        and other.score >= relation.score
+        and (other_anchor := anchors.get(other.anchor_id)) is not None
+        and other_anchor.anchor_type in _INVOICE_DATE_NEGATIVE
+        for other in structure.relations_by_candidate.get(candidate.candidate_id, ())
+    ):
+        return False
+    if relation.same_row and relation.right_of:
+        return True
+
+    return _contextual_invoice_date_has_invoice_context(
+        structure, anchor, candidate
+    )
+
+
+def _contextual_invoice_date_has_invoice_context(
+    structure: StructuralDocument,
+    anchor: AnchorCluster,
+    candidate: FieldCandidate,
+) -> bool:
+
+    relation_rows = _anchor_row_ids(structure, anchor) | {candidate.row_id}
+    for context in structure.anchors:
+        if (
+            context.page != anchor.page
+            or context.anchor_type
+            not in {"invoice_number", "document_type_invoice"}
+        ):
+            continue
+        if relation_rows.intersection(_anchor_row_ids(structure, context)):
+            return True
+    return False
+
+
 def _dominant_relation(
     relations: list[EvidenceRelation],
 ) -> tuple[EvidenceRelation | None, bool]:
@@ -217,6 +288,11 @@ def _explicit_alternative_relations(
     candidate_map = _candidate_map(structure)
     alternatives = []
     for anchor in structure.anchors_by_type.get(anchor_type, ()):
+        # Bare document words such as "Factura" are useful to confirm an
+        # adjacent proposed value, but are not explicit enough to contradict
+        # it with another identifier elsewhere in the same region.
+        if anchor.strength == "contextual":
+            continue
         for relation in structure.relations_by_anchor.get(anchor.anchor_id, ()):
             if relation.evidence_class not in _STRONG_EVIDENCE:
                 continue
@@ -249,6 +325,11 @@ def resolve_invoice_number(
         {"invoice_number"},
         competing_anchor_types=_INVOICE_NUMBER_NEGATIVE,
     )
+    positive = [
+        relation
+        for relation in positive
+        if _contextual_invoice_number_relation_allowed(structure, relation)
+    ]
     negative = _relations(
         structure,
         matches,
@@ -261,14 +342,45 @@ def resolve_invoice_number(
         matches,
         competing_anchor_types=_INVOICE_NUMBER_NEGATIVE,
     )
+    alternatives = [
+        relation
+        for relation in alternatives
+        if _contextual_invoice_number_relation_allowed(structure, relation)
+    ]
     best, dominant = _dominant_relation(positive)
     relation_type, evidence_class = _relation_summary(best)
     competing = len(alternatives) + len(negative)
 
-    if best is not None and dominant and not alternatives and not negative:
+    if best is not None and not alternatives and not negative:
         return _diagnostic(
             "confirmed",
-            "unique_or_dominant_invoice_number_association",
+            (
+                "unique_or_dominant_invoice_number_association"
+                if dominant
+                else "repeated_consistent_invoice_number_association"
+            ),
+            value_occurrences=len(matches),
+            anchor_clusters=len(anchors),
+            valid_associations=len(positive),
+            competing_associations=0,
+            relation_type=relation_type,
+            evidence_class=evidence_class,
+        )
+    if (
+        best is not None
+        and best.same_segment
+        and best.evidence_class == "strong_same_row"
+        and not negative
+        and alternatives
+        and all(
+            relation.evidence_class == "strong_below"
+            and best.score >= relation.score + 15
+            for relation in alternatives
+        )
+    ):
+        return _diagnostic(
+            "confirmed",
+            "dominant_same_segment_invoice_number_association",
             value_occurrences=len(matches),
             anchor_clusters=len(anchors),
             valid_associations=len(positive),
@@ -362,18 +474,41 @@ def resolve_invoice_date(
         {"invoice_date"},
         competing_anchor_types=_INVOICE_DATE_NEGATIVE,
     )
+    positive = [
+        relation
+        for relation in positive
+        if _contextual_invoice_date_relation_allowed(structure, relation)
+    ]
     negative = _relations(
         structure,
         matches,
         _INVOICE_DATE_NEGATIVE,
         competing_anchor_types={"invoice_date"},
     )
+    positive_candidate_ids = {relation.candidate_id for relation in positive}
+    overlapping_negative = [
+        relation
+        for relation in negative
+        if relation.candidate_id in positive_candidate_ids
+    ]
     matching_ids = {candidate.candidate_id for candidate in matches}
     candidate_map = _candidate_map(structure)
     alternatives = []
     for anchor in anchors:
+        # A generic "Fecha" may confirm its own adjacent value, but a date
+        # near another generic label is not explicit contrary evidence. It is
+        # material only when the same row/column group is independently tied
+        # to an invoice header or invoice-number label.
         for relation in structure.relations_by_anchor.get(anchor.anchor_id, ()):
             candidate = candidate_map.get(relation.candidate_id)
+            if (
+                anchor.strength == "contextual"
+                and candidate is not None
+                and not _contextual_invoice_date_has_invoice_context(
+                    structure, anchor, candidate
+                )
+            ):
+                continue
             if (
                 relation.evidence_class in _STRONG_EVIDENCE
                 and candidate is not None
@@ -384,6 +519,9 @@ def resolve_invoice_date(
                 )
                 and not _relation_shadowed_by_competing_context(
                     structure, relation, _INVOICE_DATE_NEGATIVE
+                )
+                and _contextual_invoice_date_relation_allowed(
+                    structure, relation
                 )
             ):
                 alternatives.append(relation)
@@ -401,10 +539,14 @@ def resolve_invoice_date(
             relation_type=relation_type,
             evidence_class=evidence_class,
         )
-    if best is not None and dominant and not alternatives and not negative:
+    if best is not None and not alternatives and not overlapping_negative:
         return _diagnostic(
             "confirmed",
-            "unique_or_dominant_invoice_date_association",
+            (
+                "unique_or_dominant_invoice_date_association"
+                if dominant
+                else "repeated_consistent_invoice_date_association"
+            ),
             value_occurrences=len(matches),
             anchor_clusters=len(anchors),
             valid_associations=len(positive),
@@ -418,7 +560,7 @@ def resolve_invoice_date(
             value_occurrences=len(matches),
             anchor_clusters=len(anchors),
             valid_associations=len(positive),
-            competing_associations=len(alternatives) + len(negative) + max(0, len(positive) - 1),
+            competing_associations=len(alternatives) + len(overlapping_negative),
             relation_type=relation_type,
             evidence_class=evidence_class,
         )
@@ -487,6 +629,70 @@ def _resolve_document_type(structure: StructuralDocument) -> dict[str, Any]:
     )
 
 
+def _entity_matches_proposed_name(candidate: FieldCandidate, name: Any) -> bool:
+    target = normalize_entity(name)
+    value = candidate.normalized_value
+    if not target or not value:
+        return False
+    if target == value or (len(target) >= 6 and target in value):
+        return True
+    return bool(
+        len(value) >= 6
+        and value in target
+        and len(value) / len(target) >= 0.8
+    )
+
+
+def _local_supplier_identity_proof(
+    structure: StructuralDocument,
+    *,
+    supplier_tax_id: Any,
+    provider_name: Any,
+    recipient_tax_id: Any,
+) -> bool:
+    supplier_target = normalize_tax_id(supplier_tax_id)
+    recipient_target = normalize_tax_id(recipient_tax_id)
+    if not supplier_target or supplier_target == recipient_target:
+        return False
+    tax_candidates = [
+        candidate
+        for candidate in structure.candidates_by_type.get("tax_id", ())
+        if candidate.normalized_value == supplier_target
+    ]
+    name_candidates = [
+        candidate
+        for candidate in structure.candidates_by_type.get("entity", ())
+        if _entity_matches_proposed_name(candidate, provider_name)
+    ]
+    for tax_candidate in tax_candidates:
+        for name_candidate in name_candidates:
+            if tax_candidate.page != name_candidate.page:
+                continue
+            if tax_candidate.segment_id == name_candidate.segment_id:
+                return True
+            tax_height = max(tax_candidate.bbox[3] - tax_candidate.bbox[1], 1.0)
+            name_height = max(name_candidate.bbox[3] - name_candidate.bbox[1], 1.0)
+            scale = max(tax_height, name_height)
+            vertical_gap = max(
+                0.0,
+                max(tax_candidate.bbox[1], name_candidate.bbox[1])
+                - min(tax_candidate.bbox[3], name_candidate.bbox[3]),
+            )
+            horizontal_overlap = (
+                min(tax_candidate.bbox[2], name_candidate.bbox[2])
+                - max(tax_candidate.bbox[0], name_candidate.bbox[0])
+            )
+            center_distance = abs(
+                (tax_candidate.bbox[0] + tax_candidate.bbox[2])
+                - (name_candidate.bbox[0] + name_candidate.bbox[2])
+            ) / 2
+            if vertical_gap <= scale * 15 and (
+                horizontal_overlap >= 0 or center_distance <= scale * 10
+            ):
+                return True
+    return False
+
+
 def resolve_identity(
     structure: StructuralDocument,
     normalized: dict[str, Any],
@@ -506,6 +712,12 @@ def resolve_identity(
     )
     registered_name_target = normalize_entity(registered_company_name)
     provider_name_target = normalize_entity(normalized.get("provider_name"))
+    local_supplier_proof = _local_supplier_identity_proof(
+        structure,
+        supplier_tax_id=supplier_target,
+        provider_name=normalized.get("provider_name"),
+        recipient_tax_id=recipient_target,
+    )
 
     known_recipients = [cluster for cluster in clusters if cluster.known_recipient_match]
     labelled_recipients = [cluster for cluster in clusters if cluster.role == "recipient"]
@@ -575,6 +787,15 @@ def resolve_identity(
             relation_type="party_cluster",
             evidence_class="known_recipient",
         )
+    elif supplier_target and local_supplier_proof:
+        supplier_tax = _diagnostic(
+            "confirmed",
+            "supplier_tax_id_with_local_provider_identity",
+            value_occurrences=supplier_occurrences,
+            valid_associations=1,
+            relation_type="local_party_identity",
+            evidence_class="exact_tax_id_and_provider_name",
+        )
     elif supplier_target and supplier_target in supplier_values:
         supplier_tax = _diagnostic(
             "confirmed",
@@ -636,7 +857,16 @@ def resolve_identity(
             competing_associations=max(len(known_recipients) - 1, 0),
         )
 
-    if supplier_cluster is not None and party_cluster_matches_name(
+    if local_supplier_proof:
+        provider_name = _diagnostic(
+            "confirmed",
+            "provider_name_with_local_supplier_tax_id",
+            value_occurrences=1,
+            valid_associations=1,
+            relation_type="local_party_identity",
+            evidence_class="exact_tax_id_and_provider_name",
+        )
+    elif supplier_cluster is not None and party_cluster_matches_name(
         structure, supplier_cluster, normalized.get("provider_name")
     ):
         provider_name = _diagnostic(
@@ -697,7 +927,11 @@ def resolve_identity(
         spanish_supplier=jurisdiction == "ES",
     )
     aggregate = {
-        "supplier_status": "confirmed" if supplier_cluster is not None else "review",
+        "supplier_status": (
+            "confirmed"
+            if supplier_cluster is not None or local_supplier_proof
+            else "review"
+        ),
         "recipient_status": "confirmed" if recipient_cluster is not None else "review",
         "supplier_tax_id_status": supplier_tax["status"],
         "jurisdiction_status": "confirmed" if jurisdiction else "review",
@@ -846,6 +1080,40 @@ def _definitive_structured_money_values(
     return values
 
 
+def _direct_labeled_money_matches(
+    structure: StructuralDocument, field: str, target: str | None
+) -> tuple[int, int]:
+    if target is None:
+        return 0, 0
+    candidates = _candidate_map(structure)
+    associations: dict[str, set[str]] = {}
+    for anchor in structure.anchors_by_type.get(field, ()):
+        strong_relations = []
+        for relation in structure.relations_by_anchor.get(anchor.anchor_id, ()):
+            candidate = candidates.get(relation.candidate_id)
+            if (
+                candidate is None
+                or candidate.candidate_type != "money"
+                or relation.evidence_class not in _STRONG_EVIDENCE
+            ):
+                continue
+            if anchor.strength == "contextual" and not (
+                relation.same_segment and relation.right_of
+            ):
+                continue
+            strong_relations.append(relation)
+        best, dominant = _dominant_relation(strong_relations)
+        selected = [best] if best is not None and dominant else strong_relations
+        for relation in selected:
+            candidate = candidates[relation.candidate_id]
+            associations.setdefault(candidate.normalized_value, set()).add(
+                candidate.candidate_id
+            )
+    matches = len(associations.get(target, ()))
+    competing_values = len(set(associations) - {target})
+    return matches, competing_values
+
+
 def _resolve_structured_money_field(
     structure: StructuralDocument,
     fiscal_structure: FiscalStructure,
@@ -859,6 +1127,30 @@ def _resolve_structured_money_field(
         _definitive_structured_money_values(structure, fiscal_structure, field)
     )
     anchor_count = len(structure.anchors_by_type.get(field, ()))
+    direct_matches, direct_competitors = _direct_labeled_money_matches(
+        structure, field, target
+    )
+    if direct_matches and direct_competitors:
+        return _diagnostic(
+            "review",
+            f"{field}_direct_labels_compete",
+            value_occurrences=direct_matches,
+            anchor_clusters=anchor_count,
+            valid_associations=direct_matches,
+            competing_associations=direct_competitors,
+            relation_type="label_value",
+            evidence_class="competing_direct_structural_values",
+        )
+    if direct_matches:
+        return _diagnostic(
+            "confirmed",
+            f"{field}_directly_labeled",
+            value_occurrences=direct_matches,
+            anchor_clusters=anchor_count,
+            valid_associations=direct_matches,
+            relation_type="label_value",
+            evidence_class="direct_structural_value",
+        )
     if target is not None and distinct == {target}:
         return _diagnostic(
             "confirmed",
@@ -943,6 +1235,46 @@ def _resolve_structured_vat_breakdown(
             relation_type="fiscal_table_rows",
             evidence_class="exclusive_row_assignment",
         )
+    material_proposed = [
+        line
+        for line in proposed
+        if Decimal(line[1]) != Decimal("0.00")
+        or Decimal(line[2]) != Decimal("0.00")
+    ]
+    if len(material_proposed) == 1 and invalid == 0:
+        rate, base, tax = material_proposed[0]
+        base_field = _resolve_structured_money_field(
+            structure, fiscal_structure, "base_amount", base
+        )
+        vat_field = _resolve_structured_money_field(
+            structure, fiscal_structure, "vat_amount", tax
+        )
+        expected_tax = (
+            Decimal(base) * Decimal(rate) / Decimal("100")
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        documented_rates = {
+            candidate.normalized_value
+            for candidate in structure.candidates_by_type.get("percentage", ())
+        }
+        proposed_rates = {line[0] for line in proposed}
+        if (
+            base_field["status"] == "confirmed"
+            and vat_field["status"] == "confirmed"
+            and expected_tax == Decimal(tax)
+            and (
+                not documented_rates
+                or documented_rates.issubset(proposed_rates)
+            )
+        ):
+            return _diagnostic(
+                "confirmed",
+                "single_rate_breakdown_from_labeled_base_and_tax",
+                value_occurrences=1,
+                anchor_clusters=anchor_count,
+                valid_associations=1,
+                relation_type="derived_fiscal_line",
+                evidence_class="labeled_amounts_and_arithmetic",
+            )
     if fiscal_structure.table.status == "confirmed" and documented and proposed:
         return _diagnostic(
             "contradiction",

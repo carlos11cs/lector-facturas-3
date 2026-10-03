@@ -603,10 +603,16 @@ def build_fiscal_table(structure: StructuralDocument) -> FiscalTable:
                     key=lambda candidate: abs(_center_x(candidate.bbox) - rate_x)
                 )
                 if inferred_rates:
+                    closest_distance = abs(
+                        _center_x(inferred_rates[0].bbox) - rate_x
+                    )
                     if (
-                        len(inferred_rates) == 1
-                        or abs(_center_x(inferred_rates[0].bbox) - rate_x) + 5
-                        < abs(_center_x(inferred_rates[1].bbox) - rate_x)
+                        closest_distance <= header["height"] * 8
+                        and (
+                            len(inferred_rates) == 1
+                            or closest_distance + 5
+                            < abs(_center_x(inferred_rates[1].bbox) - rate_x)
+                        )
                     ):
                         rates = [inferred_rates[0]]
                         money = [
@@ -639,6 +645,19 @@ def build_fiscal_table(structure: StructuralDocument) -> FiscalTable:
                 continue
             _, base, tax = ranked[0]
             rate = rates[0]
+            try:
+                expected_tax = (
+                    Decimal(base.normalized_value)
+                    * Decimal(rate.normalized_value)
+                    / Decimal("100")
+                ).quantize(Decimal("0.01"))
+                documented_tax = Decimal(tax.normalized_value).quantize(
+                    Decimal("0.01")
+                )
+            except (InvalidOperation, ValueError):
+                continue
+            if abs(expected_tax - documented_tax) > Decimal("0.01"):
+                continue
             used_candidates.update(
                 {rate.candidate_id, base.candidate_id, tax.candidate_id}
             )

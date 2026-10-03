@@ -10,10 +10,21 @@ from services.canonical_document_structure import (
     extract_field_candidates,
 )
 from services.canonical_document_verifier_v2 import verify_canonical_document_v2
-from services.document_layout import DocumentLayout, build_layout_page
+from services.document_layout import (
+    DocumentLayout,
+    LayoutPage,
+    LayoutRow,
+    LayoutSegment,
+    LayoutToken,
+    build_layout_page,
+)
 
 
 def _layout(*rows):
+    return DocumentLayout((_layout_page(1, *rows),))
+
+
+def _layout_page(page_number, *rows):
     words = []
     directions = {}
     for line_index, row in enumerate(rows):
@@ -36,12 +47,12 @@ def _layout(*rows):
             default_x = x + width + 8
     page = build_layout_page(
         words,
-        page=1,
+        page=page_number,
         width=595,
         height=842,
         line_directions=directions,
     )
-    return DocumentLayout((page,))
+    return page
 
 
 def _proposal(**overrides):
@@ -269,8 +280,165 @@ class TestPartyIdentityResolver(unittest.TestCase):
 
         self.assertEqual(result["fields"]["supplier_tax_id"]["status"], "review")
 
+    def test_unlabelled_supplier_is_confirmed_by_local_name_and_tax_id(self):
+        result = _verify(
+            _layout(
+                (("Vendedor Demo SL", 30, 0), ("Comprador Demo SL", 330, 1)),
+                (("B12345678", 30, 0), ("B87654321", 330, 1)),
+            )
+        )
+
+        self.assertEqual(result["fields"]["provider_name"]["status"], "confirmed")
+        self.assertEqual(result["fields"]["supplier_tax_id"]["status"], "confirmed")
+        self.assertEqual(result["supplier_jurisdiction"], "ES")
+
+    def test_local_supplier_proof_cannot_use_registered_recipient_tax_id(self):
+        result = _verify(
+            _layout(
+                (("Comprador Demo SL", 30, 0),),
+                (("B87654321", 30, 0),),
+            ),
+            _proposal(
+                provider_name="Comprador Demo SL",
+                supplier_tax_id="B87654321",
+            ),
+        )
+
+        self.assertEqual(
+            result["fields"]["supplier_tax_id"]["status"], "contradiction"
+        )
+
 
 class TestFiscalStructureResolver(unittest.TestCase):
+    def test_competing_direct_base_values_require_review(self):
+        result = _verify(
+            _layout(
+                ("BASE", "IMPONIBLE", "100,00"),
+                ("BASE", "IMPONIBLE", "200,00"),
+            )
+        )
+
+        base = result["fields"]["base_amount"]
+        self.assertEqual(base["status"], "review")
+        self.assertEqual(base["reason_code"], "base_amount_direct_labels_compete")
+        self.assertEqual(base["competing_associations"], 1)
+
+    def test_repeated_direct_base_value_remains_confirmed(self):
+        result = _verify(
+            _layout(
+                ("BASE", "IMPONIBLE", "100,00"),
+                ("BASE", "IMPONIBLE", "100,00"),
+            )
+        )
+
+        self.assertEqual(result["fields"]["base_amount"]["status"], "confirmed")
+
+    def test_competing_direct_total_values_require_review(self):
+        result = _verify(
+            _layout(
+                ("TOTAL", "121,00"),
+                ("TOTAL", "FACTURA", "150,00"),
+            )
+        )
+
+        total = result["fields"]["total_amount"]
+        self.assertEqual(total["status"], "review")
+        self.assertEqual(total["reason_code"], "total_amount_direct_labels_compete")
+
+    def test_repeated_equivalent_total_labels_remain_confirmed(self):
+        result = _verify(
+            _layout(
+                ("TOTAL", "121,00"),
+                ("TOTAL", "FACTURA", "121,00"),
+            )
+        )
+
+        self.assertEqual(result["fields"]["total_amount"]["status"], "confirmed")
+
+    def test_base_and_total_do_not_compete_across_semantic_fields(self):
+        result = _verify(
+            _layout(
+                ("BASE", "100,00"),
+                ("TOTAL", "121,00"),
+            )
+        )
+
+        self.assertEqual(result["fields"]["base_amount"]["status"], "confirmed")
+
+    def test_same_direct_value_repeated_on_two_pages_is_not_a_conflict(self):
+        layout = DocumentLayout(
+            (
+                _layout_page(1, ("BASE", "IMPONIBLE", "100,00")),
+                _layout_page(2, ("BASE", "IMPONIBLE", "100,00")),
+            )
+        )
+
+        result = _verify(layout)
+
+        self.assertEqual(result["fields"]["base_amount"]["status"], "confirmed")
+
+    def test_weak_incompatible_amount_does_not_override_strong_base_evidence(self):
+        result = _verify(
+            _layout(
+                ("BASE", "IMPONIBLE", "100,00"),
+                ("DETALLE",),
+                ("200,00",),
+            )
+        )
+
+        self.assertEqual(result["fields"]["base_amount"]["status"], "confirmed")
+
+    def test_visual_row_overlap_links_label_and_value_from_distinct_layout_rows(self):
+        total_label = LayoutToken(
+            "label-total", 1, (72.0, 72.0, 102.0, 82.0), "TOTAL", 0, 0, 0,
+            (1.0, 0.0), 0,
+        )
+        tax_label = LayoutToken(
+            "label-tax", 1, (108.0, 72.0, 152.0, 82.0), "CUOTAS", 0, 0, 1,
+            (1.0, 0.0), 0,
+        )
+        value = LayoutToken(
+            "value", 1, (180.0, 71.0, 220.0, 83.0), "21,00", 1, 0, 0,
+            (1.0, 0.0), 0,
+        )
+        layout = DocumentLayout(
+            (
+                LayoutPage(
+                    1,
+                    595,
+                    842,
+                    0,
+                    (total_label, tax_label, value),
+                    (
+                        LayoutRow(
+                            1,
+                            (
+                                LayoutSegment(
+                                    ("label-total", "label-tax"),
+                                    (72.0, 72.0, 152.0, 82.0),
+                                    ((0, 0),),
+                                ),
+                            ),
+                            (72.0, 72.0, 152.0, 82.0),
+                            ((0, 0),),
+                        ),
+                        LayoutRow(
+                            1,
+                            (LayoutSegment(("value",), value.bbox, ((1, 0),)),),
+                            value.bbox,
+                            ((1, 0),),
+                        ),
+                    ),
+                    (),
+                    (),
+                ),
+            )
+        )
+
+        result = _verify(layout)
+
+        self.assertEqual(result["fields"]["vat_amount"]["status"], "confirmed")
+
     def test_i_simple_21_percent_fiscal_table(self):
         result = _verify(
             _layout(
@@ -483,6 +651,52 @@ class TestFiscalStructureResolver(unittest.TestCase):
 
         self.assertEqual(
             result["fields"]["total_amount"]["status"], "contradiction"
+        )
+
+    def test_impossible_inferred_fiscal_row_is_not_confirmed(self):
+        result = _verify(
+            _layout(
+                (("TIPO", 30), ("BASE", 180), ("CUOTA", 350)),
+                (("81,34", 250), ("2.033,48", 180), ("2.114,82", 350)),
+            ),
+            _proposal(
+                base_amount=2033.48,
+                vat_amount=81.34,
+                total_amount=2114.82,
+                vat_breakdown=[
+                    {"rate": 4, "base": 2033.48, "vat_amount": 81.34}
+                ],
+            ),
+        )
+
+        self.assertEqual(result["fiscal_structure"]["fiscal_row_count"], 0)
+        self.assertNotEqual(result["fields"]["vat_breakdown"]["status"], "contradiction")
+
+    def test_single_rate_breakdown_uses_labeled_totals_and_arithmetic(self):
+        result = _verify(
+            _layout(
+                ("4%",),
+                ("BASE", "IMPONIBLE", "2.033,48"),
+                ("TOTAL", "CUOTAS", "81,34"),
+                ("TOTAL", "FACTURA", "2.114,82"),
+            ),
+            _proposal(
+                base_amount=2033.48,
+                vat_amount=81.34,
+                total_amount=2114.82,
+                vat_breakdown=[
+                    {"rate": 4, "base": 2033.48, "vat_amount": 81.34}
+                ],
+            ),
+        )
+
+        self.assertEqual(result["fields"]["base_amount"]["status"], "confirmed")
+        self.assertEqual(result["fields"]["vat_amount"]["status"], "confirmed")
+        self.assertEqual(result["fields"]["total_amount"]["status"], "confirmed")
+        self.assertEqual(result["fields"]["vat_breakdown"]["status"], "confirmed")
+        self.assertEqual(
+            result["fields"]["vat_breakdown"]["reason_code"],
+            "single_rate_breakdown_from_labeled_base_and_tax",
         )
 
     def test_safe_diagnostics_exclude_party_and_fiscal_values(self):

@@ -326,6 +326,190 @@ class TestCanonicalStructuralEngine(unittest.TestCase):
         )
         self.assertEqual(invoice["competing_associations"], 2)
 
+    def test_id_de_factura_is_a_strong_invoice_number_label(self):
+        result = verify_canonical_document_v2(
+            _layout(("ID", "DE", "FACTURA", "7af56838-58ae-4258")),
+            _normalized(invoice_number="7af56838-58ae-4258"),
+            registered_company_tax_id="B87654321",
+        )
+
+        self.assertEqual(result["fields"]["invoice_number"]["status"], "confirmed")
+
+    def test_contextual_factura_label_only_confirms_same_segment_value(self):
+        same_segment = verify_canonical_document_v2(
+            _layout(("FACTURA", "FND20579")),
+            _normalized(invoice_number="FND20579"),
+            registered_company_tax_id="B87654321",
+        )
+        distant = verify_canonical_document_v2(
+            _layout(("FACTURA",), ("DETALLE",), ("FND20579",)),
+            _normalized(invoice_number="FND20579"),
+            registered_company_tax_id="B87654321",
+        )
+
+        self.assertEqual(same_segment["fields"]["invoice_number"]["status"], "confirmed")
+        self.assertEqual(distant["fields"]["invoice_number"]["status"], "review")
+
+    def test_contextual_factura_does_not_create_explicit_alternative(self):
+        result = verify_canonical_document_v2(
+            _layout(
+                ("NÚMERO", "DE", "FACTURA"),
+                ("F-100",),
+                ("Factura", "Cuota", "Julio", "2026"),
+            ),
+            _normalized(invoice_number="F-100"),
+            registered_company_tax_id="B87654321",
+        )
+
+        invoice = result["fields"]["invoice_number"]
+        self.assertEqual(invoice["status"], "confirmed")
+        self.assertEqual(invoice["competing_associations"], 0)
+
+    def test_same_segment_invoice_number_dominates_remote_below_candidate(self):
+        result = verify_canonical_document_v2(
+            _layout(
+                ("FACTURA", "FND20579"),
+                ("FACTURA", "Nº"),
+                ("919195691",),
+            ),
+            _normalized(invoice_number="FND20579"),
+            registered_company_tax_id="B87654321",
+        )
+
+        invoice = result["fields"]["invoice_number"]
+        self.assertEqual(invoice["status"], "confirmed")
+        self.assertEqual(
+            invoice["reason_code"],
+            "dominant_same_segment_invoice_number_association",
+        )
+
+    def test_repeated_same_invoice_metadata_is_consistent_not_ambiguous(self):
+        result = verify_canonical_document_v2(
+            _layout(
+                ("Nº", "FACTURA", "INV-100"),
+                ("FECHA", "FACTURA", "22/07/2026"),
+                ("Nº", "FACTURA", "INV-100"),
+                ("FECHA", "FACTURA", "22/07/2026"),
+            ),
+            _normalized(invoice_number="INV-100", invoice_date="2026-07-22"),
+            registered_company_tax_id="B87654321",
+        )
+
+        self.assertEqual(result["fields"]["invoice_number"]["status"], "confirmed")
+        self.assertEqual(result["fields"]["invoice_date"]["status"], "confirmed")
+
+    def test_invoice_date_is_not_invalidated_by_same_due_date_elsewhere(self):
+        result = verify_canonical_document_v2(
+            _layout(
+                ("FECHA", "FACTURA", "16/07/2026"),
+                ("VENCIMIENTO", "16/07/2026"),
+            ),
+            _normalized(invoice_date="2026-07-16"),
+            registered_company_tax_id="B87654321",
+        )
+
+        self.assertEqual(result["fields"]["invoice_date"]["status"], "confirmed")
+
+    def test_same_date_occurrence_with_invoice_and_due_labels_is_review(self):
+        result = verify_canonical_document_v2(
+            _layout(("FECHA", "VENCIMIENTO", "16/07/2026")),
+            _normalized(invoice_date="2026-07-16"),
+            registered_company_tax_id="B87654321",
+        )
+
+        self.assertEqual(result["fields"]["invoice_date"]["status"], "review")
+
+    def test_generic_unrelated_date_is_not_explicit_contradiction(self):
+        result = verify_canonical_document_v2(
+            _layout(
+                ("FACTURA", "F-100"),
+                ("MADRID", "01/07/2026"),
+                ("Fecha", "05/07/2026"),
+            ),
+            _normalized(invoice_date="2026-07-01"),
+            registered_company_tax_id="B87654321",
+        )
+
+        invoice_date = result["fields"]["invoice_date"]
+        self.assertEqual(invoice_date["status"], "review")
+        self.assertNotEqual(invoice_date["reason_code"], "explicit_invoice_date_differs")
+
+    def test_invoice_header_date_contradicts_proposed_due_date(self):
+        result = verify_canonical_document_v2(
+            _layout(
+                ("PROVEEDOR", "NIF", "B12345678"),
+                ("CLIENTE", "NIF", "B87654321"),
+                (("FACTURA", 72, 0), ("Nº", 130, 0), ("FECHA", 300, 1)),
+                (("F-100", 72, 0), ("09/07/2026", 300, 1)),
+                ("VENCIMIENTO", "07/09/2026"),
+            ),
+            _normalized(invoice_number="F-100", invoice_date="2026-09-07"),
+            registered_company_tax_id="B87654321",
+        )
+
+        invoice_date = result["fields"]["invoice_date"]
+        self.assertEqual(invoice_date["status"], "contradiction")
+        self.assertEqual(invoice_date["reason_code"], "explicit_invoice_date_differs")
+
+    def test_fecha_de_la_factura_is_a_strong_date_label(self):
+        result = verify_canonical_document_v2(
+            _layout(("FECHA", "DE", "LA", "FACTURA", "23/07/2026")),
+            _normalized(invoice_date="2026-07-23"),
+            registered_company_tax_id="B87654321",
+        )
+
+        self.assertEqual(result["fields"]["invoice_date"]["status"], "confirmed")
+
+    def test_generic_date_label_and_value_in_adjacent_same_row_segments(self):
+        result = verify_canonical_document_v2(
+            _layout(
+                (("Fecha:", 72, 0), ("17/07/2026", 180, 1)),
+                (("Vencimiento:", 72, 0), ("17/07/2026", 180, 1)),
+            ),
+            _normalized(invoice_date="2026-07-17"),
+            registered_company_tax_id="B87654321",
+        )
+
+        self.assertEqual(result["fields"]["invoice_date"]["status"], "confirmed")
+
+    def test_month_name_invoice_dates_are_canonical_candidates(self):
+        for words, expected in (
+            (("FECHA", "29", "jul.", "2026"), "2026-07-29"),
+            (("FECHA", "25", "de", "julio", "de", "2026"), "2026-07-25"),
+            (("INVOICE", "DATE", "Jul", "01,", "2026"), "2026-07-01"),
+        ):
+            with self.subTest(words=words):
+                result = verify_canonical_document_v2(
+                    _layout(("FACTURA", "F-100"), words),
+                    _normalized(invoice_date=expected),
+                    registered_company_tax_id="B87654321",
+                )
+                self.assertEqual(result["fields"]["invoice_date"]["status"], "confirmed")
+
+    def test_generic_date_below_invoice_header_is_confirmed(self):
+        result = verify_canonical_document_v2(
+            _layout(
+                ("Proveedor Demo SL", "B12345678"),
+                ("FACTURA", "Nº", "TIPO", "FAC", "FECHA"),
+                ("26049906", "RI", "09/07/2026"),
+            ),
+            _normalized(invoice_number="26049906", invoice_date="2026-07-09"),
+            registered_company_tax_id="B87654321",
+        )
+
+        self.assertEqual(result["fields"]["invoice_date"]["status"], "confirmed")
+
+    def test_tax_number_marker_is_not_part_of_vat_identifier(self):
+        structure = _structure(
+            _layout(("Ireland", "VAT", "Reg", "No.", "IE9700053D"))
+        )
+
+        values = {
+            candidate.normalized_value
+            for candidate in structure.candidates_by_type.get("tax_id", ())
+        }
+        self.assertEqual(values, {"IE9700053D"})
+
 
 class TestCanonicalVerifierV2Integration(unittest.TestCase):
     def _run_independence_pipeline(
