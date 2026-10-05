@@ -1836,6 +1836,107 @@ class TestInvoiceV2FastText(unittest.TestCase):
         self.assertEqual(evidence["status"], "missing")
         self.assertIsNone(evidence["invoice_date"])
 
+    def test_payment_terms_date_never_replaces_invoice_issue_date(self):
+        text = (
+            "FACTURA\n"
+            "FECHA\n"
+            "09/07/2026\n"
+            "VENCIMIENTO:\n"
+            "60 DIAS FECHA FACTURA\n"
+            "07/09/2026"
+        )
+
+        invoice_date, corrections, issues, diagnostics = (
+            invoice_service._reconcile_fast_text_invoice_date(
+                "2026-07-09",
+                text,
+            )
+        )
+        payment_dates, _ = invoice_service._reconcile_fast_text_payment_dates(
+            [], invoice_date, text
+        )
+
+        self.assertEqual(invoice_date, "2026-07-09")
+        self.assertEqual(corrections, [])
+        self.assertEqual(issues, [])
+        self.assertEqual(diagnostics["status"], "missing")
+        self.assertEqual(payment_dates, ["2026-09-07"])
+
+    def test_invoice_date_field_labels_are_distinct_from_temporal_references(self):
+        self.assertTrue(
+            invoice_service._fast_text_line_is_invoice_date_field_label(
+                "INVOICE DATE: 09/07/2026"
+            )
+        )
+        self.assertTrue(
+            invoice_service._fast_text_line_is_invoice_date_field_label(
+                "FECHA DE LA FACTURA"
+            )
+        )
+        for reference in (
+            "NET 60 FROM INVOICE DATE",
+            "PAYABLE BY 45 DAYS FROM INVOICE DATE",
+            "60 DIAS FECHA FACTURA",
+            "PAYMENT TERMS 30 DAYS AFTER INVOICE DATE",
+            "UNKNOWN TEMPORAL CONTEXT AROUND INVOICE DATE",
+        ):
+            with self.subTest(reference=reference):
+                self.assertFalse(
+                    invoice_service._fast_text_line_is_invoice_date_field_label(
+                        reference
+                    )
+                )
+
+    def test_embedded_temporal_reference_cannot_authorize_next_line_date(self):
+        for reference in (
+            "NET 60 FROM INVOICE DATE",
+            "PAYABLE BY 45 DAYS FROM INVOICE DATE",
+            "60 DIAS FECHA FACTURA",
+            "UNKNOWN TEMPORAL CONTEXT AROUND INVOICE DATE",
+        ):
+            with self.subTest(reference=reference):
+                evidence = invoice_service._inspect_fast_text_invoice_date_evidence(
+                    f"{reference}\n07/09/2026"
+                )
+
+                self.assertEqual(evidence["status"], "missing")
+                self.assertIsNone(evidence["invoice_date"])
+
+    def test_issue_and_due_dates_ignore_payment_term_temporal_reference(self):
+        for text in (
+            (
+                "INVOICE DATE: 09/07/2026\n"
+                "PAYMENT TERMS: NET 60 FROM INVOICE DATE\n"
+                "DUE DATE: 07/09/2026"
+            ),
+            (
+                "FECHA FACTURA: 09/07/2026\n"
+                "CONDICIONES DE PAGO: 60 DIAS FECHA FACTURA\n"
+                "FECHA VENCIMIENTO: 07/09/2026"
+            ),
+        ):
+            with self.subTest(text=text):
+                evidence = invoice_service._inspect_fast_text_invoice_date_evidence(
+                    text
+                )
+
+                self.assertEqual(evidence["status"], "unambiguous")
+                self.assertEqual(evidence["invoice_date"], "2026-07-09")
+
+    def test_temporal_reference_detection_is_not_tied_to_fixture_numbers(self):
+        for days in (15, 37, 91):
+            reference = f"CUSTOM TERMS {days} AFTER INVOICE DATE"
+
+            self.assertFalse(
+                invoice_service._fast_text_line_is_invoice_date_field_label(reference)
+            )
+            self.assertEqual(
+                invoice_service._inspect_fast_text_invoice_date_evidence(
+                    f"{reference}\n01/10/2026"
+                )["status"],
+                "missing",
+            )
+
     def test_v13_does_not_use_spanish_recipient_to_resolve_foreign_supplier_date(self):
         text = (
             "INVOICE\n"

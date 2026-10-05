@@ -483,6 +483,63 @@ def _matches_in_terms(terms: tuple[str, ...], pattern: tuple[str, ...]):
             yield start, start + width
 
 
+def _invoice_date_anchor_is_field_label(
+    matched_segments: tuple[SemanticSegment, ...],
+    anchor_token_ids: Iterable[str],
+    token_by_id: Mapping[str, LayoutToken],
+) -> bool:
+    """Reject invoice-date terms embedded in a wider temporal clause.
+
+    A structural label may stand alone or share its cell with the date value.
+    Any other semantic residue makes the role uncertain and therefore cannot
+    create an invoice-date anchor independently.
+    """
+    anchor_ids = set(anchor_token_ids)
+    residual_tokens = [
+        token_by_id[token_id]
+        for segment in matched_segments
+        for token_id in segment.token_ids
+        if token_id not in anchor_ids and token_id in token_by_id
+    ]
+    residual_tokens = [
+        token
+        for token in residual_tokens
+        if re.search(r"[A-Za-z0-9]", token.original_text)
+    ]
+    if not residual_tokens:
+        return True
+    residual_text = " ".join(token.original_text for token in residual_tokens)
+    return bool(date_interpretations(residual_text))
+
+
+def _anchor_match_is_structurally_valid(
+    spec: _AnchorSpec,
+    matched_segments: tuple[SemanticSegment, ...],
+    token_ids: Iterable[str],
+    token_by_id: Mapping[str, LayoutToken],
+) -> bool:
+    if spec.anchor_type != "invoice_date" or spec.strength != "strong":
+        return True
+    return _invoice_date_anchor_is_field_label(
+        matched_segments, token_ids, token_by_id
+    )
+
+
+def _segment_has_embedded_invoice_date_reference(
+    segment: SemanticSegment, token_by_id: Mapping[str, LayoutToken]
+) -> bool:
+    for spec in _ANCHOR_SPECS:
+        if spec.anchor_type != "invoice_date" or spec.strength != "strong":
+            continue
+        for start, end in _matches_in_terms(segment.normalized_terms, spec.terms):
+            token_ids = segment.token_ids[start:end]
+            if not _invoice_date_anchor_is_field_label(
+                (segment,), token_ids, token_by_id
+            ):
+                return True
+    return False
+
+
 def build_anchor_clusters(
     segments: tuple[SemanticSegment, ...], token_by_id: Mapping[str, LayoutToken]
 ) -> tuple[AnchorCluster, ...]:
@@ -490,9 +547,18 @@ def build_anchor_clusters(
     for segment in segments:
         if segment.isolation_reasons:
             continue
+        embedded_invoice_date_reference = (
+            _segment_has_embedded_invoice_date_reference(segment, token_by_id)
+        )
         for spec in _ANCHOR_SPECS:
+            if embedded_invoice_date_reference and spec.anchor_type == "invoice_date":
+                continue
             for start, end in _matches_in_terms(segment.normalized_terms, spec.terms):
                 token_ids = segment.token_ids[start:end]
+                if not _anchor_match_is_structurally_valid(
+                    spec, (segment,), token_ids, token_by_id
+                ):
+                    continue
                 provisional.append((spec, (segment,), token_ids))
 
     by_page = {}
@@ -520,8 +586,13 @@ def build_anchor_clusters(
             for spec in _ANCHOR_SPECS:
                 if terms != spec.terms:
                     continue
+                token_ids = first.token_ids + second.token_ids
+                if not _anchor_match_is_structurally_valid(
+                    spec, (first, second), token_ids, token_by_id
+                ):
+                    continue
                 provisional.append(
-                    (spec, (first, second), first.token_ids + second.token_ids)
+                    (spec, (first, second), token_ids)
                 )
 
     # One semantic label is one cluster. Longer/multiline matches subsume

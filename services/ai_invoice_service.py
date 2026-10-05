@@ -5799,7 +5799,8 @@ _FAST_TEXT_DATE_EXCLUSION_PATTERN = re.compile(
     r"\b(?:VENCIMIENTO|PAGO|ENTREGA|PEDIDO|ALBARAN|EXPEDICION|ENVIO|DUE|PAYMENT|DELIVERY|ORDER|SHIP(?:PING)?)\b"
 )
 _FAST_TEXT_INVOICE_DATE_STRONG_PATTERN = re.compile(
-    r"\b(?:FECHA\s+(?:DE\s+)?FACTURA|FACTURA\b.*\bFECHA|INVOICE\s+DATE)\b"
+    r"\b(?:FECHA\s+(?:DE\s+(?:LA\s+)?)?FACTURA|FACTURA\s+FECHA|"
+    r"INVOICE\s+DATE|DATE\s+OF\s+INVOICE|DOCUMENT\s+DATE)\b"
 )
 _FAST_TEXT_INVOICE_DATE_CONTEXTUAL_PATTERN = re.compile(r"\bDE\s+FECHA\b")
 _FAST_TEXT_DOCUMENT_INVOICE_PATTERN = re.compile(r"\b(?:FACTURA|INVOICE)\b")
@@ -6726,6 +6727,16 @@ def _normalize_fast_text_date(value: Any) -> Optional[str]:
     return _normalize_date(str(value).replace(".", "/"))
 
 
+def _fast_text_line_is_invoice_date_field_label(line: str) -> bool:
+    """Distinguish a field label from an embedded temporal reference."""
+    for label_match in _FAST_TEXT_INVOICE_DATE_STRONG_PATTERN.finditer(line):
+        residual = line[: label_match.start()] + " " + line[label_match.end() :]
+        residual = _FAST_TEXT_INVOICE_DATE_PATTERN.sub(" ", residual)
+        if not re.sub(r"[\s:;#|_.,/\\()\[\]{}+\-=]+", "", residual):
+            return True
+    return False
+
+
 def _inspect_fast_text_invoice_date_evidence(
     document_text: str,
     *,
@@ -6749,12 +6760,13 @@ def _inspect_fast_text_invoice_date_evidence(
     for position, (_, line) in enumerate(lines):
         if _FAST_TEXT_DATE_EXCLUSION_PATTERN.search(line):
             continue
-        strong_context = bool(_FAST_TEXT_INVOICE_DATE_STRONG_PATTERN.search(line))
+        strong_context = _fast_text_line_is_invoice_date_field_label(line)
         contextual_date = bool(_FAST_TEXT_INVOICE_DATE_CONTEXTUAL_PATTERN.search(line))
         previous_line = lines[position - 1][1] if position else ""
         previous_is_strong_label = bool(
-            _FAST_TEXT_INVOICE_DATE_STRONG_PATTERN.search(previous_line)
-        ) and not _FAST_TEXT_DATE_EXCLUSION_PATTERN.search(previous_line)
+            _fast_text_line_is_invoice_date_field_label(previous_line)
+            and not _FAST_TEXT_DATE_EXCLUSION_PATTERN.search(previous_line)
+        )
         if not strong_context and not previous_is_strong_label and not (
             contextual_date and has_invoice_context and position <= 12
         ):
@@ -8470,6 +8482,40 @@ def _normalize_fast_text_invoice(structured_data: Dict[str, Any]) -> Dict[str, A
     }
 
 
+_FAST_TEXT_CANONICAL_VERIFIED_FIELDS = (
+    "provider_name",
+    "supplier_tax_id",
+    "invoice_number",
+    "invoice_date",
+    "currency",
+    "base_amount",
+    "vat_amount",
+    "vat_breakdown",
+    "withholding_amount",
+    "other_taxes",
+    "total_amount",
+)
+
+
+def _fast_text_verified_candidate_snapshot(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy the complete candidate whose canonical verdict will be persisted."""
+    return deepcopy(candidate)
+
+
+def _canonical_document_verifier_error(reason: str) -> Dict[str, Any]:
+    """Invalidate every field verdict when candidate integrity is not guaranteed."""
+    return {
+        "version": "canonical_document_verifier_v2",
+        "status": "diagnostic_error",
+        "reason": reason,
+        "fields": {},
+        "consistency": {},
+        "structure": {},
+        "timings_ms": {},
+        "comparison_to_legacy": {},
+    }
+
+
 def _validate_fast_text_invoice(
     structured_data: Dict[str, Any],
     normalized: Dict[str, Any],
@@ -8723,43 +8769,52 @@ def analyze_invoice_v2_fast_text(
         return _invoice_analysis_telemetry_result(result, telemetry, return_telemetry)
 
     validation_started = time.monotonic()
-    normalized = _normalize_fast_text_invoice(response_data)
-    canonical_model_proposal = deepcopy(normalized)
+    raw_v2_proposal = _normalize_fast_text_invoice(response_data)
+    reconciled_candidate = deepcopy(raw_v2_proposal)
     correction_codes: List[str] = []
     (
-        normalized["invoice_number"],
+        reconciled_candidate["invoice_number"],
         invoice_number_corrections,
         invoice_number_issues,
         invoice_number_evidence_status,
         invoice_parser_diagnostics,
     ) = _reconcile_fast_text_invoice_number(
-        normalized.get("invoice_number"),
+        reconciled_candidate.get("invoice_number"),
         verification_text,
         document_layout=document_layout,
     )
     (
-        normalized["invoice_date"],
+        reconciled_candidate["invoice_date"],
         invoice_date_corrections,
         invoice_date_issues,
         invoice_date_diagnostics,
     ) = _reconcile_fast_text_invoice_date(
-        normalized.get("invoice_date"),
+        reconciled_candidate.get("invoice_date"),
         verification_text,
-        supplier_tax_id=normalized.get("supplier_tax_id"),
+        supplier_tax_id=reconciled_candidate.get("supplier_tax_id"),
         registered_company_tax_id=normalized_company_context.get("company_tax_id"),
         document_layout=document_layout,
     )
-    normalized["payment_dates"], due_date_corrections = _reconcile_fast_text_payment_dates(
-        normalized.get("payment_dates") or [],
-        normalized.get("invoice_date"),
-        verification_text,
+    reconciled_candidate["payment_dates"], due_date_corrections = (
+        _reconcile_fast_text_payment_dates(
+            reconciled_candidate.get("payment_dates") or [],
+            reconciled_candidate.get("invoice_date"),
+            verification_text,
+        )
     )
     correction_codes.extend(invoice_number_corrections)
     correction_codes.extend(invoice_date_corrections)
     correction_codes.extend(due_date_corrections)
+
+    # No verified value may change beyond this point. Downstream legacy and
+    # canonical diagnostics receive isolated copies; persistence uses this
+    # exact final candidate.
+    final_candidate = deepcopy(reconciled_candidate)
+    final_verified_snapshot = _fast_text_verified_candidate_snapshot(final_candidate)
+
     validation_issues = _validate_fast_text_invoice(
         response_data,
-        normalized,
+        deepcopy(final_candidate),
         validation_company_names,
         registered_company_tax_id=normalized_company_context.get("company_tax_id"),
     )
@@ -8777,7 +8832,7 @@ def analyze_invoice_v2_fast_text(
     )
     safety_assessment = _assess_fast_text_invoice_safety(
         response_data,
-        normalized,
+        deepcopy(final_candidate),
         validation_issues,
         invoice_number_evidence_status=invoice_number_evidence_status,
         deterministic_corrections=correction_codes,
@@ -8802,7 +8857,7 @@ def analyze_invoice_v2_fast_text(
         )
     )
     document_verification = _verify_fast_text_document(
-        normalized,
+        deepcopy(final_candidate),
         verification_text,
         document_text_complete=document_text_complete,
         registered_company_tax_id=normalized_company_context.get("company_tax_id"),
@@ -8824,9 +8879,9 @@ def analyze_invoice_v2_fast_text(
         try:
             canonical_verification = verify_canonical_invoice_fields(
                 canonical_layout,
-                invoice_number=normalized.get("invoice_number"),
-                invoice_date=normalized.get("invoice_date"),
-                supplier_tax_id=normalized.get("supplier_tax_id"),
+                invoice_number=final_candidate.get("invoice_number"),
+                invoice_date=final_candidate.get("invoice_date"),
+                supplier_tax_id=final_candidate.get("supplier_tax_id"),
                 registered_company_tax_id=normalized_company_context.get(
                     "company_tax_id"
                 ),
@@ -8850,9 +8905,10 @@ def analyze_invoice_v2_fast_text(
             )
         )
         try:
+            canonical_candidate = deepcopy(final_candidate)
             canonical_document_verifier_v2 = verify_canonical_document_v2(
                 canonical_layout,
-                canonical_model_proposal,
+                canonical_candidate,
                 registered_company_tax_id=normalized_company_context.get(
                     "company_tax_id"
                 ),
@@ -8860,6 +8916,16 @@ def analyze_invoice_v2_fast_text(
                     "company_name"
                 ),
             )
+            if (
+                _fast_text_verified_candidate_snapshot(canonical_candidate)
+                != final_verified_snapshot
+            ):
+                logger.error(
+                    "Canonical document verifier mutated its final candidate; invalidating verdict"
+                )
+                canonical_document_verifier_v2 = _canonical_document_verifier_error(
+                    "verified_candidate_mutated"
+                )
             canonical_document_verifier_v2["comparison_to_legacy"] = (
                 compare_v2_with_legacy(
                     canonical_document_verifier_v2,
@@ -8868,19 +8934,16 @@ def analyze_invoice_v2_fast_text(
             )
         except Exception:
             logger.exception("Canonical document verifier v2 failed")
-            canonical_document_verifier_v2 = {
-                "version": "canonical_document_verifier_v2",
-                "status": "diagnostic_error",
-                "fields": {},
-                "consistency": {},
-                "structure": {},
-                "timings_ms": {},
-                "comparison_to_legacy": {},
-            }
+            canonical_document_verifier_v2 = _canonical_document_verifier_error(
+                "canonical_verifier_error"
+            )
         parser_diagnostics_result["canonical_document_verifier_v2"] = (
             canonical_document_verifier_v2
         )
     telemetry["validation_ms"] = round((time.monotonic() - validation_started) * 1000)
+    if _fast_text_verified_candidate_snapshot(final_candidate) != final_verified_snapshot:
+        raise RuntimeError("Final V2 candidate changed after canonical verification")
+    persisted_candidate = deepcopy(final_candidate)
     result = {
         "analysis_status": "ok" if validation_status == "passed" else "failed",
         "validation_status": validation_status,
@@ -8896,7 +8959,7 @@ def analyze_invoice_v2_fast_text(
         "fast_path_decision": fast_path_decision,
         "fast_path_reasons": fast_path_reasons,
         **safety_assessment,
-        **normalized,
+        **persisted_candidate,
     }
     logger.info(
         "Invoice V2 fast text: status=%s validation_status=%s accounting_safety=%s metadata_quality=%s invoice_number_evidence=%s corrections=%s input_representation=%s pages=%s native_text_chars=%s sent_text_chars=%s layout_build_ms=%s total_elapsed_ms=%s",

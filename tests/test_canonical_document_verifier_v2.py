@@ -451,6 +451,140 @@ class TestCanonicalStructuralEngine(unittest.TestCase):
         self.assertEqual(invoice_date["status"], "contradiction")
         self.assertEqual(invoice_date["reason_code"], "explicit_invoice_date_differs")
 
+    def test_invoice_date_field_label_same_row_can_confirm(self):
+        layout = _layout(
+            ("PROVEEDOR", "NIF", "B12345678"),
+            ("CLIENTE", "NIF", "B87654321"),
+            ("Invoice", "Date:", "09/07/2026"),
+        )
+        structure = _structure(layout)
+        result = verify_canonical_document_v2(
+            layout,
+            _normalized(invoice_date="2026-07-09"),
+            registered_company_tax_id="B87654321",
+        )
+
+        self.assertEqual(len(structure.anchors_by_type["invoice_date"]), 1)
+        self.assertEqual(result["fields"]["invoice_date"]["status"], "confirmed")
+
+    def test_invoice_date_field_label_above_value_can_confirm(self):
+        layout = _layout(
+            ("PROVEEDOR", "NIF", "B12345678"),
+            ("CLIENTE", "NIF", "B87654321"),
+            ("Invoice", "Date"),
+            ("09/07/2026",),
+        )
+        result = verify_canonical_document_v2(
+            layout,
+            _normalized(invoice_date="2026-07-09"),
+            registered_company_tax_id="B87654321",
+        )
+
+        self.assertEqual(result["fields"]["invoice_date"]["status"], "confirmed")
+
+    def test_embedded_temporal_references_are_not_invoice_date_anchors(self):
+        references = (
+            ("NET", "60", "FROM", "INVOICE", "DATE"),
+            ("PAYABLE", "BY", "45", "DAYS", "FROM", "INVOICE", "DATE"),
+            ("60", "DIAS", "FECHA", "FACTURA"),
+            ("PAYMENT", "TERMS", "45", "DAYS", "AFTER", "INVOICE", "DATE"),
+            ("UNKNOWN", "TEMPORAL", "CONTEXT", "AROUND", "INVOICE", "DATE"),
+        )
+
+        for reference in references:
+            with self.subTest(reference=reference):
+                layout = _layout(reference, ("07/09/2026",))
+                structure = _structure(layout)
+                result = verify_canonical_document_v2(
+                    layout,
+                    _normalized(invoice_date="2026-09-07"),
+                    registered_company_tax_id="B87654321",
+                )
+
+                self.assertEqual(
+                    len(structure.anchors_by_type.get("invoice_date", ())), 0
+                )
+                self.assertNotEqual(
+                    result["fields"]["invoice_date"]["status"], "confirmed"
+                )
+
+    def test_payment_reference_does_not_create_third_issue_date_anchor(self):
+        layout = _layout(
+            ("PROVEEDOR", "NIF", "B12345678"),
+            ("CLIENTE", "NIF", "B87654321"),
+            ("Invoice", "Date:", "09/07/2026"),
+            ("Payment", "terms:", "NET", "60", "FROM", "INVOICE", "DATE"),
+            ("Due", "Date:", "07/09/2026"),
+        )
+        structure = _structure(layout)
+        baseline_structure = _structure(
+            _layout(
+                ("PROVEEDOR", "NIF", "B12345678"),
+                ("CLIENTE", "NIF", "B87654321"),
+                ("Invoice", "Date:", "09/07/2026"),
+                ("Due", "Date:", "07/09/2026"),
+            )
+        )
+        issue_result = verify_canonical_document_v2(
+            layout,
+            _normalized(invoice_date="2026-07-09"),
+            registered_company_tax_id="B87654321",
+        )
+        due_result = verify_canonical_document_v2(
+            layout,
+            _normalized(invoice_date="2026-09-07"),
+            registered_company_tax_id="B87654321",
+        )
+
+        self.assertEqual(
+            len(structure.anchors_by_type["invoice_date"]),
+            len(baseline_structure.anchors_by_type["invoice_date"]),
+        )
+        self.assertEqual(issue_result["fields"]["invoice_date"]["status"], "confirmed")
+        self.assertNotEqual(due_result["fields"]["invoice_date"]["status"], "confirmed")
+
+    def test_spanish_payment_reference_does_not_create_issue_date_anchor(self):
+        layout = _layout(
+            ("PROVEEDOR", "NIF", "B12345678"),
+            ("CLIENTE", "NIF", "B87654321"),
+            ("Fecha", "factura:", "09/07/2026"),
+            ("Condiciones", "de", "pago:", "60", "dias", "fecha", "factura"),
+            ("Fecha", "vencimiento:", "07/09/2026"),
+        )
+        structure = _structure(layout)
+        baseline_structure = _structure(
+            _layout(
+                ("PROVEEDOR", "NIF", "B12345678"),
+                ("CLIENTE", "NIF", "B87654321"),
+                ("Fecha", "factura:", "09/07/2026"),
+                ("Fecha", "vencimiento:", "07/09/2026"),
+            )
+        )
+        result = verify_canonical_document_v2(
+            layout,
+            _normalized(invoice_date="2026-07-09"),
+            registered_company_tax_id="B87654321",
+        )
+
+        self.assertEqual(
+            len(structure.anchors_by_type["invoice_date"]),
+            len(baseline_structure.anchors_by_type["invoice_date"]),
+        )
+        self.assertEqual(result["fields"]["invoice_date"]["status"], "confirmed")
+
+    def test_temporal_reference_classification_is_parameterized(self):
+        for days in (15, 37, 91):
+            with self.subTest(days=days):
+                layout = _layout(
+                    ("CUSTOM", "TERMS", str(days), "AFTER", "INVOICE", "DATE"),
+                    ("01/10/2026",),
+                )
+                structure = _structure(layout)
+
+                self.assertEqual(
+                    len(structure.anchors_by_type.get("invoice_date", ())), 0
+                )
+
     def test_fecha_de_la_factura_is_a_strong_date_label(self):
         result = verify_canonical_document_v2(
             _layout(("FECHA", "DE", "LA", "FACTURA", "23/07/2026")),
@@ -642,23 +776,23 @@ class TestCanonicalVerifierV2Integration(unittest.TestCase):
             )
         return result, captured
 
-    def test_a_canonical_receives_invoice_number_before_legacy_reconciliation(self):
+    def test_a_canonical_receives_final_reconciled_invoice_number(self):
         result, captured = self._run_independence_pipeline(
             legacy_invoice_number="LEGACY-B"
         )
 
-        self.assertEqual(captured["before"]["invoice_number"], "F-100")
+        self.assertEqual(captured["before"]["invoice_number"], "LEGACY-B")
         self.assertEqual(result["invoice_number"], "LEGACY-B")
 
-    def test_b_canonical_receives_invoice_date_before_legacy_reconciliation(self):
+    def test_b_canonical_receives_final_reconciled_invoice_date(self):
         result, captured = self._run_independence_pipeline(
             legacy_invoice_date="2026-09-30"
         )
 
-        self.assertEqual(captured["before"]["invoice_date"], "2026-08-23")
+        self.assertEqual(captured["before"]["invoice_date"], "2026-09-30")
         self.assertEqual(result["invoice_date"], "2026-09-30")
 
-    def test_c_nested_legacy_mutations_do_not_change_canonical_snapshot(self):
+    def test_c_post_reconciliation_validators_cannot_mutate_final_candidate(self):
         def mutate_legacy_nested(_structured, normalized, *_args, **_kwargs):
             normalized["vat_breakdown"][0]["base"] = 999.0
             normalized["payment_dates"].append("2026-10-01")
@@ -670,12 +804,10 @@ class TestCanonicalVerifierV2Integration(unittest.TestCase):
 
         self.assertEqual(captured["before"]["vat_breakdown"][0]["base"], 100.0)
         self.assertEqual(captured["before"]["payment_dates"], ["2026-09-01"])
-        self.assertEqual(result["vat_breakdown"][0]["base"], 999.0)
-        self.assertEqual(
-            result["payment_dates"], ["2026-09-01", "2026-10-01"]
-        )
+        self.assertEqual(result["vat_breakdown"][0]["base"], 100.0)
+        self.assertEqual(result["payment_dates"], ["2026-09-01"])
 
-    def test_d_canonical_branch_cannot_mutate_legacy_result_or_decision(self):
+    def test_d_canonical_mutation_invalidates_verdict_and_not_persisted_candidate(self):
         def mutate_canonical(proposal):
             proposal["invoice_number"] = "CANONICAL-ONLY"
             proposal["vat_breakdown"][0]["base"] = 777.0
@@ -688,8 +820,13 @@ class TestCanonicalVerifierV2Integration(unittest.TestCase):
         self.assertEqual(result["invoice_number"], "F-100")
         self.assertEqual(result["vat_breakdown"][0]["base"], 100.0)
         self.assertEqual(result["fast_path_decision"], "fallback_v1")
+        canonical = result["invoice_parser_diagnostics"][
+            "canonical_document_verifier_v2"
+        ]
+        self.assertEqual(canonical["status"], "diagnostic_error")
+        self.assertEqual(canonical["fields"], {})
 
-    def test_e_legacy_and_canonical_branches_diverge_without_shared_mutation(self):
+    def test_e_all_verified_values_equal_the_persisted_final_candidate(self):
         def mutate_legacy(_structured, normalized, *_args, **_kwargs):
             normalized["provider_name"] = "Legacy Supplier SL"
             return []
@@ -698,6 +835,8 @@ class TestCanonicalVerifierV2Integration(unittest.TestCase):
             proposal["supplier_tax_id"] = "CANONICAL123"
 
         result, captured = self._run_independence_pipeline(
+            legacy_invoice_number="FINAL-200",
+            legacy_invoice_date="2026-09-30",
             validate_side_effect=mutate_legacy,
             canonical_mutator=mutate_canonical,
         )
@@ -705,8 +844,117 @@ class TestCanonicalVerifierV2Integration(unittest.TestCase):
         self.assertEqual(captured["before"]["provider_name"], "Model Supplier SL")
         self.assertEqual(captured["before"]["supplier_tax_id"], "B12345678")
         self.assertEqual(captured["after"]["supplier_tax_id"], "CANONICAL123")
-        self.assertEqual(result["provider_name"], "Legacy Supplier SL")
+        for field in invoice_service._FAST_TEXT_CANONICAL_VERIFIED_FIELDS:
+            self.assertEqual(result[field], captured["before"][field], field)
+        self.assertEqual(result["provider_name"], "Model Supplier SL")
         self.assertEqual(result["supplier_tax_id"], "B12345678")
+        self.assertEqual(result["invoice_number"], "FINAL-200")
+        self.assertEqual(result["invoice_date"], "2026-09-30")
+
+    def test_final_issue_date_can_confirm_but_final_due_date_cannot(self):
+        layout = _layout(
+            ("PROVEEDOR", "NIF", "B12345678"),
+            ("CLIENTE", "NIF", "B87654321"),
+            (("FACTURA", 72, 0), ("Nº", 130, 0), ("FECHA", 300, 1)),
+            (("F-100", 72, 0), ("09/07/2026", 300, 1)),
+            ("VENCIMIENTO", "07/09/2026"),
+        )
+        prepared = {
+            "eligible": True,
+            "reason": "canonical_text_sufficient",
+            "input_representation": "canonical_layout_v1",
+            "page_count": 1,
+            "native_text_chars": 100,
+            "sent_text_chars": 100,
+            "document_text_complete": True,
+            "text": "LEGACY VERIFIER TEXT",
+            "verification_text": "LEGACY VERIFIER TEXT",
+            "model_input_text": "CANONICAL MODEL TEXT",
+            "_canonical_document_layout": layout,
+        }
+        response = {
+            "supplier": {"legal_name": "Proveedor Demo SL", "tax_id": "B12345678"},
+            "customer": {"legal_name": "Cliente Demo SL", "tax_id": "B87654321"},
+            "invoice": {
+                "invoice_number": "F-100",
+                "issue_date": "2026-07-09",
+                "currency": "EUR",
+            },
+            "due_dates": ["2026-09-07"],
+            "taxes": [{"taxable_base": 100, "vat_rate": 21, "vat_amount": 21}],
+            "totals": {
+                "taxable_base": 100,
+                "vat_amount": 21,
+                "withholding": 0,
+                "other_taxes": 0,
+                "total": 121,
+            },
+            "field_evidence": {},
+        }
+        safety = {
+            "accounting_safety_status": "passed",
+            "accounting_safety_issues": [],
+            "metadata_quality_status": "confirmed",
+            "metadata_issues": [],
+        }
+        legacy_verification = {
+            "invoice_number": {"status": "review", "reason": "legacy_gate"},
+            "invoice_date": {"status": "review", "reason": "legacy_gate"},
+        }
+
+        for final_date, expected_status in (
+            ("2026-07-09", "confirmed"),
+            ("2026-09-07", "contradiction"),
+        ):
+            with self.subTest(final_date=final_date), patch.object(
+                invoice_service, "_get_client", return_value=object()
+            ), patch.object(
+                invoice_service, "_get_invoice_model", return_value="gpt-5.6-sol"
+            ), patch.object(
+                invoice_service, "_call_invoice_responses", return_value=response
+            ), patch.object(
+                invoice_service,
+                "_reconcile_fast_text_invoice_number",
+                return_value=("F-100", [], [], "confirmed", {}),
+            ), patch.object(
+                invoice_service,
+                "_reconcile_fast_text_invoice_date",
+                return_value=(final_date, [], [], {}),
+            ), patch.object(
+                invoice_service,
+                "_reconcile_fast_text_payment_dates",
+                return_value=(["2026-09-07"], []),
+            ), patch.object(
+                invoice_service, "_validate_fast_text_invoice", return_value=[]
+            ), patch.object(
+                invoice_service, "_assess_fast_text_invoice_safety", return_value=safety
+            ), patch.object(
+                invoice_service,
+                "_verify_fast_text_document",
+                return_value=legacy_verification,
+            ), patch.object(
+                invoice_service,
+                "_decide_fast_text_fast_path",
+                return_value=("fallback_v1", ["legacy_gate"]),
+            ):
+                result = invoice_service.analyze_invoice_v2_fast_text(
+                    file_bytes=b"unused",
+                    filename="factura.pdf",
+                    mime_type="application/pdf",
+                    prepared_text=prepared,
+                    company_context={
+                        "company_name": "Cliente Demo SL",
+                        "company_tax_id": "B87654321",
+                    },
+                )
+
+            canonical = result["invoice_parser_diagnostics"][
+                "canonical_document_verifier_v2"
+            ]
+            self.assertEqual(result["invoice_date"], final_date)
+            self.assertEqual(
+                canonical["fields"]["invoice_date"]["status"], expected_status
+            )
 
     def test_confirmed_canonical_v2_never_overrides_legacy_fallback(self):
         layout = _layout(
