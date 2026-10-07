@@ -391,135 +391,221 @@
       {% endif %}
 
       <section class="page-section" data-section="integrations">
-        <section class="panel">
-          <div class="panel-header">
-            <div>
-              <h2>Integraciones contables</h2>
-              <p>Prepara un paquete contable puente para gestorías que ya trabajan con A3, ContaSOL, Odoo, Cegid u otras soluciones.</p>
-            </div>
-          </div>
-          <div class="integration-toolbar">
-            <div class="field">
-              <label for="integrationStartDate">Desde</label>
-              <input type="date" id="integrationStartDate" />
-            </div>
-            <div class="field">
-              <label for="integrationEndDate">Hasta</label>
-              <input type="date" id="integrationEndDate" />
-            </div>
-            <div class="field">
-              <label for="integrationFormat">Formato</label>
-              <select id="integrationFormat">
-                <option value="csv">CSV</option>
-                <option value="xlsx">XLSX</option>
-              </select>
-            </div>
-          </div>
-          <p class="panel-helper">Fase 1: exportación normalizada y trazable. La conexión API directa con software de terceros se apoya en esta misma capa de datos.</p>
-          <p id="integrationStatus" class="panel-helper"></p>
-        </section>
+        <header class="integration-hero">
+          <p class="tag">Intercambio de datos</p>
+          <h2>Integraciones</h2>
+          <p>Importa información contable y prepara entregas organizadas para tu gestoría o software habitual.</p>
+        </header>
 
-        <section class="grid integration-stats-grid">
-          <article class="panel integration-stat-card">
-            <span>Compras y gastos</span>
-            <strong id="integrationPurchasesCount">0</strong>
-            <p>Facturas proveedor, nóminas, alquileres, seguridad social y otros ajustes del periodo.</p>
-          </article>
-          <article class="panel integration-stat-card">
-            <span>Ventas e ingresos</span>
-            <strong id="integrationSalesCount">0</strong>
-            <p>Facturas emitidas y facturación manual ya consolidada para la empresa seleccionada.</p>
-          </article>
-          <article class="panel integration-stat-card">
-            <span>Asientos sugeridos</span>
-            <strong id="integrationJournalCount">0</strong>
-            <p>Líneas contables normalizadas con criterio PGC para revisión o importación asistida.</p>
-          </article>
-          <article class="panel integration-stat-card">
-            <span>Documentos trazables</span>
-            <strong id="integrationDocumentsCount">0</strong>
-            <p>Archivos registrados y vinculados al paquete para justificar cada asiento exportado.</p>
-          </article>
-        </section>
+        <div class="integration-tabs" role="tablist" aria-label="Secciones de Integraciones">
+          <button class="integration-tab is-active" id="integrationTabConnections" type="button" role="tab" aria-selected="true" aria-controls="integrationPanelConnections" data-integration-tab="connections">Conexiones</button>
+          <button class="integration-tab" id="integrationTabImport" type="button" role="tab" aria-selected="false" aria-controls="integrationPanelImport" tabindex="-1" data-integration-tab="import">Importar datos</button>
+          <button class="integration-tab" id="integrationTabExport" type="button" role="tab" aria-selected="false" aria-controls="integrationPanelExport" tabindex="-1" data-integration-tab="export">Exportar</button>
+        </div>
 
-        <section class="grid integration-target-grid">
-          <article class="panel integration-target-card">
-            <div class="integration-target-head">
-              <h3>Paquete Ledged</h3>
-              <span class="integration-pill ready">Listo</span>
+        <div class="integration-tab-panels">
+          <section class="integration-tab-panel integration-connections-panel" id="integrationPanelConnections" role="tabpanel" aria-labelledby="integrationTabConnections" data-integration-panel="connections">
+            <div class="integration-section-heading">
+              <h3>Formas de trabajar con Ledged</h3>
+              <p>Estas son las opciones disponibles actualmente para mover información contable.</p>
             </div>
-            <p>Descarga una carpeta ZIP con compras, ventas, asientos y manifiesto documental.</p>
-          </article>
-          <article class="panel integration-target-card">
-            <div class="integration-target-head">
-              <h3>ContaSOL / importación asistida</h3>
-              <span class="integration-pill ready">Listo</span>
-            </div>
-            <p>Usa los CSV/XLSX como capa puente para importar y ajustar asientos desde la gestoría.</p>
-          </article>
-          <article class="panel integration-target-card">
-            <div class="integration-target-head">
-              <h3>Odoo / A3 / Cegid</h3>
-              <span class="integration-pill bridge">Puente</span>
-            </div>
-            <p>Primero se exporta el dato limpio. La siguiente capa será el conector específico o API directa.</p>
-          </article>
-        </section>
 
-        <section class="panel integration-import-panel">
-          <div class="panel-header">
-            <div>
-              <h2>Migrar datos a Ledged</h2>
-              <p>Importa el export CSV o XLSX de tu programa contable. Ledged detecta las columnas, valida el cálculo fiscal y te muestra una vista previa antes de registrar nada.</p>
-            </div>
-          </div>
-          <div class="integration-import-form">
-            <div class="field">
-              <label for="integrationImportSource">Origen del archivo (trazabilidad)</label>
-              <select id="integrationImportSource">
-                <option value="generic">Archivo contable / plantilla Ledged</option>
-                <option value="a3">A3</option>
-                <option value="contasol">ContaSOL</option>
-                <option value="odoo">Odoo</option>
-                <option value="cegid">Cegid</option>
-              </select>
-            </div>
-            <div class="field">
-              <label for="integrationImportType">Qué quieres incorporar</label>
-              <select id="integrationImportType">
-                <option value="purchases">Facturas recibidas y gastos</option>
-                <option value="sales">Facturas emitidas e ingresos</option>
-              </select>
-            </div>
-            <div class="field integration-import-file-field">
-              <label for="integrationImportFile">Archivo CSV o XLSX</label>
-              <input type="file" id="integrationImportFile" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
-            </div>
-          </div>
-          <div class="integration-actions">
-            <button id="integrationImportTemplateBtn" class="button ghost" type="button">Descargar plantilla</button>
-            <button id="integrationImportPreviewBtn" class="button primary" type="button">Validar y previsualizar</button>
-            <button id="integrationImportConfirmBtn" class="button primary" type="button" disabled>Registrar datos validados</button>
-          </div>
-          <p class="panel-helper">Campos necesarios: fecha, proveedor o cliente, base e IVA. Ledged reconoce cabeceras habituales de exportaciones contables y te detiene si los importes no cuadran. La retención se trata siempre como valor absoluto y se descuenta del total de las compras. Máximo 5.000 filas por carga.</p>
-          <p id="integrationImportStatus" class="panel-helper" aria-live="polite"></p>
-          <div id="integrationImportPreview" class="integration-import-preview" hidden></div>
-        </section>
+            <div class="integration-capability-grid">
+              <article class="panel integration-capability-card">
+                <div class="integration-target-head">
+                  <h3>Importación por archivo</h3>
+                  <span class="integration-pill available">Disponible</span>
+                </div>
+                <p>Importa datos contables mediante archivos CSV o XLSX.</p>
+                <button class="button ghost integration-card-action" type="button" data-integration-tab-target="import">Importar datos</button>
+              </article>
 
-        <section class="panel">
-          <div class="panel-header">
-            <div>
-              <h2>Descargas del periodo</h2>
-              <p>Genera exportes por empresa y rango temporal para enviarlos directamente a la gestoría o al software contable.</p>
+              <article class="panel integration-capability-card">
+                <div class="integration-target-head">
+                  <h3>Software contable</h3>
+                  <span class="integration-pill file-based">Mediante archivo</span>
+                </div>
+                <div class="integration-software-list" aria-label="Software compatible mediante archivo">
+                  <span>ContaSOL</span>
+                  <span>A3</span>
+                  <span>Odoo</span>
+                  <span>Cegid</span>
+                </div>
+                <p>Ledged puede trabajar con exportaciones CSV o XLSX de estas herramientas. Actualmente no existe sincronización directa.</p>
+                <button class="button ghost integration-card-action" type="button" data-integration-tab-target="import">Ver importación</button>
+              </article>
+
+              <article class="panel integration-capability-card integration-capability-card-featured">
+                <div class="integration-target-head">
+                  <h3>Paquete Ledged</h3>
+                  <span class="integration-pill available">Disponible</span>
+                </div>
+                <p>Genera un paquete con compras, ventas, asientos y documentación para tu gestoría o software contable.</p>
+                <button class="button primary integration-card-action" type="button" data-integration-tab-target="export">Exportar</button>
+              </article>
             </div>
-          </div>
-          <div class="integration-actions">
-            <button id="integrationExportPurchasesBtn" class="button primary" type="button">Exportar compras</button>
-            <button id="integrationExportSalesBtn" class="button primary" type="button">Exportar ventas</button>
-            <button id="integrationExportJournalBtn" class="button primary" type="button">Exportar asientos</button>
-            <button id="integrationExportPackageBtn" class="button ghost" type="button">Descargar paquete ZIP</button>
-          </div>
-        </section>
+
+            <section class="panel integration-coming-panel" aria-labelledby="integrationComingTitle">
+              <div class="integration-coming-copy">
+                <h3 id="integrationComingTitle">Conexiones directas</h3>
+                <p>Estamos preparando nuevas formas de conectar Ledged directamente con otras herramientas.</p>
+              </div>
+              <div class="integration-coming-list">
+                <span>Correo</span>
+                <span>Almacenamiento</span>
+                <span>Software contable</span>
+                <span>Bancos</span>
+                <strong>Próximamente</strong>
+              </div>
+            </section>
+          </section>
+
+          <section class="integration-tab-panel" id="integrationPanelImport" role="tabpanel" aria-labelledby="integrationTabImport" data-integration-panel="import" hidden>
+            <section class="panel integration-import-panel">
+              <div class="panel-header integration-panel-title">
+                <div>
+                  <h2>Importar datos</h2>
+                  <p>Incorpora datos desde tu programa contable mediante CSV o XLSX.</p>
+                </div>
+              </div>
+
+              <div class="integration-import-steps">
+                <section class="integration-import-step">
+                  <div class="integration-step-heading">
+                    <span>1</span>
+                    <div>
+                      <h3>Origen</h3>
+                      <p>Indica de dónde procede el archivo.</p>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label for="integrationImportSource">Origen del archivo</label>
+                    <select id="integrationImportSource">
+                      <option value="generic">Archivo contable / plantilla Ledged</option>
+                      <option value="a3">A3</option>
+                      <option value="contasol">ContaSOL</option>
+                      <option value="odoo">Odoo</option>
+                      <option value="cegid">Cegid</option>
+                    </select>
+                  </div>
+                  <p class="integration-step-note">Esta selección identifica el origen del archivo; no establece una conexión directa.</p>
+                </section>
+
+                <section class="integration-import-step">
+                  <div class="integration-step-heading">
+                    <span>2</span>
+                    <div>
+                      <h3>Qué quieres importar</h3>
+                      <p>Elige el tipo de registros.</p>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label for="integrationImportType">Tipo de datos</label>
+                    <select id="integrationImportType">
+                      <option value="purchases">Facturas recibidas y gastos</option>
+                      <option value="sales">Facturas emitidas e ingresos</option>
+                    </select>
+                  </div>
+                </section>
+
+                <section class="integration-import-step">
+                  <div class="integration-step-heading">
+                    <span>3</span>
+                    <div>
+                      <h3>Archivo</h3>
+                      <p>Selecciona el CSV o XLSX que quieres revisar.</p>
+                    </div>
+                  </div>
+                  <div class="field integration-import-file-field">
+                    <label for="integrationImportFile">Archivo CSV o XLSX</label>
+                    <input type="file" id="integrationImportFile" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+                  </div>
+                </section>
+              </div>
+
+              <div class="integration-actions integration-import-primary-actions">
+                <button id="integrationImportPreviewBtn" class="button primary" type="button">Validar y previsualizar</button>
+                <button id="integrationImportTemplateBtn" class="button ghost" type="button">Descargar plantilla</button>
+              </div>
+              <p class="panel-helper">Ledged valida fechas, importes, IVA, retenciones y posibles duplicados antes de registrar nada. Máximo 5.000 filas por carga.</p>
+              <p id="integrationImportStatus" class="panel-helper" aria-live="polite"></p>
+              <div id="integrationImportPreview" class="integration-import-preview" hidden></div>
+              <div class="integration-actions integration-import-confirm-actions">
+                <button id="integrationImportConfirmBtn" class="button primary" type="button" disabled hidden>Importar datos validados</button>
+              </div>
+            </section>
+          </section>
+
+          <section class="integration-tab-panel" id="integrationPanelExport" role="tabpanel" aria-labelledby="integrationTabExport" data-integration-panel="export" hidden>
+            <div class="integration-section-heading">
+              <h2>Exportar a contabilidad</h2>
+              <p>Prepara la información del periodo para tu gestoría o software contable.</p>
+            </div>
+
+            <section class="panel integration-export-period-panel">
+              <div class="panel-header compact">
+                <div>
+                  <h3>Periodo de exportación</h3>
+                  <p>Se inicia con el periodo general seleccionado, pero puedes ajustarlo sólo para esta exportación.</p>
+                </div>
+              </div>
+              <div class="integration-toolbar">
+                <div class="field">
+                  <label for="integrationStartDate">Desde</label>
+                  <input type="date" id="integrationStartDate" />
+                </div>
+                <div class="field">
+                  <label for="integrationEndDate">Hasta</label>
+                  <input type="date" id="integrationEndDate" />
+                </div>
+                <div class="field">
+                  <label for="integrationFormat">Formato</label>
+                  <select id="integrationFormat">
+                    <option value="csv">CSV</option>
+                    <option value="xlsx">XLSX</option>
+                  </select>
+                </div>
+              </div>
+              <p id="integrationStatus" class="panel-helper" aria-live="polite"></p>
+            </section>
+
+            <section class="panel integration-summary-panel" aria-labelledby="integrationSummaryTitle">
+              <div class="panel-header compact">
+                <div>
+                  <h3 id="integrationSummaryTitle">Resumen del periodo</h3>
+                  <p>Contenido preparado para la empresa seleccionada.</p>
+                </div>
+              </div>
+              <dl class="integration-summary-list">
+                <div><dt>Compras y gastos</dt><dd id="integrationPurchasesCount">0</dd></div>
+                <div><dt>Ventas e ingresos</dt><dd id="integrationSalesCount">0</dd></div>
+                <div><dt>Asientos sugeridos</dt><dd id="integrationJournalCount">0</dd></div>
+                <div><dt>Documentos trazables</dt><dd id="integrationDocumentsCount">0</dd></div>
+              </dl>
+            </section>
+
+            <section class="panel integration-export-actions-panel">
+              <div class="panel-header compact">
+                <div>
+                  <h3>Descargas del periodo</h3>
+                  <p>Descarga el paquete completo o cada bloque por separado.</p>
+                </div>
+              </div>
+              <div class="integration-primary-download">
+                <div>
+                  <strong>Paquete Ledged</strong>
+                  <span>Compras, ventas, asientos y documentación en un único ZIP.</span>
+                </div>
+                <button id="integrationExportPackageBtn" class="button primary" type="button">Descargar paquete Ledged</button>
+              </div>
+              <div class="integration-actions integration-secondary-downloads">
+                <button id="integrationExportPurchasesBtn" class="button ghost" type="button">Exportar compras</button>
+                <button id="integrationExportSalesBtn" class="button ghost" type="button">Exportar ventas</button>
+                <button id="integrationExportJournalBtn" class="button ghost" type="button">Exportar asientos</button>
+              </div>
+            </section>
+          </section>
+        </div>
       </section>
 
       <section class="page-section" data-section="document-center" hidden>

@@ -2160,43 +2160,110 @@ body.period-quarterly #billingEntriesTable td.period-month {
   display: table-cell;
 }
 
-.integration-toolbar {
-  display: grid;
-  gap: 16px;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+.integration-hero {
+  padding: 24px 28px;
+  border: 1px solid rgba(34, 124, 101, 0.14);
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at 92% 15%, rgba(34, 124, 101, 0.12), transparent 34%),
+    linear-gradient(135deg, #ffffff 0%, #f5faf6 100%);
+  box-shadow: var(--shadow);
 }
 
-.integration-stats-grid,
-.integration-target-grid {
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+.integration-hero .tag {
+  margin-bottom: 8px;
 }
 
-.integration-stat-card,
-.integration-target-card {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+.integration-hero h2 {
+  margin: 0 0 6px;
+  font-size: 1.8rem;
 }
 
-.integration-stat-card span {
-  color: var(--muted);
-}
-
-.integration-stat-card strong {
-  font-size: 2rem;
-  line-height: 1;
-}
-
-.integration-stat-card p,
-.integration-target-card p {
+.integration-hero > p:last-child,
+.integration-section-heading p {
   margin: 0;
   color: var(--muted);
+}
+
+.integration-tabs {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  gap: 5px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 15px;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 12px 28px -24px rgba(26, 38, 29, 0.7);
+  overflow-x: auto;
+}
+
+.integration-tab {
+  border: 0;
+  border-radius: 11px;
+  padding: 10px 18px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.integration-tab:hover {
+  color: var(--accent-strong);
+  background: rgba(34, 124, 101, 0.06);
+}
+
+.integration-tab.is-active {
+  color: #ffffff;
+  background: var(--accent);
+  box-shadow: 0 10px 20px -14px rgba(34, 124, 101, 0.9);
+}
+
+.integration-tab:focus-visible {
+  outline: 3px solid rgba(34, 124, 101, 0.22);
+  outline-offset: 2px;
+}
+
+.integration-tab-panels,
+.integration-tab-panel {
+  display: grid;
+  gap: 20px;
+}
+
+.integration-tab-panel[hidden] {
+  display: none;
+}
+
+.integration-section-heading h2,
+.integration-section-heading h3 {
+  margin: 0 0 6px;
+}
+
+.integration-capability-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.integration-capability-card {
+  display: flex;
+  min-height: 255px;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.integration-capability-card-featured {
+  border-color: rgba(34, 124, 101, 0.3);
+  background: linear-gradient(155deg, #ffffff 0%, #f1f8f3 100%);
 }
 
 .integration-target-head {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: 12px;
 }
 
@@ -2205,26 +2272,98 @@ body.period-quarterly #billingEntriesTable td.period-month {
   font-size: 1.05rem;
 }
 
+.integration-capability-card > p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.integration-card-action {
+  width: fit-content;
+  margin-top: auto;
+}
+
 .integration-pill {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
   border-radius: 999px;
   padding: 5px 10px;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
 
-.integration-pill.ready {
-  background: #e8f7ef;
-  color: #1a7f4f;
+.integration-pill.available {
+  color: #1a704b;
+  background: #e6f5eb;
 }
 
-.integration-pill.bridge {
-  background: #eef2ff;
-  color: #4f46e5;
+.integration-pill.file-based {
+  color: #84601e;
+  background: #fff3d8;
+}
+
+.integration-software-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.integration-software-list span {
+  padding: 5px 9px;
+  border: 1px solid rgba(34, 124, 101, 0.12);
+  border-radius: 999px;
+  background: #f4f8f5;
+  color: var(--accent-strong);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.integration-coming-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 28px;
+  padding-top: 20px;
+  padding-bottom: 20px;
+}
+
+.integration-coming-copy h3,
+.integration-coming-copy p {
+  margin: 0;
+}
+
+.integration-coming-copy p {
+  margin-top: 5px;
+  color: var(--muted);
+}
+
+.integration-coming-list {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.integration-coming-list span,
+.integration-coming-list strong {
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+}
+
+.integration-coming-list span {
+  color: var(--muted);
+  background: #f2f5f2;
+}
+
+.integration-coming-list strong {
+  color: #80611f;
+  background: #fff3d8;
 }
 
 .integration-actions {
@@ -2235,18 +2374,160 @@ body.period-quarterly #billingEntriesTable td.period-month {
 
 .integration-import-panel {
   display: grid;
-  gap: 16px;
+  gap: 18px;
 }
 
-.integration-import-form {
+.integration-panel-title {
+  margin-bottom: 0;
+}
+
+.integration-import-steps {
   display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.integration-import-step {
+  display: flex;
+  flex-direction: column;
   gap: 16px;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  align-items: end;
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid rgba(34, 124, 101, 0.13);
+  border-radius: 17px;
+  background: #fbfdfb;
+}
+
+.integration-step-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+}
+
+.integration-step-heading > span {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  color: #ffffff;
+  background: var(--accent);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.integration-step-heading h3,
+.integration-step-heading p {
+  margin: 0;
+}
+
+.integration-step-heading h3 {
+  font-size: 1rem;
+}
+
+.integration-step-heading p,
+.integration-step-note {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.integration-step-heading p {
+  margin-top: 3px;
+}
+
+.integration-step-note {
+  margin: -6px 0 0;
+  line-height: 1.45;
 }
 
 .integration-import-file-field input[type="file"] {
   max-width: 100%;
+}
+
+.integration-import-primary-actions {
+  align-items: center;
+}
+
+.integration-import-confirm-actions {
+  justify-content: flex-end;
+}
+
+.integration-toolbar {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+}
+
+.integration-export-period-panel,
+.integration-summary-panel,
+.integration-export-actions-panel {
+  box-shadow: 0 18px 38px -34px rgba(26, 38, 29, 0.58);
+}
+
+.integration-export-period-panel .panel-header h3,
+.integration-summary-panel .panel-header h3,
+.integration-export-actions-panel .panel-header h3 {
+  margin: 0 0 5px;
+}
+
+.integration-summary-list {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--border);
+}
+
+.integration-summary-list > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+  padding: 15px 16px;
+  background: #fbfdfb;
+}
+
+.integration-summary-list dt {
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.integration-summary-list dd {
+  margin: 0;
+  color: var(--accent-strong);
+  font-size: 1.35rem;
+  font-weight: 700;
+}
+
+.integration-primary-download {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 22px;
+  padding: 18px;
+  border: 1px solid rgba(34, 124, 101, 0.18);
+  border-radius: 17px;
+  background: linear-gradient(120deg, #f2f8f4 0%, #fbfdfb 100%);
+}
+
+.integration-primary-download div {
+  display: grid;
+  gap: 4px;
+}
+
+.integration-primary-download span {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.integration-secondary-downloads {
+  margin-top: 14px;
 }
 
 .integration-import-preview {
@@ -2357,6 +2638,63 @@ body.period-quarterly #billingEntriesTable td.period-month {
 
 .integration-import-status.error {
   color: #b42318;
+}
+
+@media (max-width: 920px) {
+  .integration-capability-grid,
+  .integration-import-steps {
+    grid-template-columns: 1fr;
+  }
+
+  .integration-capability-card {
+    min-height: 0;
+  }
+
+  .integration-coming-panel,
+  .integration-primary-download {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .integration-coming-list {
+    justify-content: flex-start;
+  }
+
+  .integration-summary-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  .integration-hero {
+    padding: 21px 20px;
+  }
+
+  .integration-tabs {
+    width: 100%;
+  }
+
+  .integration-tab {
+    flex: 1 0 auto;
+    padding-inline: 14px;
+  }
+
+  .integration-toolbar,
+  .integration-summary-list {
+    grid-template-columns: 1fr;
+  }
+
+  .integration-card-action,
+  .integration-primary-download .button,
+  .integration-import-primary-actions .button,
+  .integration-secondary-downloads .button,
+  .integration-import-confirm-actions .button {
+    width: 100%;
+  }
+
+  .integration-actions {
+    flex-direction: column;
+  }
 }
 
 .document-center-toolbar,

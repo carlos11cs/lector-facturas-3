@@ -1368,6 +1368,9 @@ const reportEndMonthSelect = document.getElementById("reportEndMonthSelect");
 const reportDownloadBtn = document.getElementById("reportDownloadBtn");
 const reportEmailBtn = document.getElementById("reportEmailBtn");
 const reportStatus = document.getElementById("reportStatus");
+const integrationTabButtons = Array.from(document.querySelectorAll("[data-integration-tab]"));
+const integrationTabPanels = Array.from(document.querySelectorAll("[data-integration-panel]"));
+const integrationTabTargets = Array.from(document.querySelectorAll("[data-integration-tab-target]"));
 const integrationStartDate = document.getElementById("integrationStartDate");
 const integrationEndDate = document.getElementById("integrationEndDate");
 const integrationFormat = document.getElementById("integrationFormat");
@@ -11023,6 +11026,53 @@ function padMonthDay(value) {
   return String(value).padStart(2, "0");
 }
 
+function setActiveIntegrationTab(tabName, focusTab = false) {
+  const selectedTab = integrationTabButtons.find((tab) => tab.dataset.integrationTab === tabName);
+  if (!selectedTab) {
+    return;
+  }
+  integrationTabButtons.forEach((tab) => {
+    const isSelected = tab === selectedTab;
+    tab.classList.toggle("is-active", isSelected);
+    tab.setAttribute("aria-selected", String(isSelected));
+    tab.tabIndex = isSelected ? 0 : -1;
+  });
+  integrationTabPanels.forEach((panel) => {
+    panel.hidden = panel.dataset.integrationPanel !== tabName;
+  });
+  if (focusTab) {
+    selectedTab.focus();
+  }
+}
+
+function bindIntegrationTabs() {
+  integrationTabButtons.forEach((tab, index) => {
+    tab.addEventListener("click", () => setActiveIntegrationTab(tab.dataset.integrationTab));
+    tab.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+        return;
+      }
+      event.preventDefault();
+      let nextIndex = index;
+      if (event.key === "ArrowLeft") {
+        nextIndex = (index - 1 + integrationTabButtons.length) % integrationTabButtons.length;
+      } else if (event.key === "ArrowRight") {
+        nextIndex = (index + 1) % integrationTabButtons.length;
+      } else if (event.key === "Home") {
+        nextIndex = 0;
+      } else if (event.key === "End") {
+        nextIndex = integrationTabButtons.length - 1;
+      }
+      setActiveIntegrationTab(integrationTabButtons[nextIndex].dataset.integrationTab, true);
+    });
+  });
+  integrationTabTargets.forEach((button) => {
+    button.addEventListener("click", () => {
+      setActiveIntegrationTab(button.dataset.integrationTabTarget, true);
+    });
+  });
+}
+
 function buildIntegrationRangeFromMainFilters() {
   const { month, year } = getSelectedMonthYear();
   const normalizedMonth = Number(month || 1);
@@ -11195,6 +11245,7 @@ function resetAccountingImportPreview() {
   currentAccountingImportPreview = null;
   if (integrationImportConfirmBtn) {
     integrationImportConfirmBtn.disabled = true;
+    integrationImportConfirmBtn.hidden = true;
   }
   if (integrationImportPreview) {
     integrationImportPreview.hidden = true;
@@ -11355,6 +11406,7 @@ async function previewAccountingImport() {
     const canConfirm = Number(summary.ready || 0) > 0 && !hasInvalidRows;
     if (integrationImportConfirmBtn) {
       integrationImportConfirmBtn.disabled = !canConfirm;
+      integrationImportConfirmBtn.hidden = !canConfirm;
     }
     if (hasInvalidRows) {
       setAccountingImportStatus(
@@ -12117,9 +12169,7 @@ function bindEvents() {
   if (integrationEndDate) {
     integrationEndDate.addEventListener("change", loadAccountingIntegrationSummary);
   }
-  if (integrationFormat) {
-    integrationFormat.addEventListener("change", loadAccountingIntegrationSummary);
-  }
+  bindIntegrationTabs();
   if (integrationExportPurchasesBtn) {
     integrationExportPurchasesBtn.addEventListener("click", () => triggerAccountingExport("purchases"));
   }
