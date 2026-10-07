@@ -2244,7 +2244,7 @@ body.period-quarterly #billingEntriesTable td.period-month {
 
 .integration-capability-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
   gap: 20px;
 }
 
@@ -2383,7 +2383,7 @@ body.period-quarterly #billingEntriesTable td.period-month {
 
 .integration-import-steps {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
   gap: 14px;
 }
 
@@ -2442,8 +2442,29 @@ body.period-quarterly #billingEntriesTable td.period-month {
   line-height: 1.45;
 }
 
+.page-section[data-section="integrations"] .field {
+  min-width: 0;
+}
+
+.page-section[data-section="integrations"] .field input,
+.page-section[data-section="integrations"] .field select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
 .integration-import-file-field input[type="file"] {
   max-width: 100%;
+}
+
+.integration-selected-file-name {
+  display: block;
+  max-width: 100%;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .integration-import-primary-actions {
@@ -2641,11 +2662,6 @@ body.period-quarterly #billingEntriesTable td.period-month {
 }
 
 @media (max-width: 920px) {
-  .integration-capability-grid,
-  .integration-import-steps {
-    grid-template-columns: 1fr;
-  }
-
   .integration-capability-card {
     min-height: 0;
   }

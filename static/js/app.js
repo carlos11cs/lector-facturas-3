@@ -1386,6 +1386,7 @@ const integrationExportPackageBtn = document.getElementById("integrationExportPa
 const integrationImportSource = document.getElementById("integrationImportSource");
 const integrationImportType = document.getElementById("integrationImportType");
 const integrationImportFile = document.getElementById("integrationImportFile");
+const integrationImportFileName = document.getElementById("integrationImportFileName");
 const integrationImportTemplateBtn = document.getElementById("integrationImportTemplateBtn");
 const integrationImportPreviewBtn = document.getElementById("integrationImportPreviewBtn");
 const integrationImportConfirmBtn = document.getElementById("integrationImportConfirmBtn");
@@ -11450,10 +11451,22 @@ async function confirmAccountingImport() {
     if (integrationImportFile) {
       integrationImportFile.value = "";
     }
+    syncAccountingImportFileName();
     resetAccountingImportPreview();
     await refreshAllData();
   } catch (error) {
     setAccountingImportStatus(error.message || "No se pudo registrar la importación.", "error");
+  }
+}
+
+function syncAccountingImportFileName() {
+  const fileName = integrationImportFile?.files?.[0]?.name || "";
+  if (integrationImportFile) {
+    integrationImportFile.title = fileName;
+  }
+  if (integrationImportFileName) {
+    integrationImportFileName.textContent = fileName;
+    integrationImportFileName.hidden = !fileName;
   }
 }
 
@@ -12193,6 +12206,7 @@ function bindEvents() {
   }
   if (integrationImportFile) {
     integrationImportFile.addEventListener("change", () => {
+      syncAccountingImportFileName();
       resetAccountingImportPreview();
       setAccountingImportStatus("");
     });
