@@ -4331,6 +4331,7 @@ function addFiles(fileList) {
       analysisErrorMessage: "",
       analysisWarning: "",
       analysisStatus: "ok",
+      accountingMetadata: {},
       touched: {
         date: false,
         supplier: false,
@@ -4379,6 +4380,7 @@ function addIncomeFiles(fileList) {
       analysisErrorMessage: "",
       analysisWarning: "",
       analysisStatus: "ok",
+      accountingMetadata: {},
       touched: {
         date: false,
         client: false,
@@ -5794,6 +5796,90 @@ function renderIncomeTable() {
   });
 }
 
+function captureAccountingMetadata(item, extracted, partyKind) {
+  const structured = extracted?.structured_extraction || {};
+  const invoice = structured.invoice || {};
+  const party = structured[partyKind] || {};
+  const totals = structured.totals || {};
+  const installments = Array.isArray(structured.installments)
+    ? structured.installments
+    : [];
+  const withholdingAmount = Number(totals.withholding);
+  const otherTaxesAmount = Number(totals.other_taxes);
+  item.accountingMetadata = {
+    invoiceNumber: invoice.invoice_number || extracted.invoice_number || null,
+    invoiceSeries: invoice.series || extracted.invoice_series || null,
+    rectifiedInvoiceReference:
+      invoice.rectified_invoice_reference || extracted.rectified_invoice_reference || null,
+    counterpartyTaxId: party.tax_id || null,
+    counterpartyCountry: party.country || null,
+    counterpartyAddress: party.address || null,
+    currency: invoice.currency || extracted.currency || null,
+    concept: extracted.concept || null,
+    documentReference: invoice.document_reference || null,
+    orderReference: invoice.order_reference || null,
+    deliveryNoteReference: invoice.delivery_note || null,
+    sourceSystem: extracted.source_system || null,
+    externalDocumentId: extracted.external_document_id || null,
+    extractionSource: extracted.extraction_source || null,
+    confidenceScore: extracted.confidence_score ?? null,
+    withholdingDetails: Number.isFinite(withholdingAmount) && withholdingAmount !== 0
+      ? [{ tax_type: null, rate: null, base: null, tax_amount: Math.abs(withholdingAmount) }]
+      : [],
+    otherTaxes: Number.isFinite(otherTaxesAmount) && otherTaxesAmount !== 0
+      ? [{ tax_type: null, rate: null, base: null, tax_amount: Math.abs(otherTaxesAmount) }]
+      : [],
+    paymentSchedule: installments
+      .filter((entry) => entry && entry.due_date)
+      .map((entry) => ({
+        due_date: entry.due_date,
+        amount: entry.amount ?? null,
+        actual_payment_date: entry.actual_payment_date || null,
+      })),
+  };
+}
+
+function accountingMetadataPayload(item) {
+  const metadata = item.accountingMetadata || {};
+  const originalSchedule = Array.isArray(metadata.paymentSchedule)
+    ? metadata.paymentSchedule
+    : [];
+  const paymentSchedule = (item.paymentDates || []).map((dueDate, index) => {
+    const original =
+      originalSchedule.find((entry) => entry.due_date === dueDate) ||
+      originalSchedule[index] ||
+      {};
+    return {
+      due_date: dueDate,
+      amount: original.amount ?? null,
+      actual_payment_date: original.actual_payment_date || null,
+    };
+  });
+  return { ...metadata, paymentSchedule };
+}
+
+function persistedAccountingMetadataPayload(invoice) {
+  return {
+    invoice_number: invoice.invoice_number ?? null,
+    invoice_series: invoice.invoice_series ?? null,
+    is_rectificative: Boolean(invoice.is_rectificative),
+    rectified_invoice_reference: invoice.rectified_invoice_reference ?? null,
+    counterparty_tax_id: invoice.counterparty_tax_id ?? null,
+    counterparty_country: invoice.counterparty_country ?? null,
+    counterparty_address: invoice.counterparty_address ?? null,
+    currency: invoice.currency ?? null,
+    concept: invoice.concept ?? null,
+    document_reference: invoice.document_reference ?? null,
+    order_reference: invoice.order_reference ?? null,
+    delivery_note_reference: invoice.delivery_note_reference ?? null,
+    source_system: invoice.source_system ?? null,
+    external_document_id: invoice.external_document_id ?? null,
+    withholding_details: invoice.withholding_details || [],
+    other_taxes: invoice.other_taxes || [],
+    payment_schedule: invoice.payment_schedule || [],
+  };
+}
+
 function applyIncomeAnalysisResult(item, data) {
   if (item._analysisCancelled || !isPendingUploadItemPresent(item)) {
     return;
@@ -5807,6 +5893,7 @@ function applyIncomeAnalysisResult(item, data) {
     return;
   }
   const extracted = data.extracted || {};
+  captureAccountingMetadata(item, extracted, "customer");
   item.analysisText = extracted.analysis_text || "";
   item.analysisStatus = extracted.analysis_status || "ok";
   if (item.analysisStatus === "failed") {
@@ -6012,6 +6099,7 @@ function uploadIncomePending() {
         ? summarizeVatBreakdown(item.vatBreakdown || [])
         : null;
       return {
+        ...accountingMetadataPayload(item),
         originalFilename: item.originalFilename,
         date: item.date,
         paymentDate: computePaymentDate(item.date, item.paymentDate),
@@ -6294,6 +6382,7 @@ function applyInvoiceAnalysisResult(item, data) {
         return;
       }
       const extracted = data.extracted || {};
+      captureAccountingMetadata(item, extracted, "supplier");
       item.analysisText = extracted.analysis_text || "";
       item.analysisStatus = extracted.analysis_status || "ok";
       if (item.analysisStatus === "failed") {
@@ -6761,6 +6850,7 @@ function buildRecoveredAnalysisItem(job) {
     analysisErrorMessage: "",
     analysisWarning: "",
     analysisStatus: "ok",
+    accountingMetadata: {},
     touched: {
       date: false,
       supplier: false,
@@ -6863,6 +6953,7 @@ function uploadPending() {
         : null;
       const withholdingAmount = getWithholdingAmount(item.withholdingAmount);
       return {
+        ...accountingMetadataPayload(item),
         originalFilename: item.originalFilename,
         date: item.date,
         paymentDate: computePaymentDate(item.date, item.paymentDate),
@@ -8808,6 +8899,7 @@ function enterIncomeInvoiceEditMode(row, invoice) {
   saveBtn.textContent = "Guardar";
   saveBtn.addEventListener("click", () => {
     updateIncomeInvoice(invoice.id, {
+      ...persistedAccountingMetadataPayload(invoice),
       invoice_date: dateInput.value,
       client: clientInput.value,
       base_amount: baseInput.value,
@@ -9025,6 +9117,7 @@ function enterInvoiceEditMode(row, invoice) {
   saveBtn.textContent = "Guardar";
   saveBtn.addEventListener("click", () => {
     updateInvoice(invoice.id, {
+      ...persistedAccountingMetadataPayload(invoice),
       invoice_date: dateInput.value,
       supplier: supplierInput.value,
       base_amount: baseInput.value,

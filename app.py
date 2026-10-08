@@ -72,6 +72,17 @@ from services.storage_service import (
     upload_bytes,
     upload_private_bytes,
 )
+from services.accounting_export import (
+    build_accounting_export_data,
+    export_profile_registry,
+    suggest_expense_account,
+)
+from services.accounting_export.persistence import (
+    accounting_document_metadata_response,
+    accounting_tax_components_total,
+    normalize_accounting_document_metadata,
+)
+from services.accounting_export.models import AccountingAttachment, AccountingExportData
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data.db")
@@ -380,6 +391,23 @@ invoices_table = Table(
     Column("expense_subtype", String),
     Column("pnl_bucket", String),
     Column("tax_model_targets", Text),
+    Column("invoice_number", String),
+    Column("invoice_series", String),
+    Column("is_rectificative", Boolean),
+    Column("rectified_invoice_reference", String),
+    Column("counterparty_tax_id", String),
+    Column("counterparty_country", String),
+    Column("counterparty_address", Text),
+    Column("currency", String),
+    Column("concept", Text),
+    Column("document_reference", String),
+    Column("order_reference", String),
+    Column("delivery_note_reference", String),
+    Column("source_system", String),
+    Column("external_document_id", String),
+    Column("withholding_details", Text),
+    Column("other_taxes", Text),
+    Column("payment_schedule", Text),
     Column("created_at", String, nullable=False),
 )
 
@@ -405,6 +433,23 @@ income_invoices_table = Table(
     Column("ocr_text", Text),
     Column("extraction_source", String),
     Column("confidence_score", Float),
+    Column("invoice_number", String),
+    Column("invoice_series", String),
+    Column("is_rectificative", Boolean),
+    Column("rectified_invoice_reference", String),
+    Column("counterparty_tax_id", String),
+    Column("counterparty_country", String),
+    Column("counterparty_address", Text),
+    Column("currency", String),
+    Column("concept", Text),
+    Column("document_reference", String),
+    Column("order_reference", String),
+    Column("delivery_note_reference", String),
+    Column("source_system", String),
+    Column("external_document_id", String),
+    Column("withholding_details", Text),
+    Column("other_taxes", Text),
+    Column("payment_schedule", Text),
     Column("created_at", String, nullable=False),
 )
 
@@ -1647,6 +1692,26 @@ def init_db():
     add_column_if_missing("invoices", "expense_subtype", "VARCHAR")
     add_column_if_missing("invoices", "pnl_bucket", "VARCHAR")
     add_column_if_missing("invoices", "tax_model_targets", "TEXT")
+    for column_name, column_type in (
+        ("invoice_number", "VARCHAR"),
+        ("invoice_series", "VARCHAR"),
+        ("is_rectificative", "BOOLEAN"),
+        ("rectified_invoice_reference", "VARCHAR"),
+        ("counterparty_tax_id", "VARCHAR"),
+        ("counterparty_country", "VARCHAR"),
+        ("counterparty_address", "TEXT"),
+        ("currency", "VARCHAR"),
+        ("concept", "TEXT"),
+        ("document_reference", "VARCHAR"),
+        ("order_reference", "VARCHAR"),
+        ("delivery_note_reference", "VARCHAR"),
+        ("source_system", "VARCHAR"),
+        ("external_document_id", "VARCHAR"),
+        ("withholding_details", "TEXT"),
+        ("other_taxes", "TEXT"),
+        ("payment_schedule", "TEXT"),
+    ):
+        add_column_if_missing("invoices", column_name, column_type)
     drop_not_null_if_needed("invoices", "vat_rate")
     drop_not_null_if_needed("invoices", "stored_filename")
     if "invoices" in table_names:
@@ -1855,6 +1920,26 @@ def init_db():
     add_column_if_missing("income_invoices", "withholding_amount", "FLOAT")
     add_column_if_missing("income_invoices", "extraction_source", "VARCHAR")
     add_column_if_missing("income_invoices", "confidence_score", "FLOAT")
+    for column_name, column_type in (
+        ("invoice_number", "VARCHAR"),
+        ("invoice_series", "VARCHAR"),
+        ("is_rectificative", "BOOLEAN"),
+        ("rectified_invoice_reference", "VARCHAR"),
+        ("counterparty_tax_id", "VARCHAR"),
+        ("counterparty_country", "VARCHAR"),
+        ("counterparty_address", "TEXT"),
+        ("currency", "VARCHAR"),
+        ("concept", "TEXT"),
+        ("document_reference", "VARCHAR"),
+        ("order_reference", "VARCHAR"),
+        ("delivery_note_reference", "VARCHAR"),
+        ("source_system", "VARCHAR"),
+        ("external_document_id", "VARCHAR"),
+        ("withholding_details", "TEXT"),
+        ("other_taxes", "TEXT"),
+        ("payment_schedule", "TEXT"),
+    ):
+        add_column_if_missing("income_invoices", column_name, column_type)
     drop_not_null_if_needed("income_invoices", "vat_rate")
     drop_not_null_if_needed("income_invoices", "stored_filename")
     if "income_invoices" in table_names:
@@ -4080,6 +4165,21 @@ ACCOUNTING_IMPORT_FIELD_ALIASES = {
         "serie_numero",
         "referencia",
     },
+    "series": {"serie", "serie_factura"},
+    "counterparty_tax_id": {
+        "nif", "cif", "nif_cif", "cif_nif", "vat_id", "identificador_fiscal",
+        "nif_proveedor", "cif_proveedor", "nif_cliente", "cif_cliente",
+    },
+    "country": {"pais", "pais_fiscal", "country"},
+    "address": {"direccion", "direccion_fiscal", "domicilio_fiscal"},
+    "currency": {"moneda", "divisa", "currency"},
+    "rectified_invoice_reference": {
+        "factura_rectificada", "referencia_rectificativa", "factura_origen",
+    },
+    "document_reference": {"referencia_documento", "document_reference"},
+    "order_reference": {"numero_pedido", "referencia_pedido", "pedido"},
+    "delivery_note_reference": {"numero_albaran", "referencia_albaran", "albaran"},
+    "external_document_id": {"id_externo", "external_id", "id_documento_origen"},
     "base": {
         "base_imponible",
         "base",
@@ -4105,6 +4205,9 @@ ACCOUNTING_IMPORT_FIELD_ALIASES = {
         "irpf",
         "importe_retencion",
     },
+    "withholding_rate": {"tipo_retencion", "porcentaje_retencion", "irpf_porcentaje"},
+    "withholding_base": {"base_retencion", "base_irpf"},
+    "other_taxes": {"otros_impuestos", "importe_otros_impuestos"},
     "total": {
         "total",
         "importe_total",
@@ -4118,6 +4221,7 @@ ACCOUNTING_IMPORT_FIELD_ALIASES = {
         "fecha_pago",
         "fecha_cobro",
     },
+    "due_amount": {"importe_vencimiento", "importe_pago", "importe_cobro"},
     "rectificative": {
         "rectificativa",
         "factura_rectificativa",
@@ -4390,10 +4494,46 @@ def _normalize_accounting_import_record(row, row_number, columns, record_type, s
     payment_dates = _parse_accounting_import_dates(
         _get_accounting_import_cell(row, columns, "due_date")
     )
+    due_amount = parse_amount(_get_accounting_import_cell(row, columns, "due_amount"))
     document_number = str(
         _get_accounting_import_cell(row, columns, "document_number") or ""
     ).strip()
     concept = str(_get_accounting_import_cell(row, columns, "concept") or "").strip()
+    series = str(_get_accounting_import_cell(row, columns, "series") or "").strip()
+    counterparty_tax_id = str(
+        _get_accounting_import_cell(row, columns, "counterparty_tax_id") or ""
+    ).strip()
+    counterparty_country = str(
+        _get_accounting_import_cell(row, columns, "country") or ""
+    ).strip()
+    counterparty_address = str(
+        _get_accounting_import_cell(row, columns, "address") or ""
+    ).strip()
+    currency = str(_get_accounting_import_cell(row, columns, "currency") or "").strip().upper()
+    rectified_invoice_reference = str(
+        _get_accounting_import_cell(row, columns, "rectified_invoice_reference") or ""
+    ).strip()
+    document_reference = str(
+        _get_accounting_import_cell(row, columns, "document_reference") or ""
+    ).strip()
+    order_reference = str(
+        _get_accounting_import_cell(row, columns, "order_reference") or ""
+    ).strip()
+    delivery_note_reference = str(
+        _get_accounting_import_cell(row, columns, "delivery_note_reference") or ""
+    ).strip()
+    external_document_id = str(
+        _get_accounting_import_cell(row, columns, "external_document_id") or ""
+    ).strip()
+    withholding_rate = _parse_accounting_import_vat_rate(
+        _get_accounting_import_cell(row, columns, "withholding_rate")
+    )
+    withholding_base = parse_amount(
+        _get_accounting_import_cell(row, columns, "withholding_base")
+    )
+    other_taxes_amount = parse_amount(
+        _get_accounting_import_cell(row, columns, "other_taxes")
+    )
     is_rectificativa = _parse_accounting_import_bool(
         _get_accounting_import_cell(row, columns, "rectificative")
     )
@@ -4410,6 +4550,8 @@ def _normalize_accounting_import_record(row, row_number, columns, record_type, s
         errors.append("Fecha inválida o ausente.")
     if not counterparty:
         errors.append("Proveedor o cliente ausente.")
+    if currency and not re.fullmatch(r"[A-Z]{3}", currency):
+        errors.append("La moneda debe usar un código de tres letras.")
     if vat_breakdown:
         for line in vat_breakdown:
             rate = line["rate"]
@@ -4420,7 +4562,7 @@ def _normalize_accounting_import_record(row, row_number, columns, record_type, s
                 )
         base_amount, vat_amount, gross_total = summarize_vat_breakdown(vat_breakdown)
         vat_rate = infer_vat_rate_from_breakdown(vat_breakdown)
-        calculated_total = round(gross_total - withholding_amount, 2)
+        calculated_total = round(gross_total + (other_taxes_amount or 0) - withholding_amount, 2)
         if total_amount is not None and abs(total_amount - calculated_total) > 0.02:
             errors.append("El total no cuadra con el desglose de IVA y la retención.")
         total_amount = calculated_total
@@ -4452,6 +4594,7 @@ def _normalize_accounting_import_record(row, row_number, columns, record_type, s
                 total_amount,
                 withholding_amount,
             )
+            calculated_total = round(calculated_total + (other_taxes_amount or 0), 2)
             if total_amount is not None and abs(total_amount - calculated_total) > 0.02:
                 errors.append("El total no cuadra con base, IVA y retención.")
             total_amount = calculated_total
@@ -4471,12 +4614,51 @@ def _normalize_accounting_import_record(row, row_number, columns, record_type, s
     source_label = ACCOUNTING_IMPORT_SOURCE_LABELS.get(source, "archivo contable")
     reference = document_number or f"fila {row_number}"
     original_filename = f"Importación {source_label} · {reference}"[:240]
+    payment_schedule = [
+        {
+            "due_date": due_date,
+            "amount": due_amount if len(payment_dates) == 1 else None,
+            "actual_payment_date": None,
+        }
+        for due_date in payment_dates
+    ]
+    withholding_details = []
+    if withholding_amount and (withholding_rate is not None or withholding_base is not None):
+        withholding_details.append(
+            {
+                "tax_type": "withholding",
+                "rate": withholding_rate,
+                "base": withholding_base,
+                "tax_amount": withholding_amount,
+            }
+        )
+    other_taxes = []
+    if other_taxes_amount not in (None, 0):
+        other_taxes.append(
+            {
+                "tax_type": None,
+                "rate": None,
+                "base": None,
+                "tax_amount": abs(other_taxes_amount),
+            }
+        )
     return {
         "row_number": row_number,
         "invoice_date": invoice_date,
         "counterparty": counterparty,
         "concept": concept,
         "document_number": document_number,
+        "invoice_series": series or None,
+        "counterparty_tax_id": counterparty_tax_id or None,
+        "counterparty_country": counterparty_country or None,
+        "counterparty_address": counterparty_address or None,
+        "currency": currency or None,
+        "rectified_invoice_reference": rectified_invoice_reference or None,
+        "document_reference": document_reference or None,
+        "order_reference": order_reference or None,
+        "delivery_note_reference": delivery_note_reference or None,
+        "external_document_id": external_document_id or None,
+        "source_system": source,
         "base_amount": base_amount,
         "vat_rate": vat_rate,
         "vat_amount": vat_amount,
@@ -4485,6 +4667,9 @@ def _normalize_accounting_import_record(row, row_number, columns, record_type, s
         "total_amount": total_amount,
         "payment_dates": payment_dates,
         "payment_date": payment_dates[0] if payment_dates else compute_payment_date(invoice_date),
+        "payment_schedule": payment_schedule,
+        "withholding_details": withholding_details,
+        "other_taxes": other_taxes,
         "is_rectificativa": is_rectificativa,
         "original_filename": original_filename,
         "errors": errors,
@@ -4728,26 +4913,32 @@ def infer_vat_rate_from_breakdown(lines):
     return None
 
 
-def store_known_supplier(conn, user_id, company_id, supplier):
+def store_known_supplier(conn, user_id, company_id, supplier, tax_id=None):
     if not supplier:
         return
     normalized = supplier.strip()
     if not normalized:
         return
     existing = conn.execute(
-        select(known_suppliers_table.c.id)
+        select(known_suppliers_table.c.id, known_suppliers_table.c.tax_id)
         .where(known_suppliers_table.c.user_id == user_id)
         .where(known_suppliers_table.c.company_id == company_id)
         .where(func.lower(known_suppliers_table.c.name) == normalized.lower())
     ).first()
     if existing:
+        if tax_id and not existing.tax_id:
+            conn.execute(
+                known_suppliers_table.update()
+                .where(known_suppliers_table.c.id == existing.id)
+                .values(tax_id=str(tax_id).strip())
+            )
         return
     conn.execute(
         known_suppliers_table.insert().values(
             user_id=user_id,
             company_id=company_id,
             name=normalized,
-            tax_id=None,
+            tax_id=str(tax_id).strip() if tax_id else None,
             confirmed_at=datetime.utcnow().isoformat(),
         )
     )
@@ -4830,53 +5021,10 @@ def period_label_from_dates(start_date, end_date):
     return f"{start_date.strftime('%d/%m/%Y')} - {end_date.strftime('%d/%m/%Y')}"
 
 
-def normalize_export_decimal(value):
-    amount = round(float(value or 0), 2)
-    return f"{amount:.2f}"
-
-
-def csv_decimal(value):
-    return normalize_export_decimal(value).replace(".", ",")
-
-
 def normalize_export_text(value):
     if value is None:
         return ""
     return str(value).strip()
-
-
-def format_export_account(account_code, label):
-    code = normalize_export_text(account_code)
-    account_label = normalize_export_text(label)
-    return f"{code} {account_label}".strip()
-
-
-def suggest_expense_account(*, expense_type=None, expense_family=None, expense_subtype=None, pnl_bucket=None):
-    normalized_type = (expense_type or "").strip().lower()
-    normalized_family = (expense_family or "").strip().lower()
-    normalized_subtype = (expense_subtype or "").strip().lower()
-    normalized_bucket = (pnl_bucket or "").strip().lower()
-
-    mapping = {
-        "alquiler_local": ("621", "Arrendamientos y cánones"),
-        "alquiler_cabina": ("621", "Arrendamientos y cánones"),
-        "nomina": ("640", "Sueldos y salarios"),
-        "seguridad_social": ("642", "Seguridad Social a cargo de la empresa"),
-        "amortizacion": ("681", "Amortización del inmovilizado material"),
-        "kilometraje": ("629", "Otros servicios"),
-        "prestamo": ("662", "Intereses de deudas"),
-    }
-    if normalized_type in mapping:
-        return mapping[normalized_type]
-    if normalized_family == "rent":
-        return ("621", "Arrendamientos y cánones")
-    if normalized_family == "personnel":
-        return ("640", "Gastos de personal")
-    if normalized_family == "financing" or normalized_bucket == "financial_expense":
-        return ("662", "Intereses de deudas")
-    if normalized_subtype == "amortization" or normalized_bucket == "amortization_expense":
-        return ("681", "Amortización del inmovilizado material")
-    return ("629", "Otros servicios")
 
 
 def build_export_row_filename(prefix, company_name, extension, start_date, end_date):
@@ -5013,396 +5161,58 @@ def load_accounting_export_source_data(conn, data_owner_id, company_id, start_da
     }
 
 
+def _ensure_accounting_export_data(source_data, *, company=None, period=None):
+    if isinstance(source_data, AccountingExportData):
+        return source_data
+    return build_accounting_export_data(
+        source_data,
+        company=company,
+        period=period,
+        document_data_resolver=effective_document_data,
+    )
+
+
 def build_purchase_export_rows(source_data):
-    rows = []
-    for row in source_data.get("purchase_invoices", []):
-        account_code, account_label = suggest_expense_account(
-            expense_family=row.get("expense_family"),
-            expense_subtype=row.get("expense_subtype"),
-            pnl_bucket=row.get("pnl_bucket"),
-        )
-        rows.append(
-            {
-                "fecha": row.get("invoice_date"),
-                "documento_tipo": "Factura recibida",
-                "origen_tipo": "purchase_invoice",
-                "origen_id": row.get("id"),
-                "contraparte": row.get("supplier"),
-                "concepto": row.get("original_filename"),
-                "base": float(row.get("base_amount") or 0),
-                "iva": float(row.get("vat_amount") or 0),
-                "retencion": float(row.get("withholding_amount") or 0),
-                "total": float(row.get("total_amount") or 0),
-                "iva_deducible": "Sí" if row.get("vat_deductible") else "No",
-                "cuenta_sugerida": format_export_account(account_code, account_label),
-                "familia": row.get("expense_family") or "",
-                "subtipo": row.get("expense_subtype") or "",
-                "bucket_pyg": row.get("pnl_bucket") or "",
-                "modelos_fiscales": ", ".join(parse_tax_model_targets(row.get("tax_model_targets"))),
-            }
-        )
-    for row in source_data.get("no_invoice_expenses", []):
-        account_code, account_label = suggest_expense_account(
-            expense_type=row.get("expense_type"),
-            expense_family=row.get("expense_family"),
-            expense_subtype=row.get("expense_subtype"),
-            pnl_bucket=row.get("pnl_bucket"),
-        )
-        rows.append(
-            {
-                "fecha": row.get("expense_date"),
-                "documento_tipo": (row.get("expense_type") or "otro").replace("_", " ").title(),
-                "origen_tipo": "no_invoice_expense",
-                "origen_id": row.get("id"),
-                "contraparte": row.get("payroll_employee_name") or row.get("concept"),
-                "concepto": row.get("concept"),
-                "base": float(row.get("base_amount") or row.get("amount") or 0),
-                "iva": float(row.get("vat_amount") or 0),
-                "retencion": float(row.get("withholding_amount") or 0),
-                "total": float(row.get("amount") or 0),
-                "iva_deducible": "Sí" if row.get("vat_deductible") else "No",
-                "cuenta_sugerida": format_export_account(account_code, account_label),
-                "familia": row.get("expense_family") or "",
-                "subtipo": row.get("expense_subtype") or "",
-                "bucket_pyg": row.get("pnl_bucket") or "",
-                "modelos_fiscales": ", ".join(parse_tax_model_targets(row.get("tax_model_targets"))),
-            }
-        )
-    rows.sort(key=lambda item: (item.get("fecha") or "", str(item.get("origen_id") or "")))
-    return rows
+    export_data = _ensure_accounting_export_data(source_data)
+    return list(export_profile_registry.get("generic_ledged_v1").purchases(export_data))
 
 
 def build_sales_export_rows(source_data):
-    rows = []
-    for row in source_data.get("income_invoices", []):
-        rows.append(
-            {
-                "fecha": row.get("invoice_date"),
-                "documento_tipo": "Factura emitida",
-                "origen_tipo": "income_invoice",
-                "origen_id": row.get("id"),
-                "cliente": row.get("client"),
-                "concepto": row.get("original_filename"),
-                "base": float(row.get("base_amount") or 0),
-                "iva": float(row.get("vat_amount") or 0),
-                "retencion": float(row.get("withholding_amount") or 0),
-                "total": float(row.get("total_amount") or 0),
-                "tipo_iva": row.get("vat_rate") if row.get("vat_rate") is not None else "",
-                "vencimiento": row.get("payment_date") or "",
-                "estado_pago": "Planificado" if row.get("payment_date") else "",
-            }
-        )
-    for row in source_data.get("manual_sales", []):
-        invoice_date = row.get("invoice_date") or f"{int(row.get('anio')):04d}-{int(row.get('mes')):02d}-01"
-        base_amount = float(row.get("base_facturada") or 0)
-        vat_amount = float(row.get("iva_repercutido") or 0)
-        rows.append(
-            {
-                "fecha": invoice_date,
-                "documento_tipo": "Registro manual",
-                "origen_tipo": "manual_billing",
-                "origen_id": row.get("id"),
-                "cliente": "",
-                "concepto": row.get("concept") or "Facturación manual",
-                "base": base_amount,
-                "iva": vat_amount,
-                "total": float(row.get("total_amount") or (base_amount + vat_amount)),
-                "tipo_iva": row.get("tipo_iva") if row.get("tipo_iva") is not None else "",
-                "vencimiento": "",
-                "estado_pago": "",
-            }
-        )
-    rows.sort(key=lambda item: (item.get("fecha") or "", str(item.get("origen_id") or "")))
-    return rows
-
-
-def append_journal_lines(container, entry_key, entry_date, concept, source_type, source_id, counterparty, lines):
-    for index, line in enumerate(lines, start=1):
-        debit = round(float(line.get("debe") or 0), 2)
-        credit = round(float(line.get("haber") or 0), 2)
-        if abs(debit) < 0.005 and abs(credit) < 0.005:
-            continue
-        container.append(
-            {
-                "asiento_id": entry_key,
-                "linea": index,
-                "fecha": entry_date,
-                "diario": line.get("diario") or "GENERAL",
-                "concepto": concept,
-                "cuenta": line.get("cuenta") or "",
-                "descripcion_cuenta": line.get("descripcion_cuenta") or "",
-                "debe": debit,
-                "haber": credit,
-                "tercero": counterparty or "",
-                "documento_origen": f"{source_type}:{source_id}",
-                "origen_tipo": source_type,
-                "origen_id": source_id,
-            }
-        )
+    export_data = _ensure_accounting_export_data(source_data)
+    return list(export_profile_registry.get("generic_ledged_v1").sales(export_data))
 
 
 def build_journal_export_rows(source_data):
-    rows = []
-    for row in source_data.get("purchase_invoices", []):
-        entry_key = f"PUR-{row.get('id')}"
-        base_amount = round(float(row.get("base_amount") or 0), 2)
-        vat_amount = round(float(row.get("vat_amount") or 0), 2)
-        payable_total = round(float(row.get("total_amount") or 0), 2)
-        withholding_amount = round(float(row.get("withholding_amount") or 0), 2)
-        gross_total = round(base_amount + vat_amount, 2)
-        expense_account, expense_label = suggest_expense_account(
-            expense_family=row.get("expense_family"),
-            expense_subtype=row.get("expense_subtype"),
-            pnl_bucket=row.get("pnl_bucket"),
-        )
-        lines = []
-        if row.get("vat_deductible") and vat_amount > 0:
-            lines.append({"cuenta": expense_account, "descripcion_cuenta": expense_label, "debe": base_amount})
-            lines.append({"cuenta": "472", "descripcion_cuenta": "Hacienda Pública, IVA soportado", "debe": vat_amount})
-        else:
-            lines.append({"cuenta": expense_account, "descripcion_cuenta": expense_label, "debe": gross_total})
-        if withholding_amount > 0:
-            lines.append({"cuenta": "4751", "descripcion_cuenta": "Hacienda Pública acreedora por retenciones practicadas", "haber": withholding_amount})
-        if payable_total > 0:
-            lines.append({"cuenta": "410", "descripcion_cuenta": "Acreedores por prestaciones de servicios", "haber": payable_total})
-        append_journal_lines(
-            rows,
-            entry_key,
-            row.get("invoice_date"),
-            f"Factura proveedor {row.get('supplier') or row.get('original_filename')}",
-            "purchase_invoice",
-            row.get("id"),
-            row.get("supplier"),
-            lines,
-        )
-
-    for row in source_data.get("income_invoices", []):
-        entry_key = f"SAL-{row.get('id')}"
-        base_amount = round(float(row.get("base_amount") or 0), 2)
-        vat_amount = round(float(row.get("vat_amount") or 0), 2)
-        total_amount = round(float(row.get("total_amount") or 0), 2)
-        withholding_amount = round(abs(float(row.get("withholding_amount") or 0)), 2)
-        lines = [{"cuenta": "430", "descripcion_cuenta": "Clientes", "debe": total_amount}]
-        if withholding_amount:
-            lines.append(
-                {
-                    "cuenta": "473",
-                    "descripcion_cuenta": "Hacienda Pública, retenciones y pagos a cuenta",
-                    "debe": withholding_amount,
-                }
-            )
-        lines.extend(
-            [
-                {"cuenta": "700", "descripcion_cuenta": "Ventas de mercaderías / servicios", "haber": base_amount},
-                {"cuenta": "477", "descripcion_cuenta": "Hacienda Pública, IVA repercutido", "haber": vat_amount},
-            ]
-        )
-        append_journal_lines(
-            rows,
-            entry_key,
-            row.get("invoice_date"),
-            f"Factura emitida {row.get('client') or row.get('original_filename')}",
-            "income_invoice",
-            row.get("id"),
-            row.get("client"),
-            lines,
-        )
-
-    for row in source_data.get("manual_sales", []):
-        entry_key = f"MAN-{row.get('id')}"
-        invoice_date = row.get("invoice_date") or f"{int(row.get('anio')):04d}-{int(row.get('mes')):02d}-01"
-        base_amount = round(float(row.get("base_facturada") or 0), 2)
-        vat_amount = round(float(row.get("iva_repercutido") or 0), 2)
-        total_amount = round(float(row.get("total_amount") or (base_amount + vat_amount)), 2)
-        append_journal_lines(
-            rows,
-            entry_key,
-            invoice_date,
-            row.get("concept") or "Facturación manual",
-            "manual_billing",
-            row.get("id"),
-            "",
-            [
-                {"cuenta": "430", "descripcion_cuenta": "Clientes", "debe": total_amount},
-                {"cuenta": "700", "descripcion_cuenta": "Ventas de mercaderías / servicios", "haber": base_amount},
-                {"cuenta": "477", "descripcion_cuenta": "Hacienda Pública, IVA repercutido", "haber": vat_amount},
-            ],
-        )
-
-    for row in source_data.get("no_invoice_expenses", []):
-        entry_key = f"EXP-{row.get('id')}"
-        expense_type = (row.get("expense_type") or "").strip().lower()
-        amount = round(float(row.get("amount") or 0), 2)
-        base_amount = round(float(row.get("base_amount") or amount), 2)
-        vat_amount = round(float(row.get("vat_amount") or 0), 2)
-        withholding_amount = round(float(row.get("withholding_amount") or 0), 2)
-        expense_account, expense_label = suggest_expense_account(
-            expense_type=expense_type,
-            expense_family=row.get("expense_family"),
-            expense_subtype=row.get("expense_subtype"),
-            pnl_bucket=row.get("pnl_bucket"),
-        )
-        concept = row.get("concept") or expense_type or "Gasto"
-        counterparty = row.get("payroll_employee_name") or concept
-        lines = []
-        if expense_type == "nomina":
-            gross_amount = round(float(row.get("base_amount") or row.get("amount") or 0), 2)
-            net_amount = round(float(row.get("payroll_net_amount") or 0), 2)
-            deductions_amount = round(float(row.get("payroll_total_deductions_amount") or 0), 2)
-            employer_cost_amount = round(float(row.get("payroll_employer_cost_amount") or 0), 2)
-            employer_social_security = round(max(employer_cost_amount - gross_amount, 0), 2)
-            lines.append({"cuenta": "640", "descripcion_cuenta": "Sueldos y salarios", "debe": gross_amount})
-            if employer_social_security > 0:
-                lines.append({"cuenta": "642", "descripcion_cuenta": "Seguridad Social a cargo de la empresa", "debe": employer_social_security})
-            if net_amount > 0:
-                lines.append({"cuenta": "465", "descripcion_cuenta": "Remuneraciones pendientes de pago", "haber": net_amount})
-            if deductions_amount > 0:
-                lines.append({"cuenta": "476", "descripcion_cuenta": "Organismos de la Seguridad Social acreedores", "haber": deductions_amount})
-            journal_balance = round(
-                sum(float(line.get("debe") or 0) for line in lines)
-                - sum(float(line.get("haber") or 0) for line in lines),
-                2,
-            )
-            if abs(journal_balance) >= 0.01:
-                lines.append(
-                    {
-                        "cuenta": "410",
-                        "descripcion_cuenta": "Acreedores varios",
-                        "haber": journal_balance if journal_balance > 0 else 0,
-                        "debe": abs(journal_balance) if journal_balance < 0 else 0,
-                    }
-                )
-        elif expense_type == "seguridad_social":
-            lines = [
-                {"cuenta": "642", "descripcion_cuenta": "Seguridad Social a cargo de la empresa", "debe": amount},
-                {"cuenta": "476", "descripcion_cuenta": "Organismos de la Seguridad Social acreedores", "haber": amount},
-            ]
-        elif expense_type == "prestamo":
-            interest_amount = round(float(row.get("interest_amount") or 0), 2)
-            principal_amount = round(max(amount - interest_amount, 0), 2)
-            lines = [
-                {"cuenta": "520", "descripcion_cuenta": "Deudas a corto plazo con entidades de crédito", "debe": principal_amount},
-                {"cuenta": "662", "descripcion_cuenta": "Intereses de deudas", "debe": interest_amount},
-                {"cuenta": "572", "descripcion_cuenta": "Bancos e instituciones de crédito c/c vista", "haber": amount},
-            ]
-        else:
-            if row.get("vat_deductible") and vat_amount > 0:
-                lines.append({"cuenta": expense_account, "descripcion_cuenta": expense_label, "debe": base_amount})
-                lines.append({"cuenta": "472", "descripcion_cuenta": "Hacienda Pública, IVA soportado", "debe": vat_amount})
-            else:
-                lines.append({"cuenta": expense_account, "descripcion_cuenta": expense_label, "debe": amount})
-            if withholding_amount > 0:
-                lines.append({"cuenta": "4751", "descripcion_cuenta": "Hacienda Pública acreedora por retenciones practicadas", "haber": withholding_amount})
-            creditor_amount = round(amount - withholding_amount, 2)
-            if creditor_amount > 0:
-                lines.append({"cuenta": "410", "descripcion_cuenta": "Acreedores por prestaciones de servicios", "haber": creditor_amount})
-        append_journal_lines(rows, entry_key, row.get("expense_date"), concept, "no_invoice_expense", row.get("id"), counterparty, lines)
-
-    for row in source_data.get("loan_installments", []):
-        entry_key = f"LOA-{row.get('id')}"
-        total_amount = round(float(row.get("total_amount") or 0), 2)
-        interest_amount = round(float(row.get("interest_amount") or 0), 2)
-        principal_amount = round(float(row.get("principal_amount") or max(total_amount - interest_amount, 0)), 2)
-        append_journal_lines(
-            rows,
-            entry_key,
-            row.get("payment_date"),
-            row.get("concept") or "Cuota de préstamo",
-            "loan_installment",
-            row.get("id"),
-            row.get("bank_name") or "",
-            [
-                {"cuenta": "520", "descripcion_cuenta": "Deudas a corto plazo con entidades de crédito", "debe": principal_amount},
-                {"cuenta": "662", "descripcion_cuenta": "Intereses de deudas", "debe": interest_amount},
-                {"cuenta": "572", "descripcion_cuenta": "Bancos e instituciones de crédito c/c vista", "haber": total_amount},
-            ],
-        )
-
-    rows.sort(key=lambda item: (item.get("fecha") or "", item.get("asiento_id") or "", int(item.get("linea") or 0)))
-    return rows
+    export_data = _ensure_accounting_export_data(source_data)
+    return list(export_profile_registry.get("generic_ledged_v1").journal(export_data))
 
 
 def build_document_manifest_rows(source_data):
-    rows = []
-    for row in source_data.get("documents", []):
-        payload = effective_document_data(row)
-        rows.append(
-            {
-                "document_id": row.get("id"),
-                "archivo": row.get("original_filename"),
-                "tipo_detectado": row.get("detected_document_type"),
-                "estado": row.get("validation_status"),
-                "referencia_contable_tipo": row.get("linked_accounting_record_type") or "",
-                "referencia_contable_id": row.get("linked_accounting_record_id") or "",
-                "fecha_referencia": payload.get("invoice_date")
-                or payload.get("expense_date")
-                or payload.get("payment_date")
-                or (normalize_export_text(row.get("registered_at")).split("T", 1)[0]),
-                "contraparte": payload.get("provider_name")
-                or payload.get("counterparty_name")
-                or payload.get("employee_name")
-                or payload.get("concept")
-                or "",
-                "importe_total": float(
-                    payload.get("total_amount")
-                    or payload.get("amount")
-                    or payload.get("payable_amount")
-                    or 0
-                ),
-                "periodo": row.get("period") or "",
-            }
-        )
-    return rows
-
-
-def build_export_matrix(rows, ordered_columns):
-    matrix = [ordered_columns]
-    for row in rows:
-        matrix.append([row.get(column, "") for column in ordered_columns])
-    return matrix
+    export_data = _ensure_accounting_export_data(source_data)
+    return list(export_profile_registry.get("generic_ledged_v1").manifest(export_data))
 
 
 def write_csv_export(rows, ordered_columns):
-    output = io.StringIO()
-    writer = csv.writer(output, delimiter=";")
-    writer.writerow(ordered_columns)
-    for row in rows:
-        serialized = []
-        for column in ordered_columns:
-            value = row.get(column, "")
-            if isinstance(value, bool):
-                serialized.append("Sí" if value else "No")
-            elif isinstance(value, (int, float)):
-                serialized.append(csv_decimal(value))
-            else:
-                serialized.append(normalize_export_text(value))
-        writer.writerow(serialized)
-    return output.getvalue().encode("utf-8-sig")
+    return export_profile_registry.get("generic_ledged_v1").csv_bytes(
+        rows, ordered_columns
+    )
 
 
 def write_xlsx_export(rows, ordered_columns, sheet_name):
-    workbook = openpyxl.Workbook()
-    worksheet = workbook.active
-    worksheet.title = (sheet_name or "Export")[:31]
-    worksheet.append(ordered_columns)
-    for row in rows:
-        worksheet.append([row.get(column, "") for column in ordered_columns])
-    for column_cells in worksheet.columns:
-        max_length = 0
-        column_letter = column_cells[0].column_letter
-        for cell in column_cells:
-            cell_value = "" if cell.value is None else str(cell.value)
-            max_length = max(max_length, len(cell_value))
-        worksheet.column_dimensions[column_letter].width = min(max_length + 2, 36)
-    output = io.BytesIO()
-    workbook.save(output)
-    output.seek(0)
-    return output.getvalue()
+    return export_profile_registry.get("generic_ledged_v1").xlsx_bytes(
+        rows, ordered_columns, sheet_name
+    )
 
 
 def load_document_binary(row):
-    storage_path = row.get("storage_path")
-    file_url = row.get("file_url")
+    if isinstance(row, AccountingAttachment):
+        storage_path = row.storage_path
+        file_url = row.file_url
+        document_id = row.internal_id
+    else:
+        storage_path = row.get("storage_path")
+        file_url = row.get("file_url")
+        document_id = row.get("id")
     if storage_path and os.path.exists(storage_path):
         with open(storage_path, "rb") as file_handle:
             return file_handle.read()
@@ -5415,122 +5225,21 @@ def load_document_binary(row):
             response.raise_for_status()
             return response.content
         except Exception:
-            app.logger.warning("No se pudo descargar el documento %s desde %s", row.get("id"), file_url)
+            app.logger.warning("No se pudo descargar el documento %s desde %s", document_id, file_url)
     return None
 
 
 def build_accounting_export_package(source_data, metadata_payload):
-    purchase_rows = build_purchase_export_rows(source_data)
-    sales_rows = build_sales_export_rows(source_data)
-    journal_rows = build_journal_export_rows(source_data)
-    manifest_rows = build_document_manifest_rows(source_data)
-    package_stream = io.BytesIO()
-    with zipfile.ZipFile(package_stream, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(
-            "compras.csv",
-            write_csv_export(
-                purchase_rows,
-                [
-                    "fecha",
-                    "documento_tipo",
-                    "origen_tipo",
-                    "origen_id",
-                    "contraparte",
-                    "concepto",
-                    "base",
-                    "iva",
-                    "retencion",
-                    "total",
-                    "iva_deducible",
-                    "cuenta_sugerida",
-                    "familia",
-                    "subtipo",
-                    "bucket_pyg",
-                    "modelos_fiscales",
-                ],
-            ),
-        )
-        archive.writestr(
-            "ventas.csv",
-            write_csv_export(
-                sales_rows,
-                [
-                    "fecha",
-                    "documento_tipo",
-                    "origen_tipo",
-                    "origen_id",
-                    "cliente",
-                    "concepto",
-                    "base",
-                    "iva",
-                    "total",
-                    "tipo_iva",
-                    "vencimiento",
-                    "estado_pago",
-                ],
-            ),
-        )
-        archive.writestr(
-            "asientos.csv",
-            write_csv_export(
-                journal_rows,
-                [
-                    "asiento_id",
-                    "linea",
-                    "fecha",
-                    "diario",
-                    "concepto",
-                    "cuenta",
-                    "descripcion_cuenta",
-                    "debe",
-                    "haber",
-                    "tercero",
-                    "documento_origen",
-                    "origen_tipo",
-                    "origen_id",
-                ],
-            ),
-        )
-        archive.writestr(
-            "manifest_documental.csv",
-            write_csv_export(
-                manifest_rows,
-                [
-                    "document_id",
-                    "archivo",
-                    "tipo_detectado",
-                    "estado",
-                    "referencia_contable_tipo",
-                    "referencia_contable_id",
-                    "fecha_referencia",
-                    "contraparte",
-                    "importe_total",
-                    "periodo",
-                ],
-            ),
-        )
-        archive.writestr(
-            "manifest.json",
-            json.dumps(
-                {
-                    **metadata_payload,
-                    "purchase_rows": len(purchase_rows),
-                    "sales_rows": len(sales_rows),
-                    "journal_rows": len(journal_rows),
-                    "document_rows": len(manifest_rows),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-        )
-        for row in source_data.get("documents", []):
-            file_bytes = load_document_binary(row)
-            if not file_bytes:
-                continue
-            safe_name = secure_filename(row.get("original_filename") or f"documento_{row.get('id')}")
-            archive.writestr(f"documentos/{int(row.get('id')):05d}_{safe_name}", file_bytes)
-    package_stream.seek(0)
-    return package_stream
+    export_data = _ensure_accounting_export_data(
+        source_data,
+        company=metadata_payload,
+        period=metadata_payload,
+    )
+    return export_profile_registry.get("generic_ledged_v1").package(
+        export_data,
+        metadata_payload,
+        attachment_loader=load_document_binary,
+    )
 
 
 def export_response_from_rows(rows, ordered_columns, *, export_format, sheet_name, download_name):
@@ -11203,7 +10912,6 @@ def upload_invoices():
                         or ""
                     )
                 )
-                is_rectificativa = bool(entry.get("isRectificativa"))
                 vat_breakdown = parse_vat_breakdown(
                     entry.get("vatBreakdown") or entry.get("vat_breakdown")
                 )
@@ -11221,8 +10929,24 @@ def upload_invoices():
                 extraction_source = (
                     entry.get("extractionSource") or entry.get("extraction_source")
                 )
-                confidence_score = entry.get("confidenceScore") or entry.get("confidence_score")
                 expense_category = entry.get("expenseCategory") or "with_invoice"
+                accounting_metadata, metadata_errors = (
+                    normalize_accounting_document_metadata(entry)
+                )
+                if metadata_errors:
+                    errors.extend(
+                        f"{message} ({original_name})." for message in metadata_errors
+                    )
+                    continue
+                is_rectificativa = accounting_metadata.get(
+                    "is_rectificative", False
+                )
+                confidence_score = entry.get("confidenceScore")
+                if confidence_score is None:
+                    confidence_score = entry.get("confidence_score")
+                other_taxes_amount = accounting_tax_components_total(
+                    accounting_metadata.get("other_taxes")
+                )
 
                 if not supplier:
                     app.logger.info(
@@ -11237,7 +10961,9 @@ def upload_invoices():
                     summary = summarize_vat_breakdown(vat_breakdown)
                     if summary:
                         base_amount, vat_amount, gross_total = summary
-                        total_amount = round(gross_total - withholding_amount, 2)
+                        total_amount = round(
+                            gross_total + other_taxes_amount - withholding_amount, 2
+                        )
                 else:
                     try:
                         vat_rate_int = int(vat_rate_raw)
@@ -11273,13 +10999,20 @@ def upload_invoices():
                     continue
 
                 if vat_rate_int is not None and vat_rate_int >= 0:
+                    normalization_total = (
+                        total_amount - other_taxes_amount
+                        if total_amount is not None
+                        else None
+                    )
                     base_amount, vat_amount, total_amount = normalize_purchase_invoice_amounts(
                         base_amount,
                         vat_rate_int,
                         vat_amount,
-                        total_amount,
+                        normalization_total,
                         withholding_amount,
                     )
+                    if total_amount is not None:
+                        total_amount = round(total_amount + other_taxes_amount, 2)
                 vat_deductible = entry.get("vatDeductible")
                 if vat_deductible is None:
                     vat_deductible = expense_category != "non_deductible"
@@ -11315,13 +11048,20 @@ def upload_invoices():
                         extraction_source=extraction_source,
                         confidence_score=confidence_score,
                         expense_category=expense_category,
+                        **accounting_metadata,
                         **expense_profile,
                         created_at=created_at,
                     )
                 )
                 inserted += 1
                 if supplier and analysis_status != "low_quality_scan":
-                    store_known_supplier(conn, data_owner_id, company_id, supplier)
+                    store_known_supplier(
+                        conn,
+                        data_owner_id,
+                        company_id,
+                        supplier,
+                        accounting_metadata.get("counterparty_tax_id"),
+                    )
 
         return jsonify({"ok": True, "inserted": inserted, "errors": errors})
 
@@ -11983,6 +11723,23 @@ def list_invoices():
                 invoices_table.c.expense_subtype,
                 invoices_table.c.pnl_bucket,
                 invoices_table.c.tax_model_targets,
+                invoices_table.c.invoice_number,
+                invoices_table.c.invoice_series,
+                invoices_table.c.is_rectificative,
+                invoices_table.c.rectified_invoice_reference,
+                invoices_table.c.counterparty_tax_id,
+                invoices_table.c.counterparty_country,
+                invoices_table.c.counterparty_address,
+                invoices_table.c.currency,
+                invoices_table.c.concept,
+                invoices_table.c.document_reference,
+                invoices_table.c.order_reference,
+                invoices_table.c.delivery_note_reference,
+                invoices_table.c.source_system,
+                invoices_table.c.external_document_id,
+                invoices_table.c.withholding_details,
+                invoices_table.c.other_taxes,
+                invoices_table.c.payment_schedule,
             )
             .where(invoices_table.c.user_id == data_owner_id)
             .where(invoices_table.c.company_id == company_id)
@@ -12015,6 +11772,7 @@ def list_invoices():
             "expense_subtype": row.get("expense_subtype"),
             "pnl_bucket": row.get("pnl_bucket"),
             "tax_model_targets": parse_tax_model_targets(row.get("tax_model_targets")),
+            **accounting_document_metadata_response(row),
         }
         for row in rows
     ]
@@ -12903,17 +12661,25 @@ def update_invoice(invoice_id):
         )
         or 0.0
     )
-    is_rectificativa = bool(
-        payload.get("is_rectificativa") or payload.get("isRectificativa")
-    )
     vat_breakdown = parse_vat_breakdown(
         payload.get("vat_breakdown") or payload.get("vatBreakdown")
     )
     vat_breakdown_json = json.dumps(vat_breakdown) if vat_breakdown else None
     expense_category = payload.get("expense_category") or "with_invoice"
     vat_deductible = payload.get("vat_deductible")
+    accounting_metadata, metadata_errors = normalize_accounting_document_metadata(
+        payload, partial=True
+    )
+    is_rectificativa = accounting_metadata.get(
+        "is_rectificative",
+        bool(payload.get("is_rectificativa") or payload.get("isRectificativa")),
+    )
+    other_taxes_amount = accounting_tax_components_total(
+        accounting_metadata.get("other_taxes")
+    )
 
     errors = []
+    errors.extend(metadata_errors)
     if not invoice_date:
         errors.append("Fecha obligatoria.")
     if not supplier:
@@ -12935,7 +12701,9 @@ def update_invoice(invoice_id):
         summary = summarize_vat_breakdown(vat_breakdown)
         if summary:
             base_amount, vat_amount, gross_total = summary
-            total_amount = round(gross_total - (withholding_amount or 0), 2)
+            total_amount = round(
+                gross_total + other_taxes_amount - (withholding_amount or 0), 2
+            )
     else:
         try:
             vat_rate = int(vat_rate_raw)
@@ -12960,13 +12728,18 @@ def update_invoice(invoice_id):
         return jsonify({"ok": False, "errors": errors}), 400
 
     if vat_rate is not None and vat_rate >= 0:
+        normalization_total = (
+            total_amount - other_taxes_amount if total_amount is not None else None
+        )
         base_amount, vat_amount, total_amount = normalize_purchase_invoice_amounts(
             base_amount,
             vat_rate,
             vat_amount,
-            total_amount,
+            normalization_total,
             withholding_amount,
         )
+        if total_amount is not None:
+            total_amount = round(total_amount + other_taxes_amount, 2)
     expense_profile = derive_invoice_profile(
         expense_category, vat_deductible, vat_amount, withholding_amount
     )
@@ -12983,6 +12756,7 @@ def update_invoice(invoice_id):
         "withholding_amount": withholding_amount,
         "payment_date": payment_date,
         "expense_category": expense_category,
+        **accounting_metadata,
         **expense_profile,
     }
     if payment_dates_payload is not None:
@@ -13001,7 +12775,13 @@ def update_invoice(invoice_id):
             .values(**updates)
         )
         if result.rowcount and supplier:
-            store_known_supplier(conn, data_owner_id, company_id, supplier)
+            store_known_supplier(
+                conn,
+                data_owner_id,
+                company_id,
+                supplier,
+                accounting_metadata.get("counterparty_tax_id"),
+            )
 
     if result.rowcount == 0:
         return jsonify({"ok": False, "errors": ["Factura no encontrada."]}), 404
@@ -13090,6 +12870,23 @@ def list_income_invoices():
                 income_invoices_table.c.extraction_source,
                 income_invoices_table.c.confidence_score,
                 income_invoices_table.c.original_filename,
+                income_invoices_table.c.invoice_number,
+                income_invoices_table.c.invoice_series,
+                income_invoices_table.c.is_rectificative,
+                income_invoices_table.c.rectified_invoice_reference,
+                income_invoices_table.c.counterparty_tax_id,
+                income_invoices_table.c.counterparty_country,
+                income_invoices_table.c.counterparty_address,
+                income_invoices_table.c.currency,
+                income_invoices_table.c.concept,
+                income_invoices_table.c.document_reference,
+                income_invoices_table.c.order_reference,
+                income_invoices_table.c.delivery_note_reference,
+                income_invoices_table.c.source_system,
+                income_invoices_table.c.external_document_id,
+                income_invoices_table.c.withholding_details,
+                income_invoices_table.c.other_taxes,
+                income_invoices_table.c.payment_schedule,
             )
             .where(income_invoices_table.c.user_id == data_owner_id)
             .where(income_invoices_table.c.company_id == company_id)
@@ -13116,6 +12913,7 @@ def list_income_invoices():
             "extraction_source": row.get("extraction_source"),
             "confidence_score": float(row["confidence_score"]) if row["confidence_score"] is not None else None,
             "original_filename": row["original_filename"],
+            **accounting_document_metadata_response(row),
         }
         for row in rows
     ]
@@ -13152,7 +12950,6 @@ def create_income_invoices():
                 )
                 or 0.0
             )
-            is_rectificativa = bool(entry.get("isRectificativa"))
             vat_breakdown = parse_vat_breakdown(
                 entry.get("vatBreakdown") or entry.get("vat_breakdown")
             )
@@ -13169,7 +12966,21 @@ def create_income_invoices():
             extraction_source = (
                 entry.get("extractionSource") or entry.get("extraction_source")
             )
-            confidence_score = entry.get("confidenceScore") or entry.get("confidence_score")
+            accounting_metadata, metadata_errors = (
+                normalize_accounting_document_metadata(entry)
+            )
+            if metadata_errors:
+                errors.extend(
+                    f"{message} ({original_name})." for message in metadata_errors
+                )
+                continue
+            is_rectificativa = accounting_metadata.get("is_rectificative", False)
+            confidence_score = entry.get("confidenceScore")
+            if confidence_score is None:
+                confidence_score = entry.get("confidence_score")
+            other_taxes_amount = accounting_tax_components_total(
+                accounting_metadata.get("other_taxes")
+            )
 
             if not client:
                 app.logger.info(
@@ -13186,7 +12997,9 @@ def create_income_invoices():
                 summary = summarize_vat_breakdown(vat_breakdown)
                 if summary:
                     base_amount, vat_amount, gross_total = summary
-                    total_amount = round(gross_total - withholding_amount, 2)
+                    total_amount = round(
+                        gross_total + other_taxes_amount - withholding_amount, 2
+                    )
             else:
                 try:
                     vat_rate_int = int(vat_rate_raw)
@@ -13207,9 +13020,20 @@ def create_income_invoices():
                     continue
 
             if vat_rate_int is not None and vat_rate_int >= 0:
-                base_amount, vat_amount, total_amount = normalize_income_invoice_amounts(
-                    base_amount, vat_rate_int, vat_amount, total_amount, withholding_amount
+                normalization_total = (
+                    total_amount - other_taxes_amount
+                    if total_amount is not None
+                    else None
                 )
+                base_amount, vat_amount, total_amount = normalize_income_invoice_amounts(
+                    base_amount,
+                    vat_rate_int,
+                    vat_amount,
+                    normalization_total,
+                    withholding_amount,
+                )
+                if total_amount is not None:
+                    total_amount = round(total_amount + other_taxes_amount, 2)
 
             created_at = datetime.utcnow().isoformat()
 
@@ -13232,6 +13056,7 @@ def create_income_invoices():
                     ocr_text=None,
                     extraction_source=extraction_source,
                     confidence_score=confidence_score,
+                    **accounting_metadata,
                     created_at=created_at,
                 )
             )
@@ -13330,15 +13155,23 @@ def update_income_invoice(invoice_id):
     withholding_amount = abs(
         parse_amount(str(payload.get("withholding_amount") or "")) or 0.0
     )
-    is_rectificativa = bool(
-        payload.get("is_rectificativa") or payload.get("isRectificativa")
-    )
     vat_breakdown = parse_vat_breakdown(
         payload.get("vat_breakdown") or payload.get("vatBreakdown")
     )
     vat_breakdown_json = json.dumps(vat_breakdown) if vat_breakdown else None
+    accounting_metadata, metadata_errors = normalize_accounting_document_metadata(
+        payload, partial=True
+    )
+    is_rectificativa = accounting_metadata.get(
+        "is_rectificative",
+        bool(payload.get("is_rectificativa") or payload.get("isRectificativa")),
+    )
+    other_taxes_amount = accounting_tax_components_total(
+        accounting_metadata.get("other_taxes")
+    )
 
     errors = []
+    errors.extend(metadata_errors)
     if not invoice_date:
         errors.append("Fecha obligatoria.")
     if not client:
@@ -13357,7 +13190,9 @@ def update_income_invoice(invoice_id):
         summary = summarize_vat_breakdown(vat_breakdown)
         if summary:
             base_amount, vat_amount, gross_total = summary
-            total_amount = round(gross_total - withholding_amount, 2)
+            total_amount = round(
+                gross_total + other_taxes_amount - withholding_amount, 2
+            )
     else:
         try:
             vat_rate = int(vat_rate_raw)
@@ -13370,9 +13205,18 @@ def update_income_invoice(invoice_id):
         return jsonify({"ok": False, "errors": errors}), 400
 
     if vat_rate is not None and vat_rate >= 0:
-        base_amount, vat_amount, total_amount = normalize_income_invoice_amounts(
-            base_amount, vat_rate, vat_amount, total_amount, withholding_amount
+        normalization_total = (
+            total_amount - other_taxes_amount if total_amount is not None else None
         )
+        base_amount, vat_amount, total_amount = normalize_income_invoice_amounts(
+            base_amount,
+            vat_rate,
+            vat_amount,
+            normalization_total,
+            withholding_amount,
+        )
+        if total_amount is not None:
+            total_amount = round(total_amount + other_taxes_amount, 2)
 
     updates = {
         "invoice_date": invoice_date,
@@ -13384,6 +13228,7 @@ def update_income_invoice(invoice_id):
         "total_amount": total_amount,
         "vat_breakdown": vat_breakdown_json,
         "withholding_amount": withholding_amount,
+        **accounting_metadata,
     }
     if payment_dates_payload is not None:
         updates["payment_dates"] = serialize_payment_dates(payment_dates)
@@ -14562,10 +14407,20 @@ def accounting_integrations_summary():
             end_date,
         )
 
-    purchase_rows = build_purchase_export_rows(source_data)
-    sales_rows = build_sales_export_rows(source_data)
-    journal_rows = build_journal_export_rows(source_data)
-    document_rows = build_document_manifest_rows(source_data)
+    export_data = _ensure_accounting_export_data(
+        source_data,
+        company=company,
+        period={
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "period_label": period_label,
+        },
+    )
+    generic_profile = export_profile_registry.get("generic_ledged_v1")
+    purchase_rows = generic_profile.purchases(export_data)
+    sales_rows = generic_profile.sales(export_data)
+    journal_rows = generic_profile.journal(export_data)
+    document_rows = generic_profile.manifest(export_data)
 
     return jsonify(
         {
@@ -14730,6 +14585,14 @@ def accounting_integrations_import():
             }
         ), 400
 
+    for record in records_to_insert:
+        accounting_metadata, metadata_errors = normalize_accounting_document_metadata(
+            record
+        )
+        if metadata_errors:
+            return jsonify({"ok": False, "errors": metadata_errors}), 400
+        record["accounting_metadata"] = accounting_metadata
+
     created_at = datetime.utcnow().isoformat()
     with engine.begin() as conn:
         # Recheck immediately before writing; a second concurrent import must
@@ -14770,6 +14633,7 @@ def accounting_integrations_import():
                     vat_amount=record["vat_amount"],
                     withholding_amount=record["withholding_amount"],
                 )
+                accounting_metadata = record["accounting_metadata"]
                 conn.execute(
                     invoices_table.insert().values(
                         user_id=data_owner_id,
@@ -14795,15 +14659,21 @@ def accounting_integrations_import():
                         extraction_source=f"accounting_import:{source}",
                         confidence_score=1.0,
                         expense_category="with_invoice",
+                        **accounting_metadata,
                         **expense_profile,
                         created_at=created_at,
                     )
                 )
                 store_known_supplier(
-                    conn, data_owner_id, company_id, record["counterparty"]
+                    conn,
+                    data_owner_id,
+                    company_id,
+                    record["counterparty"],
+                    accounting_metadata.get("counterparty_tax_id"),
                 )
         else:
             for record in records_to_insert:
+                accounting_metadata = record["accounting_metadata"]
                 conn.execute(
                     income_invoices_table.insert().values(
                         user_id=data_owner_id,
@@ -14827,6 +14697,7 @@ def accounting_integrations_import():
                         ocr_text=None,
                         extraction_source=f"accounting_import:{source}",
                         confidence_score=1.0,
+                        **accounting_metadata,
                         created_at=created_at,
                     )
                 )
@@ -14878,66 +14749,21 @@ def accounting_integrations_export(export_kind):
             end_date,
         )
 
-    if normalized_kind == "purchases":
-        rows = build_purchase_export_rows(source_data)
-        columns = [
-            "fecha",
-            "documento_tipo",
-            "origen_tipo",
-            "origen_id",
-            "contraparte",
-            "concepto",
-            "base",
-            "iva",
-            "retencion",
-            "total",
-            "iva_deducible",
-            "cuenta_sugerida",
-            "familia",
-            "subtipo",
-            "bucket_pyg",
-            "modelos_fiscales",
-        ]
-        sheet_name = "Compras"
-        prefix = "compras"
-    elif normalized_kind == "sales":
-        rows = build_sales_export_rows(source_data)
-        columns = [
-            "fecha",
-            "documento_tipo",
-            "origen_tipo",
-            "origen_id",
-            "cliente",
-            "concepto",
-            "base",
-            "iva",
-            "retencion",
-            "total",
-            "tipo_iva",
-            "vencimiento",
-            "estado_pago",
-        ]
-        sheet_name = "Ventas"
-        prefix = "ventas"
-    else:
-        rows = build_journal_export_rows(source_data)
-        columns = [
-            "asiento_id",
-            "linea",
-            "fecha",
-            "diario",
-            "concepto",
-            "cuenta",
-            "descripcion_cuenta",
-            "debe",
-            "haber",
-            "tercero",
-            "documento_origen",
-            "origen_tipo",
-            "origen_id",
-        ]
-        sheet_name = "Asientos"
-        prefix = "asientos"
+    export_data = _ensure_accounting_export_data(
+        source_data,
+        company=company,
+        period={
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+        },
+    )
+    export_table = export_profile_registry.get("generic_ledged_v1").table(
+        export_data, normalized_kind
+    )
+    rows = export_table.rows
+    columns = export_table.columns
+    sheet_name = export_table.sheet_name
+    prefix = export_table.filename_prefix
 
     filename = build_export_row_filename(
         prefix,
