@@ -2532,7 +2532,7 @@ function createDeductibleSelect(selected) {
   return select;
 }
 
-function setYearOptions(select, years) {
+function setYearOptions(select, years, fallbackYear = null) {
   if (!select) {
     return;
   }
@@ -2547,7 +2547,10 @@ function setYearOptions(select, years) {
   if (current && [...select.options].some((o) => o.value === current)) {
     select.value = current;
   } else {
-    select.value = String(years[years.length - 1]);
+    const fallback = String(fallbackYear ?? years[years.length - 1]);
+    select.value = [...select.options].some((option) => option.value === fallback)
+      ? fallback
+      : String(years[years.length - 1]);
   }
 }
 
@@ -2560,11 +2563,17 @@ function loadYears() {
       const currentYear = new Date().getFullYear();
       const yearSet = new Set((data.years || []).map(Number));
       yearSet.add(currentYear);
+      [yearSelect, billingYearSelect, reportYearSelect].forEach((select) => {
+        const selectedYear = Number(select?.value);
+        if (Number.isInteger(selectedYear) && selectedYear > 0) {
+          yearSet.add(selectedYear);
+        }
+      });
       const years = Array.from(yearSet).sort((a, b) => a - b);
-      setYearOptions(yearSelect, years);
-      setYearOptions(billingYearSelect, years);
+      setYearOptions(yearSelect, years, currentYear);
+      setYearOptions(billingYearSelect, years, currentYear);
       if (reportYearSelect) {
-        setYearOptions(reportYearSelect, years);
+        setYearOptions(reportYearSelect, years, currentYear);
       }
     });
 }
@@ -4243,12 +4252,6 @@ function syncCompanyFiscalProfileInputs() {
 }
 
 function persistFilters() {
-  if (!monthSelect || !yearSelect || !periodSelect) {
-    return;
-  }
-  localStorage.setItem("selectedMonth", monthSelect.value);
-  localStorage.setItem("selectedYear", yearSelect.value);
-  localStorage.setItem("selectedPeriod", periodSelect.value);
   if (selectedCompanyId) {
     localStorage.setItem("selectedCompanyId", String(selectedCompanyId));
   }
@@ -4258,27 +4261,14 @@ function restoreFilters(now) {
   if (!monthSelect || !yearSelect || !periodSelect) {
     return;
   }
-  const storedMonth = localStorage.getItem("selectedMonth");
-  const storedYear = localStorage.getItem("selectedYear");
-  const storedPeriod = localStorage.getItem("selectedPeriod");
-
-  if (storedMonth && [...monthSelect.options].some((opt) => opt.value === storedMonth)) {
-    monthSelect.value = storedMonth;
-  } else {
-    monthSelect.value = String(now.getMonth() + 1);
-  }
-
-  if (storedYear && [...yearSelect.options].some((opt) => opt.value === storedYear)) {
-    yearSelect.value = storedYear;
-  } else {
-    yearSelect.value = String(now.getFullYear());
-  }
-
-  if (storedPeriod && [...periodSelect.options].some((opt) => opt.value === storedPeriod)) {
-    periodSelect.value = storedPeriod;
-  } else {
-    periodSelect.value = "monthly";
-  }
+  // The global period is session state. Restoring it after a reload can make
+  // the whole app appear to be in a stale accounting period.
+  localStorage.removeItem("selectedMonth");
+  localStorage.removeItem("selectedYear");
+  localStorage.removeItem("selectedPeriod");
+  monthSelect.value = String(now.getMonth() + 1);
+  yearSelect.value = String(now.getFullYear());
+  periodSelect.value = "monthly";
 
   const storedCompany = localStorage.getItem("selectedCompanyId");
   if (storedCompany) {
